@@ -14,7 +14,7 @@ from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import DataTable, Input, Static, Tree
 
-from .modals import GigBuddyModal, ModalBox
+from .modals import ClickSelectTree, GigBuddyModal, ModalBox
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
@@ -125,7 +125,7 @@ class PresetPickerScreen(GigBuddyModal):
             yield Static(
                 "↑↓ browse · Enter load · Esc cancel · ctrl+s saves the current chain",
                 classes="modal-hint")
-            tree = Tree("Presets", id="preset-tree")
+            tree = ClickSelectTree("Presets", id="preset-tree")
             tree.show_root = False
             yield tree
             yield Static("", id="preset-detail")

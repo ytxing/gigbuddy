@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import Input, Static, Tree
 
-from .modals import GigBuddyModal, ModalBox
+from .modals import ClickSelectTree, GigBuddyModal, ModalBox
 from .metadata import metadata_table
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -33,9 +33,9 @@ class PickerSearchInput(Input):
         self.screen.query_one("#pick-tree", Tree).focus()
 
 
-class PickerTree(Tree):
+class PickerTree(ClickSelectTree):
     BINDINGS = [
-        *Tree.BINDINGS,
+        *ClickSelectTree.BINDINGS,
         Binding("left", "collapse_or_parent", "back", show=False, priority=True),
         Binding("right", "expand_or_child", "open", show=False, priority=True),
     ]

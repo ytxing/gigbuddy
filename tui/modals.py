@@ -15,6 +15,28 @@ not on GigBuddyModal — subclasses just compose `with ModalBox():`.
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
+from textual.widgets import Tree
+
+
+class ClickSelectTree(Tree):
+    """Tree where a single click only moves the cursor (focus) and a double
+    click selects — Textual's Tree fires NodeSelected on a single click, which
+    clashes with the app-wide single-click-focus / double-click-act rule."""
+
+    async def _on_click(self, event) -> None:
+        async with self.lock:
+            meta = event.style.meta
+            if "line" not in meta:
+                return
+            cursor_line = meta["line"]
+            if meta.get("toggle", False):
+                node = self.get_node_at_line(cursor_line)
+                if node is not None:
+                    self._toggle_node(node)
+            else:
+                self.cursor_line = cursor_line
+                if getattr(event, "chain", 1) >= 2:
+                    await self.run_action("select_cursor")
 
 
 class ModalBox(Vertical):
