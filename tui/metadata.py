@@ -22,8 +22,13 @@ def _compact_path(value: str | None, limit: int = 76) -> str:
 
 
 def metadata_table(tone: dict | None = None, model: dict | None = None,
-                   *, note: str | None = None) -> Table:
-    """Build one consistent, non-focusable metadata table for TUI detail panes."""
+                   *, note: str | None = None,
+                   skip_title: bool = False) -> Table:
+    """Build one consistent, non-focusable metadata table for TUI detail panes.
+
+    skip_title: the DetailPane renders the tone title as its own frozen header,
+    so the table omits the duplicate "Tone" row in that case.
+    """
     tone = tone or {}
     table = Table(
         box=box.SIMPLE_HEAD,
@@ -60,7 +65,8 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
 
     if tone:
         tone_id = tone.get("tone_id", tone.get("id"))
-        row("IDENTITY", "Tone", tone.get("title"))
+        if not skip_title:
+            row("IDENTITY", "Tone", tone.get("title"))
         row("IDENTITY", "Tone ID", tone_id)
         author = tone.get("username")
         if author:

@@ -133,14 +133,12 @@ class ChainPanel(Vertical):
             with Horizontal(classes="chain-switch-col"):
                 yield NodeSwitchButton("amp", +1)  # ▲ prev
                 yield NodeSwitchButton("amp", -1)  # ▼ next
-        yield Static("┊", classes="chain-connector")
         with Horizontal(classes="chain-node-row chain-node-row-ir"):
             self.ir = NodeWidget("IR", "bypass")
             yield self.ir
             with Horizontal(classes="chain-switch-col"):
                 yield NodeSwitchButton("ir", +1)
                 yield NodeSwitchButton("ir", -1)
-        yield Static("┊", classes="chain-connector")
         for _key, label, hint in live.CHAIN_ORDER[2:]:
             yield Static(
                 f" [dim]○[/] [bold]{label:6s}[/] [dim]{hint}[/]",
@@ -179,39 +177,59 @@ class ChainPanel(Vertical):
         node.set_label(live.short_name(path))
 
 
-class DetailPane(VerticalScroll):
-    """Full metadata of the tone selected in the library (from the SQLite DB)."""
+class DetailPane(Vertical):
+    """Full metadata of the tone selected in the library (from the SQLite DB).
+
+    The tone title is a frozen bold header above a scrollable body — scrolling
+    the metadata never hides the title.
+    """
+
+    DEFAULT_CSS = """
+    DetailPane #detail-title {
+        height: 1; padding: 0 1; margin-bottom: 1;
+        color: $accent; text-style: bold;
+        border-bottom: solid $surface-lighten-2;
+    }
+    DetailPane #detail-scroll { height: 1fr; }
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.border_title = "TONE DETAIL"
+        self._title: Static = Static("", id="detail-title")
         self._body: Static = Static(
             "[dim]Select a tone in the library to see its full metadata here.[/dim]")
 
     def compose(self) -> ComposeResult:
         self._marquee = MarqueeBar(id="detail-marquee")
         yield self._marquee
-        yield self._body
+        yield self._title
+        with VerticalScroll(id="detail-scroll"):
+            yield self._body
 
     def show(self, t: dict) -> None:
         """Render a library.get_tone() row as a semantic metadata table."""
         self._marquee.content = t.get("title")
-        self._body.update(metadata_table(t))
+        self._title.update(f"[b]{_escape(t.get('title') or '')}[/]")
+        self._body.update(metadata_table(t, skip_title=True))
 
     def show_model(self, tone: dict | None, model: dict) -> None:
         """Render a chain node's current model: FILE section (name/id/arch/path)
         on top of its owning tone, matching the chain-folder stepping view."""
         self._marquee.content = (tone or {}).get("title")
-        self._body.update(metadata_table(tone, model))
+        self._title.update(f"[b]{_escape((tone or {}).get('title') or '')}[/]")
+        self._body.update(metadata_table(tone, model, skip_title=True))
 
     def show_text(self, text: str) -> None:
         """Render plain (rich-markup) text, e.g. a preset chain summary."""
         self._marquee.content = None
+        self._title.update("")
         self._body.update(text)
 
     def clear(self) -> None:
         """Clear stale metadata when the table has no highlighted tone."""
         self._marquee.content = None
+        self._title.update("")
         self._body.update(
             "[dim]Move the library cursor onto a tone to see its metadata here.[/dim]")
 

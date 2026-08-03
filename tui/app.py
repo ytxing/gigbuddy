@@ -112,7 +112,7 @@ class GigBuddyApp(App):
     #right-col { width: 2fr; layout: vertical; }
     ChainPanel { height: 1fr; min-height: 18; }
     ChainPanel .chain-node-row {
-        height: 4; width: 100%;
+        height: 5; width: 100%;
         background: $panel;
         border: round $surface-lighten-2;
     }
@@ -128,7 +128,7 @@ class GigBuddyApp(App):
         background: $panel-lighten-1;
     }
     ChainPanel .chain-switch-col {
-        width: 10; height: 4;
+        width: 10; height: 5;
         layout: vertical;
         align: center middle;
         padding: 0 1;
@@ -141,9 +141,6 @@ class GigBuddyApp(App):
     }
     ChainPanel .chain-switch-btn:hover {
         background: $accent; color: $background;
-    }
-    ChainPanel .chain-connector {
-        height: 1; padding-left: 8; color: $text-disabled;
     }
     ChainPanel .chain-effect {
         height: 1; padding: 0 1 0 2; color: $text-muted;
@@ -190,9 +187,12 @@ class GigBuddyApp(App):
     Input:focus, Select:focus { border: round $accent; }
     Input > .input--placeholder { color: $text-disabled; }
 
-    /* tabs: auto-height boxes (fixed height + border clips the label);
-       active tab gets an accent border, hover a soft fill */
+    /* tabs: Textual's built-in Tabs{height:2} + Tab{height:1} leave zero content
+       rows under a round border (labels vanish) and clip the bottom border —
+       both overridden here to height:3 (border 2 + label 1) */
+    TabbedContent > ContentTabs { height: 3; }
     TabbedContent Tab {
+        height: 3;
         padding: 0 2; margin: 0 1 0 0;
         color: $text-muted; text-style: none;
         border: round $surface-lighten-2;

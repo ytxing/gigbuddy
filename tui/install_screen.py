@@ -3,6 +3,7 @@ to install (space per-row, a = all/none), Enter installs, completion is reported
 back to the app (toast + library refresh).
 
 Remote search rows now open this screen instead of importing everything blindly.
+The tone's full metadata sits beside the file list for comparison.
 """
 import asyncio
 import sys
@@ -10,11 +11,12 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import DataTable, ProgressBar, Static
 
 from .marquee import MarqueeBar
+from .metadata import metadata_table
 from .modals import GigBuddyModal, ModalBox
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -23,6 +25,12 @@ if str(SRC) not in sys.path:
 
 import library  # noqa: E402
 import tone3000  # noqa: E402
+
+
+def _escape(text: str) -> str:
+    """Escape EVERY '[' for Textual markup — rich.markup.escape lets through
+    tag-shaped brackets like '[Hi Gain]' which swallow the text."""
+    return text.replace("[", "\\[")
 
 
 class PackInstallScreen(GigBuddyModal):
@@ -34,7 +42,11 @@ class PackInstallScreen(GigBuddyModal):
     ]
 
     CSS = """
-    PackInstallScreen > ModalBox { width: 85%; height: 85%; margin: 3 7; }
+    PackInstallScreen > ModalBox { width: 96%; height: 92%; margin: 1 2; }
+    #pack-split { height: 1fr; }
+    #pack-left { width: 3fr; layout: vertical; }
+    #pack-right { width: 2fr; border-left: solid $primary; }
+    #pack-right > VerticalScroll { height: 1fr; }
     #pack-header { height: 3; padding: 0 1; color: $text; }
     #pack-table { height: 1fr; }
     #pack-status { height: 2; padding: 0 1; color: $text-muted; }
@@ -59,18 +71,23 @@ class PackInstallScreen(GigBuddyModal):
         box.border_title = "INSTALL PACK"
         box.border_subtitle = "space select · a all/none · Enter install · Esc cancel"
         with box:
-            yield Static(
-                f"[b]{t.get('title')}[/b]  [dim]@{t.get('username')} · "
-                f"{t.get('gear')} · dl {t.get('downloads_count')}[/dim]",
-                id="pack-header")
-            yield MarqueeBar(id="pack-marquee")
-            table = DataTable(id="pack-table", cursor_type="row")
-            table.add_column("✓", key="pick", width=3)
-            table.add_column("Model file", key="name")
-            table.add_column("Architecture", key="arch", width=16)
-            yield table
-            yield Static("Loading pack contents…", id="pack-status")
-            yield ProgressBar(total=1, show_eta=False, id="pack-progress")
+            with Horizontal(id="pack-split"):
+                with Vertical(id="pack-left"):
+                    yield Static(
+                        f"[b]{_escape(t.get('title') or '')}[/b]  [dim]@{t.get('username')} · "
+                        f"{t.get('gear')} · dl {t.get('downloads_count')}[/dim]",
+                        id="pack-header")
+                    yield MarqueeBar(id="pack-marquee")
+                    table = DataTable(id="pack-table", cursor_type="row")
+                    table.add_column("✓", key="pick", width=3)
+                    table.add_column("Model file", key="name")
+                    table.add_column("Architecture", key="arch", width=16)
+                    yield table
+                    yield Static("Loading pack contents…", id="pack-status")
+                    yield ProgressBar(total=1, show_eta=False, id="pack-progress")
+                with VerticalScroll(id="pack-detail-scroll"):
+                    # tone metadata side-by-side for comparison while picking
+                    yield Static(metadata_table(self._tone), id="pack-detail")
 
     def on_mount(self) -> None:
         self.query_one("#pack-progress", ProgressBar).display = False

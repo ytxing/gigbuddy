@@ -85,9 +85,12 @@ def test_cursor_highlight_updates_detail_without_opening_action(monkeypatch):
     )
 
     def detail_text(app):
-        detail = app.query_one("DetailPane")._body.content
-        return " ".join(
-            str(cell) for column in detail.columns for cell in column.cells)
+        # the title lives in the frozen header now, the fields in the table
+        pane = app.query_one("DetailPane")
+        title = str(pane._title.content)
+        body = " ".join(
+            str(cell) for column in pane._body.content.columns for cell in column.cells)
+        return f"{title} {body}"
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -149,9 +152,12 @@ def test_remote_cursor_highlight_updates_detail_without_import(monkeypatch):
     )
 
     def detail_text(app):
-        detail = app.query_one("DetailPane")._body.content
-        return " ".join(
-            str(cell) for column in detail.columns for cell in column.cells)
+        # the title lives in the frozen header now, the fields in the table
+        pane = app.query_one("DetailPane")
+        title = str(pane._title.content)
+        body = " ".join(
+            str(cell) for column in pane._body.content.columns for cell in column.cells)
+        return f"{title} {body}"
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -184,9 +190,12 @@ def test_search_failure_clears_previous_detail(monkeypatch):
     )
 
     def detail_text(app):
-        detail = app.query_one("DetailPane")._body.content
-        return " ".join(
-            str(cell) for column in detail.columns for cell in column.cells)
+        # the title lives in the frozen header now, the fields in the table
+        pane = app.query_one("DetailPane")
+        title = str(pane._title.content)
+        body = " ".join(
+            str(cell) for column in pane._body.content.columns for cell in column.cells)
+        return f"{title} {body}"
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -540,8 +549,9 @@ def test_click_node_row_shows_tone_detail(monkeypatch, tmp_path):
             Console(file=buf, width=100).print(
                 app.query_one(DetailPane)._body.content)
             body = buf.getvalue()
+            title = str(app.query_one(DetailPane)._title.content)
             assert "MV5 G1.nam" in body      # FILE section: the model
-            assert "JCM800" in body          # owning tone
+            assert "JCM800" in title         # owning tone (frozen header)
 
     run(scenario())
 

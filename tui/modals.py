@@ -18,13 +18,17 @@ from textual.screen import ModalScreen
 
 
 class ModalBox(Vertical):
-    """Shared modal container: warm surface, amber rounded border, padded."""
+    """Shared modal container: warm panel, amber rounded border, padded.
+
+    "Floating" look: the screen behind is dimmed (GigBuddyModal) and the box
+    uses a lighter surface + bright accent border so it reads as raised.
+    """
 
     DEFAULT_CSS = """
     ModalBox {
-        background: $surface;
-        border: round $primary;
-        border-title-color: $primary;
+        background: $panel;
+        border: round $accent;
+        border-title-color: $accent;
         border-subtitle-color: $text-muted;
         padding: 1 2;
     }
@@ -36,6 +40,14 @@ class ModalBox(Vertical):
 
 
 class GigBuddyModal(ModalScreen):
+    """Base modal: dims the background so the box appears to float above it."""
+
+    DEFAULT_CSS = """
+    GigBuddyModal {
+        background: rgba(0, 0, 0, 0.55);
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "cancel", "close"),
         Binding("enter", "confirm", "confirm"),
