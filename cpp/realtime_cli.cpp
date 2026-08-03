@@ -439,6 +439,7 @@ int main(int argc, char** argv) {
             else sr = atoi(argv[i]);
         }
     }
+    PaStream* stream = nullptr;
     PaError err = Pa_Initialize();
     if (err != paNoError) { fprintf(stderr, "PortAudio 初始化失败: %s\n", Pa_GetErrorText(err)); return 1; }
     const int devCount = Pa_GetDeviceCount();
@@ -462,13 +463,19 @@ int main(int argc, char** argv) {
     ctx.inputGain.store(gainArg);
     ctx.master.store(masterArg);
 
+    // 统一错误退出：任何失败路径都 finalize 录制文件、关 stream、Terminate
+    auto fail = [&](const char* msg, const char* detail = "") -> int {
+        fprintf(stderr, "%s%s%s\n", msg, detail[0] ? ": " : "", detail);
+        if (stream) { Pa_StopStream(stream); Pa_CloseStream(stream); }
+        Pa_Terminate();
+        if (ctx.wavOut) { ctx.wavOut->finish(); delete ctx.wavOut; }
+        return 1;
+    };
+
     // 旁路录制输出（可选）：启动后回调线程只读 wavOut 指针
     if (recordOut) {
         auto w = std::make_unique<WavOutput>();
-        if (!w->open(recordOut, sr)) {
-            fprintf(stderr, "录制文件打开失败: %s\n", recordOut);
-            Pa_Terminate(); return 1;
-        }
+        if (!w->open(recordOut, sr)) return fail("录制文件打开失败", recordOut);
         ctx.wavOut = w.release();
         fprintf(stderr, "旁路录制: %s\n", recordOut);
     }
@@ -478,16 +485,12 @@ int main(int argc, char** argv) {
         try {
             apply_chain(nlohmann::json::parse(std::ifstream(livePath)), loader, ctx, sr);
         } catch (const std::exception& e) {
-            fprintf(stderr, "live 配置解析失败: %s\n", e.what());
-            Pa_Terminate(); return 1;
+            return fail("live 配置解析失败", e.what());
         }
-        if (!std::atomic_load(&ctx.model)) {
-            fprintf(stderr, "live 配置缺少有效 model 字段\n");
-            Pa_Terminate(); return 1;
-        }
+        if (!std::atomic_load(&ctx.model)) return fail("live 配置缺少有效 model 字段");
     } else {
         auto model = std::shared_ptr<NeuralAudio::NeuralModel>(loader.CreateFromFile(modelPath));
-        if (!model) { fprintf(stderr, "模型加载失败: %s\n", modelPath); return 1; }
+        if (!model) return fail("模型加载失败", modelPath);
         std::atomic_store(&ctx.model, model);
         if (irPath) {
             auto f = make_ir(irPath, sr);
@@ -501,15 +504,13 @@ int main(int argc, char** argv) {
     int outDev = Pa_GetDefaultOutputDevice();
     if (inName) {
         inDev = find_device(devCount, true, inName);
-        if (inDev < 0) { fprintf(stderr, "找不到输入设备: %s（--list 查看）\n", inName); Pa_Terminate(); return 1; }
+        if (inDev < 0) return fail("找不到输入设备（--list 查看）", inName);
     }
     if (outName) {
         outDev = find_device(devCount, false, outName);
-        if (outDev < 0) { fprintf(stderr, "找不到输出设备: %s（--list 查看）\n", outName); Pa_Terminate(); return 1; }
+        if (outDev < 0) return fail("找不到输出设备（--list 查看）", outName);
     }
-    if (inDev < 0 || outDev < 0) {
-        fprintf(stderr, "无可用输入/输出设备（--list 查看）\n"); Pa_Terminate(); return 1;
-    }
+    if (inDev < 0 || outDev < 0) return fail("无可用输入/输出设备（--list 查看）");
 
     PaStreamParameters inParams, outParams;
     memset(&inParams, 0, sizeof(inParams));
@@ -527,14 +528,12 @@ int main(int argc, char** argv) {
     outParams.sampleFormat = paFloat32;
     outParams.suggestedLatency = Pa_GetDeviceInfo(outDev)->defaultLowOutputLatency;
 
-    PaStream* stream = nullptr;
     err = Pa_OpenStream(&stream, &inParams, &outParams, sr, block, paNoFlag, pa_callback, &ctx);
-    if (err != paNoError) {
-        fprintf(stderr, "打开设备失败（检查麦克风权限/设备占用）: %s\n", Pa_GetErrorText(err));
-        Pa_Terminate(); return 1;
-    }
+    if (err != paNoError)
+        return fail("打开设备失败（检查麦克风权限/设备占用）", Pa_GetErrorText(err));
     err = Pa_StartStream(stream);
-    if (err != paNoError) { fprintf(stderr, "启动流失败: %s\n", Pa_GetErrorText(err)); return 1; }
+    if (err != paNoError)
+        return fail("启动流失败", Pa_GetErrorText(err));
     fprintf(stderr, "实时运行中: %s @ %dHz, block=%d, 理论延迟≈%.1fms — Ctrl+C 退出\n",
             modelPath, sr, block, block * 1000.0 / sr);
     fprintf(stderr, "输入: %s  →  输出: %s\n",

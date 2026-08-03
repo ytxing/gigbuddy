@@ -337,16 +337,33 @@ class GigBuddyApp(App):
         self.notify(f"Theme: {self.theme}")
 
     def on_mount(self) -> None:
-        self._start_engine()
+        self._ensure_engine()
         self.set_interval(0.1, self.refresh_from_files)
         self.query_one("#lib-table-local").focus()
         self.run_worker(self._load_devices(), name="devices")
 
+    def _ensure_engine(self) -> None:
+        """Spawn (or restart) the engine when the chain has a valid model and no
+        engine is running. Without this a fresh chain-less boot would spawn the
+        engine into an immediate silent exit (realtime_cli --live requires a
+        model) — the user gets a hint instead, and picking a tone later starts
+        audio. Also recovers from engine crashes via the 0.1s tick."""
+        if not self._spawn_engine:
+            return
+        if self._engine is not None and self._engine.poll() is None:
+            return
+        cfg = live.read_chain()
+        model_path = cfg.get("model") or ""
+        if not model_path or not Path(model_path).exists():
+            if self._engine is not None:
+                self.notify("Engine stopped — pick a tone to restart audio",
+                            severity="warning")
+            return
+        self._start_engine()
+
     def _start_engine(self) -> None:
         """Spawn realtime_cli as a child; it hot-swaps via live_chain.json and feeds
         level.json back. Killed on TUI exit. Use --no-engine if running it externally."""
-        if not self._spawn_engine:
-            return
         root = Path(__file__).resolve().parent.parent
         cmd = [str(root / "bin" / "realtime_cli"),
                "--live", str(live.CHAIN_FILE), "--level-file", str(live.LEVEL_FILE)]
@@ -451,6 +468,7 @@ class GigBuddyApp(App):
             preset_panel = self.query_one(PresetPanel)
         except NoMatches:
             return
+        self._ensure_engine()   # restart after crash / start after picking a tone
         meter.levels = live.read_levels()
         chain.chain = live.read_chain()
         library_panel.check_active_tab()
