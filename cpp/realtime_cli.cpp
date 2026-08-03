@@ -15,6 +15,7 @@
 #include "json.hpp"
 #include <portaudio.h>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Ctrl+C 优雅退出：主循环检查后走正常收尾（录制文件 finalize、流关闭）
@@ -70,11 +72,12 @@ static constexpr int FADE_HALF = 256;
 class WavOutput {
 public:
     bool open(const std::string& path, int sr);
-    void write(const float* mono, int frames);   // 音频线程调用（块级 fwrite，安全）
+    void write(const float* mono, int frames);   // 音频线程调用（分块 fwrite，安全）
     void finish();                                // 主线程收尾：回填 WAV header
 private:
     FILE* f = nullptr;
     uint32_t nSamples = 0;
+    int sampleRate = 48000;
 };
 
 struct Ctx {
@@ -83,9 +86,12 @@ struct Ctx {
     std::shared_ptr<FirFilter> fir;
     std::atomic<float> inputGain{1.0f};   // 输入增益（模型前）
     std::atomic<float> master{1.0f};      // 输出音量（模型后）
-    // 去咔哒状态机（fadeState 主线程写、回调读；fadePos 仅回调线程私有）：
-    //   0=无 1=淡出（热切换瞬间，线性 1→0） 2=淡入（0→1），全程 ~FADE_HALF*2 采样
+    // 去咔哒状态机（fadeState/fadeReady 主线程与回调协作；fadePos 仅回调私有）：
+    //   fadeState: 0=无 1=淡出(1→0) 2=淡入(0→1)；主线程只发 1，回调推进
+    //   fadeReady: 1=已到静音点（回调置位）——主线程据此等待后再交换，
+    //               保证旧输出先被淡出到 0，交换发生在静音处，新输出从 0 淡入
     std::atomic<int> fadeState{0};
+    std::atomic<int> fadeReady{0};
     int fadePos = FADE_HALF;
     // 旁路录制端：启动后不变（回调线程只读指针，安全），nullptr 表示不录制
     WavOutput* wavOut = nullptr;
@@ -120,18 +126,30 @@ static std::shared_ptr<FirFilter> make_ir(const std::string& path, int sr) {
     return f;
 }
 
+// 请求去咔哒并等待静音点：回调淡出旧输出到 0 后置 fadeReady，主线程等它
+// 再交换，保证交换发生在静音处（超时 50ms 降级：直接交换，宁可有小咔哒不卡主线程）
+static void request_fade_and_wait(Ctx& c) {
+    c.fadeReady.store(0, std::memory_order_relaxed);
+    c.fadeState.store(1, std::memory_order_relaxed);
+    auto start = std::chrono::steady_clock::now();
+    while (c.fadeReady.load(std::memory_order_relaxed) == 0) {
+        if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(50))
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 // live 热切换：按配置更新 model/ir/gain/master/quality（有变化才重载，加载失败保留旧值）
 static void apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader& loader,
                         Ctx& ctx, int sr) {
     if (j.contains("model") && j["model"].is_string()) {
         std::string p = j["model"].get<std::string>();
         if (p != ctx.liveModelPath) {
-            ctx.liveModelPath = p;
             auto nm = std::shared_ptr<NeuralAudio::NeuralModel>(loader.CreateFromFile(p));
             if (nm) {
-                // 先请求去咔哒（回调淡出旧输出），再原子交换：淡出窗内无论新模型是否已就位都平滑
-                ctx.fadeState.store(1, std::memory_order_relaxed);
-                std::atomic_store(&ctx.model, nm);
+                request_fade_and_wait(ctx);        // 淡出旧输出到静音点
+                std::atomic_store(&ctx.model, nm); // 静音处交换
+                ctx.liveModelPath = p;             // 成功才记录（失败保留旧值可重试）
                 ctx.liveQuality = 1.0f; fprintf(stderr, "[live] 模型 -> %s\n", p.c_str());
             }
             else fprintf(stderr, "[live] 模型加载失败: %s\n", p.c_str());
@@ -151,13 +169,21 @@ static void apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
     if (j.contains("ir")) {
         std::string p = j["ir"].is_null() ? "" : j["ir"].get<std::string>();
         if (p != ctx.liveIrPath) {
-            ctx.liveIrPath = p;
-            // IR 增删都会重置 FIR 状态 → 同样需要去咔哒
-            ctx.fadeState.store(1, std::memory_order_relaxed);
-            if (p.empty()) { std::atomic_store(&ctx.fir, std::shared_ptr<FirFilter>()); fprintf(stderr, "[live] IR 移除\n"); }
-            else {
+            if (p.empty()) {
+                request_fade_and_wait(ctx);  // 淡出旧输出 → 静音点再移除 FIR
+                std::atomic_store(&ctx.fir, std::shared_ptr<FirFilter>());
+                ctx.liveIrPath = p;
+                fprintf(stderr, "[live] IR 移除\n");
+            } else {
+                // 慢加载（IR 重采样可能几百 ms）在 fade 请求之前，否则淡出窗
+                // 早于交换结束 → 突跳无衰减
                 auto f = make_ir(p, sr);
-                if (f) { std::atomic_store(&ctx.fir, f); fprintf(stderr, "[live] IR -> %s\n", p.c_str()); }
+                if (f) {
+                    request_fade_and_wait(ctx);
+                    std::atomic_store(&ctx.fir, f);
+                    ctx.liveIrPath = p;
+                    fprintf(stderr, "[live] IR -> %s\n", p.c_str());
+                }
                 else fprintf(stderr, "[live] IR 读取失败: %s\n", p.c_str());
             }
         }
@@ -172,16 +198,31 @@ static float block_peak(const float* buf, int n) {
     return p;
 }
 
-// 去咔哒：线性淡出(1→0)→淡入(0→1)。fadePos 回调线程私有；fadeState 由主线程置 1 触发
+// 去咔哒：线性淡出(1→0)→淡入(0→1)。fadePos 回调线程私有；fadeState 主线程只发 1。
+// 淡出完成处置 fadeReady（静音点，主线程等它交换）；淡入完成处 CAS——若主线程
+// 在淡入期间又发请求（fadeState 被改回 1），CAS 失败则立即重新淡出，不丢更新。
 static void apply_fade(float* out, int frames, Ctx& c) {
     int st = c.fadeState.load(std::memory_order_relaxed);
     if (st == 0) return;
     for (int i = 0; i < frames; i++) {
         out[i] *= (float)c.fadePos / FADE_HALF;
         if (st == 1) {
-            if (--c.fadePos <= 0) { c.fadePos = 0; st = 2; c.fadeState.store(2, std::memory_order_relaxed); }
-        } else if (++c.fadePos >= FADE_HALF) {
-            c.fadePos = FADE_HALF; st = 0; c.fadeState.store(0, std::memory_order_relaxed);
+            if (--c.fadePos <= 0) {
+                c.fadePos = 0;
+                st = 2;
+                c.fadeState.store(2, std::memory_order_relaxed);
+                c.fadeReady.store(1, std::memory_order_relaxed);  // 静音点：主线程可交换
+            }
+        } else {
+            if (++c.fadePos >= FADE_HALF) {
+                c.fadePos = FADE_HALF;
+                int expected = 2;
+                if (c.fadeState.compare_exchange_strong(expected, 0)) {
+                    st = 0;  // 淡入完成，无新请求
+                } else {
+                    st = 1;  // 主线程已发新请求 → 立即重新淡出
+                }
+            }
         }
     }
 }
@@ -254,6 +295,7 @@ bool WavOutput::open(const std::string& path, int sr) {
     f = fopen(path.c_str(), "wb");
     if (!f) return false;
     nSamples = 0;
+    sampleRate = sr;
     // RIFF header 占位（dataSize 在 finish 时回填）
     uint32_t dummy = 0;
     fwrite("RIFF", 1, 4, f); fwrite(&dummy, 4, 1, f);
@@ -272,12 +314,19 @@ bool WavOutput::open(const std::string& path, int sr) {
 
 void WavOutput::write(const float* mono, int frames) {
     if (!f) return;
-    for (int i = 0; i < frames; i++) {
-        float v = mono[i];
-        if (v > 1.0f) v = 1.0f; else if (v < -1.0f) v = -1.0f;
-        int16_t s = (int16_t)(v * 32767.0f);
-        fwrite(&s, 2, 1, f);
-        nSamples++;
+    // 16-bit 转换后分块写：减少音频回调内的 fwrite 调用（stdio 缓冲 + 块级写入）
+    constexpr int BLOCK = 256;
+    int16_t buf[BLOCK];
+    for (int i = 0; i < frames; ) {
+        int n = frames - i < BLOCK ? frames - i : BLOCK;
+        for (int j = 0; j < n; j++) {
+            float v = mono[i + j];
+            if (v > 1.0f) v = 1.0f; else if (v < -1.0f) v = -1.0f;
+            buf[j] = (int16_t)(v * 32767.0f);
+        }
+        fwrite(buf, 2, (size_t)n, f);
+        i += n;
+        nSamples += (uint32_t)n;
     }
 }
 
@@ -285,13 +334,14 @@ void WavOutput::finish() {
     if (!f) return;
     uint32_t dataBytes = nSamples * 2;
     fseek(f, 4, SEEK_SET);
-    fwrite(&dataBytes, 4, 1, f);               // chunkSize
+    uint32_t chunkSize = dataBytes + 36;       // RIFF chunkSize = data + 36
+    fwrite(&chunkSize, 4, 1, f);
     fseek(f, 40, SEEK_SET);
     fwrite(&dataBytes, 4, 1, f);               // dataSize
     fclose(f);
     f = nullptr;
     fprintf(stderr, "[record] 已保存 %u 帧（%.1f 秒）到录制文件\n",
-            nSamples, nSamples / 48000.0);
+            nSamples, (double)nSamples / sampleRate);
 }
 
 // ---- 最小 WAV 读取（复用 nam_cli 逻辑，IR 用）----

@@ -14,8 +14,47 @@ not on GigBuddyModal — subclasses just compose `with ModalBox():`.
 """
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
-from textual.widgets import Tree
+from textual.widgets import DataTable, Tree
+
+
+class ClickSelectTable(DataTable):
+    """DataTable where a single click only moves the cursor; selection comes
+    from Enter or double-click. Textual's DataTable posts RowSelected on a
+    single click when the clicked row is already the cursor row (highlight
+    click), which both breaks single-click-focus and double-fires on a real
+    double-click (base RowSelected + our chain>=2 action)."""
+
+    async def _on_click(self, event) -> None:
+        self._set_hover_cursor(True)
+        meta = event.style.meta
+        if "row" not in meta or "column" not in meta:
+            return
+        if self.cursor_type != "row" and meta.get("out_of_bounds", False):
+            return
+        row_index = meta["row"]
+        column_index = meta["column"]
+        is_header_click = self.show_header and row_index == -1
+        is_row_label_click = self.show_row_labels and column_index == -1
+        if is_header_click:
+            column = self.ordered_columns[column_index]
+            self.post_message(DataTable.HeaderSelected(
+                self, column.key, column_index, label=column.label))
+        elif is_row_label_click:
+            row = self.ordered_rows[row_index]
+            self.post_message(DataTable.RowLabelSelected(
+                self, row.key, row_index, label=row.label))
+        elif self.show_cursor and self.cursor_type != "none":
+            # move the cursor only — no RowSelected on a highlight click.
+            # prevent_default() is required: Textual dispatches handlers down
+            # the whole MRO, so without it the base DataTable._on_click still
+            # posts RowSelected for a highlight click (and double-fires on a
+            # real double-click).
+            self.cursor_coordinate = Coordinate(row_index, column_index)
+            self._scroll_cursor_into_view(animate=True)
+            event.prevent_default()
+            event.stop()
 
 
 class ClickSelectTree(Tree):
@@ -35,6 +74,9 @@ class ClickSelectTree(Tree):
                     self._toggle_node(node)
             else:
                 self.cursor_line = cursor_line
+                # prevent base Tree._on_click from selecting on single click
+                # (MRO dispatch runs every handler, not just the most derived)
+                event.prevent_default()
                 if getattr(event, "chain", 1) >= 2:
                     await self.run_action("select_cursor")
 

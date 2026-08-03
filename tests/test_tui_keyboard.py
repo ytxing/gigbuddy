@@ -28,6 +28,39 @@ async def goto_tone_tab(app, pilot):
     await pilot.pause(0.3)
 
 
+def test_single_click_focuses_double_click_selects_once(monkeypatch):
+    """A single click on the already-focused row must NOT select (Textual's
+    DataTable posts RowSelected on highlight clicks); a double click opens the
+    picker exactly once (base + chain>=2 double-fire regression)."""
+    tone = {"id": 10, "title": "Plexi", "gear": "amp", "username": "alice",
+            "downloads_count": 1, "models": []}
+    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: [tone])
+    monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: tone)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            table = app.query_one("#lib-table-local")
+            # row 0 sits under the header → offset y=1; separate clicks by
+            # >500ms so each is its own single click (Textual chain window)
+            await pilot.click(table, offset=(3, 1))
+            await pilot.pause(0.6)
+            assert len(app.screen_stack) == 1
+            # clicking the already-focused row must not open anything
+            await pilot.click(table, offset=(3, 1))
+            await pilot.pause(0.6)
+            assert len(app.screen_stack) == 1, "highlight click must not select"
+            # real double click (pilot's times=2 builds the click chain)
+            await pilot.click(table, offset=(3, 1), times=2)
+            await pilot.pause(0.4)
+            pickers = [s for s in app.screen_stack
+                       if isinstance(s, TonePickerScreen)]
+            assert len(pickers) == 1, f"double click must push ONE picker, got {len(pickers)}"
+
+    run(scenario())
+
+
 def test_main_screen_keeps_chain_read_only_and_opens_tone_picker(monkeypatch):
     tone = {
         "id": 10, "title": "Plexi", "gear": "amp", "username": "alice",
@@ -578,9 +611,10 @@ def test_click_switch_buttons_step_models(monkeypatch, tmp_path):
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            # clicks hit the switch column container; bottom half = ▼ (down)
+            # two-row switch column: ▲ on the title line (offset 0),
+            # ▼ on the filename line (offset 1)
             col = app.query_one("#chain-amp-down").parent
-            await pilot.click(col, offset=(5, 3))  # ▼ → amp_b
+            await pilot.click(col, offset=(5, 1))  # ▼ → amp_b
             await pilot.pause()
             assert written["model"] == amp_b["local_path"]
 

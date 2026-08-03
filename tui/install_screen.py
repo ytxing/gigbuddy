@@ -17,7 +17,7 @@ from textual.widgets import DataTable, ProgressBar, Static
 
 from .marquee import MarqueeBar
 from .metadata import metadata_table
-from .modals import GigBuddyModal, ModalBox
+from .modals import ClickSelectTable, GigBuddyModal, ModalBox
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
@@ -46,7 +46,6 @@ class PackInstallScreen(GigBuddyModal):
     #pack-split { height: 1fr; }
     #pack-left { width: 3fr; layout: vertical; }
     #pack-right { width: 2fr; border-left: solid $primary; }
-    #pack-right > VerticalScroll { height: 1fr; }
     #pack-header { height: 3; padding: 0 1; color: $text; }
     #pack-table { height: 1fr; }
     #pack-status { height: 2; padding: 0 1; color: $text-muted; }
@@ -78,14 +77,14 @@ class PackInstallScreen(GigBuddyModal):
                         f"{t.get('gear')} · dl {t.get('downloads_count')}[/dim]",
                         id="pack-header")
                     yield MarqueeBar(id="pack-marquee")
-                    table = DataTable(id="pack-table", cursor_type="row")
+                    table = ClickSelectTable(id="pack-table", cursor_type="row")
                     table.add_column("✓", key="pick", width=3)
                     table.add_column("Model file", key="name")
                     table.add_column("Architecture", key="arch", width=16)
                     yield table
                     yield Static("Loading pack contents…", id="pack-status")
                     yield ProgressBar(total=1, show_eta=False, id="pack-progress")
-                with VerticalScroll(id="pack-detail-scroll"):
+                with VerticalScroll(id="pack-right"):
                     # tone metadata side-by-side for comparison while picking
                     yield Static(metadata_table(self._tone), id="pack-detail")
 
@@ -185,10 +184,13 @@ class PackInstallScreen(GigBuddyModal):
         self._confirm()
 
     def on_click(self, event) -> None:
-        """Single click focuses; double click confirms the selection (like Enter)."""
-        if getattr(event, "chain", 1) >= 2:
-            event.stop()
-            self._confirm()
+        """Single click focuses; double click on the file table confirms the
+        selection (like Enter). Clicks outside the table never install."""
+        if getattr(event, "chain", 1) >= 2 and event.screen_x is not None:
+            table = self.query_one("#pack-table", ClickSelectTable)
+            if table.region.contains(event.screen_x, event.screen_y):
+                event.stop()
+                self._confirm()
 
     def _confirm(self) -> None:
         """Enter: install the selected model files."""

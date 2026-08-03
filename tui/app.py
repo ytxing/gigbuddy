@@ -103,16 +103,26 @@ class GigBuddyApp(App):
 
     #left-col { width: 3fr; layout: vertical; }
     LibraryPanel { height: 3fr; }
-    #type-filter-row { height: 3; align: left middle; }
-    #type-filter-row .filter-label { width: 8; height: 1; color: $text-muted; text-style: bold; }
-    #type-filter { width: 24; }
+    #type-filter-row { height: 3; }
+    /* label sits in the middle of the 3-row filter row (Textual's container
+       align doesn't position plain Statics; margin does) */
+    #type-filter-row .filter-label {
+        width: 8; height: 1; margin: 1 0;
+        color: $text-muted; text-style: bold;
+    }
+    /* explicit height:3 keeps the Select's round border inside the row —
+       auto height (content+border) grows to 5 rows, clipping the border and
+       skewing the TYPE label off-center */
+    #type-filter-local, #type-filter-tone { width: 24; height: 3; }
+    #sort-filter { width: 26; height: 3; }
     #lib-status { color: $text-muted; padding: 0 1; }
     PresetPanel { height: 1fr; min-height: 6; }
 
     #right-col { width: 2fr; layout: vertical; }
     ChainPanel { height: 1fr; min-height: 18; }
     ChainPanel .chain-node-row {
-        height: 5; width: 100%;
+        /* 4 = round border 2 + content 2: title line with ▲, filename with ▼ */
+        height: 4; width: 100%;
         background: $panel;
         border: round $surface-lighten-2;
     }
@@ -128,9 +138,8 @@ class GigBuddyApp(App):
         background: $panel-lighten-1;
     }
     ChainPanel .chain-switch-col {
-        width: 10; height: 5;
+        width: 10; height: 4;
         layout: vertical;
-        align: center middle;
         padding: 0 1;
         border-left: solid $surface-lighten-2;
     }
@@ -490,27 +499,23 @@ class GigBuddyApp(App):
         if event.screen_x is None:
             return
         # Route by coordinates first: hit-testing can land on overlapping
-        # siblings (the ┊ connector sits over the taller switch columns now),
-        # so check column regions directly.
+        # siblings, so check the switch-button regions directly (▲ = title
+        # line, ▼ = filename line — two rows, no dead space).
         for col in self.query(".chain-switch-col"):
             if col.region.contains(event.screen_x, event.screen_y):
                 row = col.parent
                 kind = "amp" if row.has_class("chain-node-row-amp") else "ir"
                 event.stop()
                 self._focus_node(kind)
-                rel_y = event.screen_y - col.region.y
-                arrow = "up" if rel_y < col.region.height / 2 else "down"
-                self._switch_chain_model(kind, -1 if arrow == "up" else +1)
+                up = self.query_one(f"#chain-{kind}-up")
+                down = self.query_one(f"#chain-{kind}-down")
+                if up.region.contains(event.screen_x, event.screen_y):
+                    self._switch_chain_model(kind, -1)
+                elif down.region.contains(event.screen_x, event.screen_y):
+                    self._switch_chain_model(kind, +1)
                 return
         widget, _ = self.screen.get_widget_at(event.screen_x, event.screen_y)
-        wid = widget.id
-        if wid and wid.startswith("chain-") and wid.endswith(("-up", "-down")):
-            # switch button: id = chain-<amp|ir>-<up|down>
-            _, kind, arrow = wid.split("-")
-            event.stop()
-            self._focus_node(kind)
-            self._switch_chain_model(kind, -1 if arrow == "up" else +1)
-        elif widget.has_class("chain-node"):
+        if widget.has_class("chain-node"):
             # clicking node content: focus it and mirror its tone folder detail;
             # double-click toggles the node (IR bypass / amp mute)
             event.stop()

@@ -24,6 +24,7 @@ import library  # noqa: E402
 
 from .install_screen import PackInstallScreen  # noqa: E402
 from .marquee import MarqueeBar  # noqa: E402
+from .modals import ClickSelectTable  # noqa: E402
 
 
 def _arch(t: dict) -> str:
@@ -95,7 +96,7 @@ class LibrarySearchInput(Input):
         self.screen.query_one(LibraryPanel).action_reset()
 
 
-class LibraryTable(DataTable):
+class LibraryTable(ClickSelectTable):
     """Row table whose horizontal keys move between the two main columns."""
 
     BINDINGS = [
@@ -135,6 +136,10 @@ class LibraryTable(DataTable):
 
 TYPE_CHOICES = [("All types", "all"), ("Amp", "amp"), ("Cab", "cab"),
                 ("Amp + Cab", "amp-cab")]
+# mirror tone3000.com's sort options; favorites comes from tones_counts
+# (the search RPC rejects favorites ordering)
+SORT_CHOICES = [("Trending", "trending"), ("Most downloaded", "downloads"),
+                ("Most favorited", "favorites"), ("Newest", "newest")]
 
 
 class LibraryPanel(Vertical):
@@ -178,6 +183,10 @@ class LibraryPanel(Vertical):
                     yield Static("TYPE", classes="filter-label")
                     yield Select(TYPE_CHOICES, value="all", allow_blank=False,
                                  compact=True, id="type-filter-tone")
+                    yield Static("SORT", classes="filter-label")
+                    yield Select(SORT_CHOICES, value="trending",
+                                 allow_blank=False, compact=True,
+                                 id="sort-filter")
                 yield self._make_table("lib-table-tone")
                 yield Static("", id="tone-status")
                 yield ProgressBar(total=1, show_eta=False, id="import-progress")
@@ -188,6 +197,7 @@ class LibraryPanel(Vertical):
     def on_mount(self) -> None:
         self._mode = "local"
         self._active_pane = "pane-local"
+        self._sort = "trending"
         self._last_active = "pane-local"  # initial state: first tick is a no-op
         self._type_filter = "all"
         self._author_filter: str | None = None
@@ -232,8 +242,10 @@ class LibraryPanel(Vertical):
         self._mode = "local" if active == "pane-local" else "tone"
         self._highlighted_key = None
         if active == "pane-tone" and not self.query_one("#lib-table-tone", DataTable).row_count:
-            self.run_worker(self._show_trending(), name="trending", exclusive=True)
-        elif active == "pane-creators" and not self.query_one("#lib-table-creators", DataTable).row_count:
+            self.run_worker(self._reload_tone_table(), name="search", exclusive=True)
+        elif active == "pane-creators":
+            # always reload the default 5-creator view: MORE expansion (limit=0)
+            # must not persist across tab switches
             self.run_worker(self._show_top_creators(), name="creators", exclusive=True)
         elif active == "pane-local":
             self._fingerprint = None
@@ -304,7 +316,7 @@ class LibraryPanel(Vertical):
 
     # ---- TONE3000 tab -----------------------------------------------------
 
-    async def _show_search(self, query: str) -> None:
+    async def _show_search(self, query: str, order_by: str | None = None) -> None:
         self._query = query
         words, users, tags = _parse_query(query)
         self._users, self._tags = users, tags
@@ -316,7 +328,7 @@ class LibraryPanel(Vertical):
         try:
             hits = await asyncio.to_thread(
                 library.tone3000.search,
-                words, page_size=50,
+                words, page_size=50, order_by=order_by or "trending",
                 gear_filters=None if self._type_filter == "all" else [self._type_filter],
                 usernames=(users or ([self._author_filter] if self._author_filter else None)),
                 tag_names=tags or None)
@@ -338,18 +350,41 @@ class LibraryPanel(Vertical):
         if tags:
             extra.append("#" + ", #".join(tags))
         hint = f" ({' '.join(extra)})" if extra else ""
-        status.update(f"(TONE3000{hint} — ✓ 已下载全部 ◐ 部分 ○ 未下载 · Enter 安装)")
+        head = "TRENDING — " if not words and order_by in (None, "trending") else ""
+        status.update(f"({head}TONE3000{hint} — ✓ 已下载全部 ◐ 部分 ○ 未下载 · Enter 安装)")
         self._publish_highlight(table)
         table.focus()
 
     # ---- recommended views (TONE3000 tab) ---------------------------------
 
-    async def _show_trending(self) -> None:
-        """TONE3000 trending feed: empty query with the API's trending order
-        (mirrors tone3000.com's default landing sort)."""
-        await self._show_search("")
-        self.query_one("#tone-status", Static).update(
-            "(TRENDING — TONE3000 热门排序 · Enter 安装)")
+    async def _reload_tone_table(self) -> None:
+        """Reload the TONE3000 tab per the SORT picker: trending / most
+        downloaded / most favorited / newest (mirrors tone3000.com's sort
+        options; favorites reads the tones_counts table since the search RPC
+        has no favorites ordering)."""
+        sort = self._sort
+        table = self.query_one("#lib-table-tone", DataTable)
+        status = self.query_one("#tone-status", Static)
+        if sort == "favorites":
+            table.clear()
+            self._remote_tones = {}
+            status.update("Loading most favorited…")
+            try:
+                hits = await asyncio.to_thread(library.tone3000.top_favorites, 50)
+            except Exception as e:
+                status.update(f"Failed to load favorites: {e}")
+                return
+            hits = await asyncio.to_thread(library.mark_download_state, hits)
+            for t in hits:
+                self._remote_tones[int(t["id"])] = t
+                table.add_row(*self._row_cells(t), key=f"remote:{t['id']}")
+            status.update("(MOST FAVORITED — TONE3000 收藏排行 · Enter 安装)")
+            self._publish_highlight(table)
+            table.focus()
+        else:
+            order = {"trending": "trending", "downloads": "downloads-all-time",
+                     "newest": "newest"}[sort]
+            await self._show_search(self._query or "", order_by=order)
 
     async def _show_top_creators(self, limit: int = 5) -> None:
         """Aggregate a large page of hits by username → top creators; clicking a
@@ -509,16 +544,16 @@ class LibraryPanel(Vertical):
                 self.action_reset()
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sort-filter":
+            self._sort = str(event.value)
+            self.run_worker(self._reload_tone_table(), name="search", exclusive=True)
+            return
         if event.select.id not in ("type-filter-local", "type-filter-tone"):
             return
         self._type_filter = str(event.value)
         if event.select.id == "type-filter-tone":
-            if self._query:
-                self._show_search(self._query)
-            else:
-                self.query_one("#lib-table-tone", DataTable).clear()
-                self.query_one("#tone-status", Static).update(
-                    "(TONE3000 — type a query to search)")
+            # re-apply the current sort (type + sort filters combine)
+            self.run_worker(self._reload_tone_table(), name="search", exclusive=True)
         else:
             self._fingerprint = None
             self.refresh_rows()

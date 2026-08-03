@@ -71,6 +71,15 @@ def top(limit=50):
                 order="downloads_count.desc", limit=limit)
 
 
+def top_favorites(limit=50):
+    """收藏排行：search_tones_a2 RPC 无收藏排序（400），走 tones_counts 聚合表。
+    行形状与 search 结果兼容（缺 username/tags，表格显示 @?）。"""
+    return _get(f"{API}/tones_counts",
+                select="id,title,gear,downloads_count,favorites_count,"
+                       "a2_models_count,irs_count,models_count,created_at",
+                order="favorites_count.desc", limit=limit)
+
+
 def models(tone_id, a2_only=True):
     """tone 的全部模型；a2_only=True 时过滤 A2 (SlimmableContainer)。IR 等非 A2 音色传 False
 

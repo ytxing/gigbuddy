@@ -14,7 +14,7 @@ from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import DataTable, Input, Static, Tree
 
-from .modals import ClickSelectTree, GigBuddyModal, ModalBox
+from .modals import ClickSelectTable, ClickSelectTree, GigBuddyModal, ModalBox
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
@@ -46,7 +46,7 @@ class PresetPanel(Vertical):
         self.border_subtitle = "↑↓ browse · Enter load · ctrl+s save"
 
     def compose(self) -> ComposeResult:
-        table = DataTable(id="preset-table", cursor_type="row")
+        table = ClickSelectTable(id="preset-table", cursor_type="row")
         table.add_column("Name", key="name")
         table.add_column("Amp / IR", key="chain")
         yield table
