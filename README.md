@@ -1,0 +1,156 @@
+# GigBuddy 🎸
+
+Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
+a realtime NAM engine, and an SQLite tone library that external AI agents drive
+through a stable CLI. Tones come from TONE3000 (public API, anon key); rendering is
+NeuralAudio (MIT).
+
+**Open-source stance**: pure-API data source (zero local tone-library dependency),
+fully MIT core stack.
+
+## Architecture
+
+```
+┌─ Agent (external — Claude Code + gigbuddy skill, pi, anything) ─┐
+│  · query library:  gigbuddy tone list/search/show/import         │
+│  · change chain:   gigbuddy chain set (writes live_chain.json)   │
+└───────────────┬──────────────────────────────────────────────────┘
+                │ CLI + file handoff
+┌─ Tone Library UI (Textual TUI, no agent inside) ─────┬──────────┐
+│  browse/search local library (full metadata)          │          │
+│  import from TONE3000 (download + metadata → DB)      │          │
+│  chain control: pick tone → live_chain.json           │  SQLite  │
+│  level meter                                         │ data/     │
+└───────────────┬───────────────────────────────────────┴ gigbuddy │
+                │ live_chain.json / level.json               .db    │
+┌─ Engine (realtime_cli, PortAudio + NeuralAudio) ─────────────────┐
+│  --live hot-swap (atomic model/IR swap, no audio dropout)        │
+│  --level-file telemetry                                          │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+- **Library DB** (`data/gigbuddy.db`): full TONE3000 metadata mirror — every search
+  field preserved. Schema: docs/library-schema.md. Query via CLI or SQLite directly.
+- **Agent ↔ UI round-trip**: files (`live_chain.json` / `level.json`) — unchanged
+  protocol. The engine hot-swaps within ~0.3s of a chain write.
+- Offline rendering (`src/render.py` + `bin/nam_cli`) remains for wav output.
+
+## Quick start
+
+```bash
+# 1. Build the engine (NeuralAudio + NAM Core, MIT; needs cmake/clang++ and brew install portaudio)
+./cpp/build.sh
+
+# 2. Build the tone library from TONE3000
+bin/gigbuddy tone search "fender super reverb"     # search TONE3000
+bin/gigbuddy tone import 19                        # download + persist metadata to DB
+bin/gigbuddy tone list                             # browse the local library
+bin/gigbuddy tone show 19                          # full metadata + local files
+
+# 3. Point the engine at a chain (file names = TONE3000 semantic model names)
+bin/gigbuddy chain set '{"model": "data/tones/19-fender-super-reverb-1977/Fender Super Reverb: EQ Flat, Volume 3, sm57.nam", "gain": 1.0, "master": 0.8}'
+bin/gigbuddy chain get
+
+# 4. Offline render (optional, when you want a wav file)
+python3 src/render.py chain.json data/dry.wav out.wav
+```
+
+## TUI (realtime tone-chain console)
+
+The TUI starts the realtime engine by default. Use `--no-engine` when the engine
+is already running in another terminal.
+
+```bash
+# optional terminal 1: realtime engine (hot-swap + level telemetry)
+./bin/realtime_cli --in "Scarlett" --out "Scarlett" --ch 1 \
+    --live data/live_chain.json --level-file data/level.json
+
+# terminal 2: TUI (Textual; omit --no-engine if terminal 1 is not running)
+.venv/bin/python -m tui --no-engine
+```
+
+TUI features (v2 — pure control surface, no embedded agent):
+- **Library browser** (left): imported tones (title/gear/downloads/author); select a
+  row → full metadata in the detail pane; type in the box to search TONE3000, pick a
+  result to import it (download + DB row, appears in the table immediately).
+- **Tone-chain panel** (right): read-only view of the live AMP/IR chain. Select a
+  Library tone on the left, choose **Add to tone chain**, then choose a specific
+  downloaded file. `amp-cab` tones automatically bypass the separate IR node.
+  `g/G` gain ±0.1, `m/M` master ±0.05.
+- **Keyboard flow**: the library table is focused on startup; `↑/↓` browse, `Enter`
+  opens a tone, `/` focuses search, `Esc` clears search/returns to the list, and
+  `Tab` moves between controls. The picker uses `←/→` to collapse/expand tone
+  folders and `Enter` to choose the highlighted file.
+- **Level meter** (bottom): 0.3s refresh from the engine.
+
+Engine hot-swap (`--live`): watches `data/live_chain.json` (model/ir/gain/master),
+swaps model/IR atomically within 0.3s; `--level-file` feeds levels back as JSON.
+
+## gigbuddy CLI (agent-facing interface)
+
+```
+gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N] [--query Q] [--json]
+gigbuddy tone search <query> [--gear ...] [--limit N] [--json]   # TONE3000 live
+gigbuddy tone show <id> [--json]                                 # full metadata
+gigbuddy tone import <id>                                        # download + persist
+gigbuddy chain get                                               # cat live_chain.json
+gigbuddy chain set '<json>'                                      # write it (hot-swap)
+gigbuddy preset seed                                             # built-in recommendation chains
+gigbuddy preset list                                             # named chain snapshots
+gigbuddy preset save <name> [--note "..."]                       # snapshot current chain
+gigbuddy preset load <name>                                      # apply (engine hot-swap)
+gigbuddy preset show <name> / delete <name>                      # inspect / remove
+```
+
+Presets store model **logic references** (`model_id`), resolved to current paths
+at load time — library renames never break a preset. TUI: `p` loads a preset,
+`ctrl+s` saves the current chain under a name.
+
+Notes:
+- `gear` domain is `amp` / `cab` / `amp-cab` (no `ir`); IR tones are `gear=cab`, `platform=ir`.
+- Import is idempotent (files skip when present, rows upsert). Files are grouped
+  under `data/tones/<tone-id>-<title-slug>/` and keep TONE3000's **semantic model
+  name** (`models.name`, same as the site's zip download — spaces preserved);
+  use `tone show` for the real path. IR tones record architecture `"IR"` and
+  download `.wav` files.
+- The gigbuddy skill (`.claude/skills/gigbuddy`) drives this CLI end to end; its
+  anti-invention rules (tone ids only from real search output) apply to any agent use.
+
+## Directory structure
+
+```
+cpp/            nam_cli.cpp (offline NAM render CLI)
+                realtime_cli.cpp (realtime engine: --live hot-swap + --level-file + VU)
+src/            library.py (SQLite schema + gigbuddy CLI) / tone3000.py (TONE3000 layer)
+                render.py (offline render pipeline)
+tui/            Textual UI: app.py (layout/hotkeys) / panels.py (chain/detail/meter)
+                library_panel.py (browser) / picker.py (tone picker) / live.py (file channel)
+scripts/        gen_test_wav.py (fallback test-signal generator)
+data/           (gitignored: dry inputs / outputs / tone cache / live_chain.json / level.json / gigbuddy.db)
+third_party/    (gitignored: NeuralAudio + deps, fetched by scripts)
+docs/           SPEC-v2.md (decoupled architecture) / chain-schema.md (chain DSL)
+```
+
+## Tone-chain format
+
+Current live chain (`data/live_chain.json`) keys: `model` (.nam path), `ir` (.wav IR
+path, optional), `gain`, `master`, `quality` (A2 model sub-model size, 0–1,
+1.0 = full precision; TUI `u`/`U`). Full DSL and node semantics:
+docs/chain-schema.md.
+
+## License
+
+MIT (to be finalized). Dependencies: NeuralAudio (MIT), NAM Core (MIT), RTNeural (BSD-3),
+Eigen (MPL-2), math_approx (MIT), PortAudio (MIT-like), Textual (MIT).
+
+## Roadmap
+
+- [x] MVP: render core (NeuralAudio) + amp/IR pipeline + TONE3000 retrieval layer
+- [x] Blueprint DSL v0.1 (docs/chain-schema.md) + GigBuddy skill (NL → chain → render)
+- [x] Realtime engine: hot-swap (--live), level telemetry, Scarlett Solo verified
+- [x] v2 decoupling: SQLite tone library (full metadata) + gigbuddy CLI + TUI browser
+      (agent removed from TUI; DB open to external agents)
+- [ ] Local VST3 effects (pedalboard, subprocess-isolated; activate placeholder nodes)
+- [ ] Crossfade switching (anti-click, guitarix delta-delay style)
+- [ ] Render-vs-reference automatic evaluation loop
+- [ ] AudioStream interface output
