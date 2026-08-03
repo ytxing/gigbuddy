@@ -184,8 +184,29 @@ class GigBuddyApp(App):
     OptionList > .option-list--option-highlighted {
         background: $primary; color: $background; text-style: bold;
     }
+    /* persistent borders on inputs/selects: focus only recolors, never adds
+       the 2-row round border that pushes the layout (the "TYPE jumps" bug) */
+    Input, Select, Select > SelectCurrent {
+        border: round $surface-lighten-2;
+    }
     Input:focus, Select:focus { border: round $accent; }
     Input > .input--placeholder { color: $text-disabled; }
+
+    /* overlays (select dropdown / toast / command palette) share one raised
+       look: lighter surface + accent border, clearly off the main background */
+    SelectOverlay {
+        background: $panel-lighten-1;
+        border: round $accent;
+    }
+    Toast {
+        background: $panel-lighten-1;
+        border: round $accent;
+        border-title-color: $accent;
+    }
+    CommandPalette {
+        background: $panel-lighten-1;
+        border: round $accent;
+    }
 
     /* tabs: Textual's built-in Tabs{height:2} + Tab{height:1} leave zero content
        rows under a round border (labels vanish) and clip the bottom border —

@@ -10,7 +10,7 @@ Field coverage note: search_tones_a2 also returns `total_count`, a search-level
 aggregation (same value on every row, not a tone attribute) — intentionally dropped.
 
 CLI:
-    gigbuddy tone list [--gear amp|ir|amp-cab] [--limit N] [--json] [--query Q]
+    gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N] [--json] [--query Q]
     gigbuddy tone search <query> [--limit N] [--json]   # TONE3000, then import prompt
     gigbuddy tone show <id> [--json]
     gigbuddy tone import <id>                             # T1: metadata only; download wired in T2

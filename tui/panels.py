@@ -66,7 +66,7 @@ class NodeWidget(Static):
         label = self.label or "—"
         active = label not in {"—", "bypass"}
         state = "[bold $error]◼[/]" if self.muted else (
-            "[bold $success]●[/]" if active else "[dim]○[/]")
+            "[bold $accent]●[/]" if active else "[dim]○[/]")
         mute_tag = " [dim $error]MUTED[/]" if self.muted else ""
         head = f"[b $text-muted]{self.kind.upper():<5}[/]{state} "
         # Escape user-provided names so brackets in a TONE3000 title/filename

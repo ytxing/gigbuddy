@@ -49,9 +49,10 @@ def _post(url, body):
         return json.loads(r.read())
 
 
-def search(query="", page_size=50, order_by="downloads-all-time", gear_filters=None,
+def search(query="", page_size=50, order_by="trending", gear_filters=None,
            usernames=None, tag_names=None):
-    """search_tones_a2 RPC：关键词 + A2 架构 + 排序（downloads-all-time / newest 等）
+    """search_tones_a2 RPC：关键词 + A2 架构 + 排序（trending / newest / best-match /
+    downloads-all-time，对齐 tone3000.com 官网排序；空查询即 trending 流）
 
     gear_filters: None 或合法值列表 — ["amp"] / ["cab"] / ["amp-cab"]（TONE3000 值域，无 "ir"）
     usernames: 作者名列表（精确），tag_names: 标签名列表（精确）—— 与 query 叠加过滤

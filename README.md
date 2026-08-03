@@ -74,8 +74,9 @@ TUI features (v2 — pure control surface, no embedded agent):
   row → full metadata in the detail pane; type in the box to search TONE3000, pick a
   result to import it (download + DB row, appears in the table immediately).
 - **Tone-chain panel** (right): read-only view of the live AMP/IR chain. Select a
-  Library tone on the left, choose **Add to tone chain**, then choose a specific
-  downloaded file. `amp-cab` tones automatically bypass the separate IR node.
+  Library tone on the left, press `Enter` (or double-click) to open its file
+  picker, then pick a specific downloaded file to load it into the chain.
+  `amp-cab` tones automatically bypass the separate IR node.
   `g/G` gain ±0.1, `m/M` master ±0.05.
 - **Keyboard flow**: the library table is focused on startup; `↑/↓` browse, `Enter`
   opens a tone, `/` focuses search, `Esc` clears search/returns to the list, and

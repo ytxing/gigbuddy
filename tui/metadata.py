@@ -49,7 +49,9 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
                 table.add_section()
             table.add_row(Text(section, style="bold #f5b042"), "")
             last_section = section
-        table.add_row(field, Text(_value(value), style=style))
+        # from_markup (not Text()) so [link=search:...] cells render as links
+        # instead of showing the literal markup
+        table.add_row(field, Text.from_markup(_value(value), style=style))
 
     def model_rows() -> None:
         local_path = model.get("local_path")

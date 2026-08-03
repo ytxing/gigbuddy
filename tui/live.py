@@ -43,28 +43,6 @@ def read_levels() -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def list_tones() -> list[tuple[str, str]]:
-    """Scan locally downloaded .nam tones (name, path)"""
-    if not TONES_DIR.is_dir():
-        return []
-    out = []
-    for f in sorted(TONES_DIR.iterdir()):
-        if f.suffix.lower() == ".nam":
-            out.append((f.name, str(f)))
-    return out
-
-
-def list_irs() -> list[tuple[str, str]]:
-    """Scan locally downloaded IR wavs (name, path)"""
-    if not TONES_DIR.is_dir():
-        return []
-    out = []
-    for f in sorted(TONES_DIR.iterdir()):
-        if f.suffix.lower() == ".wav":
-            out.append((f.name, str(f)))
-    return out
-
-
 def short_name(path: str) -> str:
     """Path → display name (basename without extension)"""
     return os.path.basename(path)

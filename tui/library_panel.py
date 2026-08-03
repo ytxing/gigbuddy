@@ -225,7 +225,6 @@ class LibraryPanel(Vertical):
             active = self.query_one(TabbedContent).active
         except Exception:
             return
-        open("/tmp/check.log", "a").write(f"CHECK active={active!r} last={getattr(self, '_last_active', None)!r}\n")
         if active == getattr(self, "_last_active", None):
             return
         self._last_active = active
@@ -346,11 +345,11 @@ class LibraryPanel(Vertical):
     # ---- recommended views (TONE3000 tab) ---------------------------------
 
     async def _show_trending(self) -> None:
-        """TONE3000's default order IS downloads-all-time — an empty query is the
-        trending feed."""
+        """TONE3000 trending feed: empty query with the API's trending order
+        (mirrors tone3000.com's default landing sort)."""
         await self._show_search("")
         self.query_one("#tone-status", Static).update(
-            "(TRENDING — TONE3000 all-time downloads · Enter 安装)")
+            "(TRENDING — TONE3000 热门排序 · Enter 安装)")
 
     async def _show_top_creators(self, limit: int = 5) -> None:
         """Aggregate a large page of hits by username → top creators; clicking a
