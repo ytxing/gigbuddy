@@ -28,6 +28,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import tone3000
+import chain_protocol
 
 __version__ = "0.1.0"
 
@@ -603,35 +604,27 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
     return get_tone(tone_id)
 
 
-# ---- chain file (engine protocol, unchanged from tui/live.py) ------------
+# ---- chain file (canonical v0.2 engine protocol) --------------------------
 
 def chain_get() -> dict:
     """Current chain config ({} if missing/broken).
 
-    REQ-035 portable：model/ir 相对路径读取时还原为项目根下绝对。
+    Return canonical ``slots[]`` with absolute in-memory paths; legacy
+    ``model/ir`` is read-only normalized by the protocol boundary.
     """
     try:
-        cfg = json.loads(CHAIN_FILE.read_text())
-    except Exception:
+        return chain_protocol.read_chain_file(CHAIN_FILE, root=ROOT)
+    except (OSError, chain_protocol.ChainProtocolError):
         return {}
-    for key in ("model", "ir"):
-        if cfg.get(key):
-            cfg[key] = _to_abs_path(cfg[key])
-    return cfg
 
 
 def chain_set(cfg: dict) -> None:
     """Write chain config atomically (tmp+rename; engine hot-swaps within 0.3s).
 
-    REQ-035 portable：model/ir 路径写入时转相对项目根。
+    Validate and atomically write canonical ``slots[]`` through the shared
+    protocol boundary.
     """
-    cfg = dict(cfg)
-    for key in ("model", "ir"):
-        if cfg.get(key):
-            cfg[key] = _to_rel_path(cfg[key])
-    tmp = CHAIN_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
-    tmp.rename(CHAIN_FILE)
+    chain_protocol.write_chain_file(CHAIN_FILE, cfg, root=ROOT)
 
 
 # ---- presets (named chain snapshots, logic references into the library) ----

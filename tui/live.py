@@ -1,4 +1,4 @@
-"""File channel between the GigBuddy TUI and the realtime engine (realtime_cli --live/--level-file)"""
+"""File channel between the GigBuddy TUI and the realtime engine."""
 import json
 import hashlib
 import os
@@ -9,7 +9,7 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import library  # noqa: E402  （_to_rel_path/_to_abs_path 复用，REQ-035）
+import chain_protocol  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 CHAIN_FILE = ROOT / "data" / "live_chain.json"
@@ -48,31 +48,21 @@ CHAIN_ORDER = [
 def read_chain() -> dict:
     """Read current chain config (empty dict if missing/broken).
 
-    REQ-035 portable：chain 文件存相对路径，读取还原为项目根下绝对
-    （TUI 内部与 DB 返回的绝对路径一致比较）。
+    Canonical ``slots[]`` paths are returned as absolute paths for in-memory
+    TUI/DB comparisons; legacy ``model/ir`` is normalized on read.
     """
     try:
-        cfg = json.loads(CHAIN_FILE.read_text())
-    except Exception:
+        return chain_protocol.read_chain_file(CHAIN_FILE, root=ROOT)
+    except (OSError, chain_protocol.ChainProtocolError):
         return {}
-    for key in ("model", "ir"):
-        if cfg.get(key):
-            cfg[key] = library._to_abs_path(cfg[key])
-    return cfg
 
 
 def write_chain(cfg: dict) -> None:
     """Write chain config (tmp+rename atomic; engine hot-swaps within 0.3s).
 
-    REQ-035 portable：model/ir 路径写入时转相对项目根。
+    The protocol module validates and atomically writes canonical ``slots[]``.
     """
-    cfg = dict(cfg)
-    for key in ("model", "ir"):
-        if cfg.get(key):
-            cfg[key] = library._to_rel_path(cfg[key])
-    tmp = CHAIN_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
-    tmp.rename(CHAIN_FILE)
+    chain_protocol.write_chain_file(CHAIN_FILE, cfg, root=ROOT)
     global _last_chain_write_fingerprint, _last_chain_write_path
     _last_chain_write_fingerprint = chain_file_fingerprint()
     _last_chain_write_path = CHAIN_FILE

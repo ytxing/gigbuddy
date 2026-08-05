@@ -1,6 +1,6 @@
 # ADR-0001：Chain 协议迁移到 Slots 数组
 
-- 状态：提议
+- 状态：已采纳（v0.2.13）
 - 日期：2026-08-04
 
 ## 背景
@@ -9,7 +9,7 @@ Chain 从固定两级（model/ir）升级为多 Slot 架构（REQ-032，见 CONT
 
 ## 决策
 
-`live_chain.json` 的链配置从 `model`/`ir` 两个键迁移为**有序 `slots` 数组**：
+`live_chain.json` 的链配置从 `model`/`ir` 两个键迁移为**有序 `slots` 数组**。具体校验、默认值、旧格式读取和原子写入以 `docs/ui-interaction-spec-v0.2.md` v0.2.13 及其 canonical protocol seam 为准：
 
 ```json
 {
@@ -39,3 +39,4 @@ Chain 从固定两级（model/ir）升级为多 Slot 架构（REQ-032，见 CONT
 
 - 旧 preset（model/ir 键）加载时由协议层自动转换为 slots（`{model}→[{path}], ir 缺位不产生空槽`），不迁移数据文件。
 - 引擎 CLI 与 TUI 的调用点不变，仅实现适配。
+- 新写入统一经过协议边界校验；旧 `model`/`ir` 只在读取时兼容，不再写回。

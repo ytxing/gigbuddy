@@ -14,9 +14,9 @@
 
 ## 类型与标签（易混淆三角，务必区分）
 
-- **Tone 类型（gear）**：TONE3000 的分类——amp / amp-cab / cab / pedal / experimental。其中 amp-cab 是"自带 cab 效果的单 `.nam`"。
+- **Tone 类型（gear）**：TONE3000 的开放分类集合；当前已观察到 `amp`、`amp-cab`、`cab`、`experimental`、`full-rig`、`outboard`、`pedal`、`space`，未来非空值仍按原生 token 接受。`amp-cab` 是"自带 cab 效果的单 `.nam`"。
 - **处理类型（Processing Type）**：由文件扩展名决定——`.nam` → NAM 推理；`.wav` → IR 卷积。Slot 的音频处理方式。
-- **语义标签（Label）**：Slot 显示名（AMP / CAB / PEDAL / EXP），由所加载 Tone 的 gear 派生。仅用于显示与交互。
+- **语义标签（Label）**：Slot 显示名，由所加载 Tone 的原生 gear 派生并只做 uppercase 展示（例如 `experimental` → `EXPERIMENTAL`）。仅用于显示与交互，不能写入 `slots[]`。
 
 ## 规则
 
