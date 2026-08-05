@@ -1,0 +1,24 @@
+# 构建产物与运行时数据
+bin/
+data/
+.pytest_cache/
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+
+# 第三方依赖（脚本拉取，不入库；仅保留 bootstrap patch）
+third_party/*
+
+# macOS
+.DS_Store
+
+# 本地临时
+/tmp/
+.venv/
+
+# Playwright MCP 运行产物（截图/日志/下载）
+.playwright-mcp/
+
+# .scratch 开发残留（截图/调试脚本/库备份）整目录不入库
+.scratch/

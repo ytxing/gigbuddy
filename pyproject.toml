@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gigbuddy"
+version = "0.1.0a1"
+description = "NAM guitar tone library, chain controller, and realtime TUI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "numpy>=1.26,<3",
+  "rich>=13.7,<15",
+  "textual>=8,<9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+]
+
+[project.scripts]
+gigbuddy = "library:main"
+gigbuddy-tui = "tui.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src", "tui" = "tui"}
+py-modules = ["library", "tone3000", "render"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+norecursedirs = [".git", ".venv", "bin", "data", "third_party", ".scratch"]
