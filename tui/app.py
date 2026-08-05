@@ -34,6 +34,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from . import live  # noqa: E402
+from .chain_state import (ChainStateError, SlotStatus,
+                          chain_fingerprint)  # noqa: E402
 import library  # noqa: E402
 from .input_screen import InputSourceScreen  # noqa: E402
 from .install_screen import PackInstallScreen  # noqa: E402
@@ -42,8 +44,8 @@ from .library_panel import (LibraryPanel, LibraryTable, ToneHighlighted,
 from .marquee import MarqueeBar  # noqa: E402
 from .metadata import signed_fixed  # noqa: E402
 from .panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar,
-                     DeviceChanged, InterfaceBar, MeterBar, NodeSwitchButton,
-                     NodeWidget)  # noqa: E402
+                     AddSlotButton, ChainSlotWidget, DeviceChanged,
+                     InterfaceBar, MeterBar, NodeSwitchButton, NodeWidget)  # noqa: E402
 from .picker import TonePickerScreen  # noqa: E402
 from .presets import (PresetDeleteModal, PresetNameModal, PresetNoteModal,
                       PresetPanel, PresetPickerScreen, PresetRenameModal)  # noqa: E402
@@ -310,12 +312,11 @@ class GigBuddyApp(App):
     PresetPanel DataTable { height: 1fr; }
 
     #right-col { width: 2fr; layout: vertical; }
-    /* The chain has a fixed set of rows in v0.1.  Letting it grow as 1fr leaves
-       empty rows between the effect readout and the docked parameter bar on
-       taller terminals.  Eighteen rows cover input/AMP/CAB, six phase-2
-       placeholders, and one independent parameter row (聚焦 marquee 行已删，
-       REQ-043). */
-    ChainPanel { height: 18; min-height: 18; max-height: 18; }
+    /* Canonical v0.2 ChainPanel grows only with its 0-6 Slot list. */
+    ChainPanel { height: auto; min-height: 7; max-height: 30; }
+    ChainPanel.chain-panel-dynamic {
+        max-height: 100%; overflow-y: auto;
+    }
     ChainPanel .chain-node-row {
         /* 4 = round border 2 + content 2: title line with ▲, filename with ▼ */
         height: 4; width: 100%;
@@ -372,12 +373,57 @@ class GigBuddyApp(App):
        行高 3 = round 边框 2 + 内容 1，节点内容区相应收为一行 */
     ChainPanel .chain-node-row-input { height: 3; }
     ChainPanel .chain-node-row-input .chain-node { height: 1; }
+    ChainPanel .chain-slot-row {
+        height: 4; width: 100%;
+        background: transparent;
+        border: round $surface-lighten-2;
+        border-title-color: $text-muted;
+    }
+    ChainPanel .chain-slot {
+        width: 1fr; height: 2; padding: 0 1;
+        background: transparent; border: none;
+    }
+    ChainPanel .chain-slot:hover,
+    ChainPanel .chain-slot:focus { background: $panel-lighten-1; }
+    ChainPanel .chain-slot-row:focus-within {
+        border: round $accent;
+        border-title-color: $accent;
+    }
+    ChainPanel .chain-slot-actions {
+        width: 11; height: 4; layout: vertical; padding: 0 1;
+    }
+    ChainPanel .chain-slot-action {
+        width: 1fr; height: 1; padding: 0;
+        content-align: center middle;
+        color: $text; background: transparent; text-style: bold;
+    }
+    ChainPanel .chain-slot-action:hover {
+        background: $accent; color: $background;
+    }
+    ChainPanel .chain-add-slot {
+        height: 1; padding: 0 1; color: $text-muted;
+        background: transparent;
+    }
+    ChainPanel .chain-add-slot:focus,
+    ChainPanel .chain-add-slot:hover {
+        color: $background; background: $accent;
+    }
     ChainPanel .chain-effect {
         height: 1; padding: 0 1 0 2; color: $text-muted;
     }
     ChainPanel .chain-params {
         dock: bottom; height: 1; margin: 0; padding: 0 1;
         background: $panel; color: $text;
+    }
+    ChainPanel.chain-panel-dynamic .chain-params {
+        dock: none;
+    }
+    ChainPanel .chain-param-focus-stop {
+        position: absolute; height: 1; padding: 0; margin: 0;
+        background: transparent;
+    }
+    ChainPanel .chain-param-focus-stop:focus {
+        background: $panel-lighten-1;
     }
     DetailPane { height: 1fr; }
     DetailPane MarqueeBar { height: 1; color: $text; }
@@ -747,7 +793,9 @@ class GigBuddyApp(App):
         if self._engine is not None and self._engine.poll() is None:
             return
         cfg = live.read_chain()
-        model_path = cfg.get("model") or ""
+        model_path = cfg.get("model") or next(
+            (slot.get("path") for slot in cfg.get("slots", [])
+             if isinstance(slot, dict) and slot.get("path")), "")
         inp = live.chain_input(cfg)
         dry_path = inp.get("file") if inp.get("source") == "file" else ""
         has_source = ((model_path and Path(model_path).exists())
@@ -844,7 +892,7 @@ class GigBuddyApp(App):
                 cfg["master"] = getattr(self, "_master_backup", None) or 1.0
                 note = f"Unmuted → master {signed_fixed(cfg['master'])}"
             live.write_chain(cfg)
-            self.query_one(ChainPanel).chain = cfg
+            cfg = self._publish_chain_write(cfg)
             self.query_one(InterfaceBar).set_muted(cfg["master"] <= 0)
             self.notify(note)
             return
@@ -941,6 +989,25 @@ class GigBuddyApp(App):
         self._amp_model_backup = None
         self._ir_backup = None
 
+    def _publish_chain_write(self, cfg: dict) -> dict:
+        """Publish a non-structural TUI chain write without losing Slot UI state."""
+        panel = self.query_one(ChainPanel)
+        persisted = live.read_chain() or cfg
+        try:
+            panel.state.mark_managed_write(
+                live.last_chain_write_fingerprint(),
+                persisted.get("revision"),
+            )
+        except ChainStateError:
+            pass
+        try:
+            panel._observed_chain_fingerprint = chain_fingerprint(persisted)
+        except (TypeError, ValueError):
+            panel._observed_chain_fingerprint = None
+        panel.chain = persisted
+        panel._refresh_dynamic_slots()
+        return persisted
+
     def _bump(self, key: str, delta: float) -> None:
         cfg = live.read_chain()
         ranges = {"gain": (0.0, 10.0), "master": (0.0, 10.0)}
@@ -954,7 +1021,7 @@ class GigBuddyApp(App):
             if cfg[key] > 0:
                 self._master_backup = cfg[key]
         live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        cfg = self._publish_chain_write(cfg)
         if key == "master":
             self.query_one(InterfaceBar).set_muted(cfg["master"] <= 0)
 
@@ -974,7 +1041,7 @@ class GigBuddyApp(App):
         if key == "master" and cfg[key] > 0:
             self._master_backup = cfg[key]
         live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        cfg = self._publish_chain_write(cfg)
         if key == "master":
             self.query_one(InterfaceBar).set_muted(cfg["master"] <= 0)
 
@@ -993,7 +1060,7 @@ class GigBuddyApp(App):
         q = round(float(cfg.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])) + delta, 2)
         cfg["quality"] = max(0.0, min(1.0, q))
         live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        self._publish_chain_write(cfg)
 
     def action_focus_search(self) -> None:
         self.query_one(LibraryPanel).focus_search()
@@ -1012,7 +1079,7 @@ class GigBuddyApp(App):
         edit(inp)
         cfg["input"] = inp
         live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        self._publish_chain_write(cfg)
         self._playback_op_ts = time.monotonic()
 
     def action_playback_toggle(self) -> None:
@@ -1094,7 +1161,7 @@ class GigBuddyApp(App):
 
     def on_input_source_screen_source_changed(self, event) -> None:
         """输入源切换完成：刷新链面板 INPUT 行"""
-        self.query_one(ChainPanel).chain = event.chain
+        self._publish_chain_write(event.chain)
 
     def action_open_preset_picker(self) -> None:
         self.push_screen(PresetPickerScreen())
@@ -1164,6 +1231,15 @@ class GigBuddyApp(App):
                     self._switch_chain_model(kind, +1)
                 return
         widget, _ = self.screen.get_widget_at(event.screen_x, event.screen_y)
+        if widget.has_class("chain-slot"):
+            event.stop()
+            index = getattr(widget, "index", None)
+            if index is None:
+                return
+            self._focus_slot(index)
+            if getattr(event, "chain", 1) >= 2:
+                self._toggle_slot(index)
+            return
         if widget.has_class("chain-node"):
             # Clicking a node focuses it AND opens its Selection (pack list)
             # in the detail pane — mouse focus decides the detail mode
@@ -1195,6 +1271,16 @@ class GigBuddyApp(App):
                 self._focus_node(node.kind)
                 self._show_node_pack(node.kind)
                 return
+        for row in self.query(".chain-slot-row"):
+            if row.region.contains(event.screen_x, event.screen_y):
+                slot = next((s for s in row.query(ChainSlotWidget)), None)
+                if slot is None:
+                    return
+                event.stop()
+                self._focus_slot(slot.index)
+                if getattr(event, "chain", 1) >= 2:
+                    self._toggle_slot(slot.index)
+                return
         # 链面板的其余空白（节点行之间的空隙、effect/params 之外的区域）：
         # 点击聚焦面板本身，←/→ 即可切换 detail 视图。
         panel = self.query_one(ChainPanel)
@@ -1206,6 +1292,151 @@ class GigBuddyApp(App):
         node = next((n for n in self.query(NodeWidget) if n.kind == kind), None)
         if node:
             node.focus()
+
+    def _focus_slot(self, index: int) -> None:
+        panel = self.query_one(ChainPanel)
+        slot = panel._slot_widgets.get(index)
+        if slot is not None:
+            slot.focus()
+
+    def _commit_slot_mutation(self, mutation, note: str,
+                              *, failure_note: str | None = None) -> bool:
+        """Apply one ordered-Slot mutation and publish the canonical chain.
+
+        T04 owns the process-local candidate and target identity. The App only
+        supplies the file boundary here, then records the exact write metadata
+        before the polling path reconciles the new revision.
+        """
+        panel = self.query_one(ChainPanel)
+        if panel._legacy_mode:
+            self.notify("v0.2 Slot action unavailable for legacy chain",
+                        severity="warning")
+            return False
+        state = panel.state
+        before = state.checkpoint()
+        try:
+            result = mutation(state)
+        except ChainStateError as exc:
+            self.notify(str(exc), severity="warning")
+            return False
+        if result is False:
+            self.notify(failure_note or note, severity="warning")
+            return False
+        focus_index = state.target_index
+        candidate = state.to_chain()
+        try:
+            live.write_chain(candidate)
+            persisted = live.read_chain() or candidate
+        except Exception as exc:
+            state.restore_checkpoint(before)
+            panel.chain = state.to_chain()
+            self.notify(f"Chain unchanged: {exc}", severity="error")
+            return False
+        try:
+            state.mark_managed_write(
+                live.last_chain_write_fingerprint(),
+                persisted.get("revision"),
+            )
+        except ChainStateError:
+            # A test double may not expose protocol revision metadata. The
+            # visible state is still valid; the next poll will conservatively
+            # drop process-local bypass candidates.
+            pass
+        try:
+            panel._observed_chain_fingerprint = chain_fingerprint(persisted)
+        except (TypeError, ValueError):
+            panel._observed_chain_fingerprint = None
+        panel.chain = persisted
+        panel._refresh_dynamic_slots()
+        if not panel.state.slot_count:
+            self.query_one(DetailPane).clear()
+        if focus_index is not None:
+            self.call_after_refresh(
+                lambda index=focus_index: self._focus_slot(index))
+        self.notify(note)
+        return True
+
+    def _add_slot(self) -> None:
+        panel = self.query_one(ChainPanel)
+        index = panel.state.slot_count
+        if self._commit_slot_mutation(
+                lambda state: state.add_slot(),
+                f"Added Slot {index + 1:02d}"):
+            self._focus_slot(index)
+
+    def _delete_slot(self, index: int) -> None:
+        panel = self.query_one(ChainPanel)
+        self._commit_slot_mutation(
+            lambda state: state.delete_slot(index),
+            f"Deleted Slot {index + 1:02d}")
+
+    def _toggle_slot(self, index: int) -> None:
+        panel = self.query_one(ChainPanel)
+        snapshot = panel.state.slot(index)
+        if snapshot.status is SlotStatus.EMPTY:
+            self.notify("Empty Slot cannot bypass", severity="warning")
+            return
+        label = "restored" if snapshot.status is SlotStatus.BYPASS else "bypassed"
+        self._commit_slot_mutation(
+            lambda state: state.toggle_bypass(index),
+            f"Slot {index + 1:02d} {label}")
+
+    def _move_slot(self, index: int, direction: int) -> None:
+        verb = "up" if direction < 0 else "down"
+        self._commit_slot_mutation(
+            lambda state: state.move_slot(index, direction),
+            f"Moved Slot {index + 1:02d} {verb}",
+            failure_note=f"Slot {index + 1:02d} cannot move {verb}")
+
+    def _switch_slot_model(self, index: int, direction: int) -> None:
+        panel = self.query_one(ChainPanel)
+        snapshot = panel.state.slot(index)
+        path = snapshot.path or snapshot.candidate
+        if not path:
+            self.notify("Empty Slot has no models to switch", severity="warning")
+            return
+        try:
+            siblings = library.local_models_by_tone(path) or []
+        except Exception:
+            siblings = []
+        siblings = [m for m in siblings if m.get("local_path")]
+        if len(siblings) <= 1:
+            self.notify("Only one model in this pack", severity="warning")
+            return
+        current = next(
+            (i for i, model in enumerate(siblings)
+             if model.get("local_path") == path), None)
+        if current is None:
+            self.notify("Slot file is not a library model", severity="warning")
+            return
+        next_index = current + direction
+        if next_index < 0 or next_index >= len(siblings):
+            self.notify("Already at the model boundary", severity="warning")
+            return
+        next_model = siblings[next_index]
+        next_path = next_model["local_path"]
+        self._commit_slot_mutation(
+            lambda state: state.load_file(index, next_path),
+            f"Slot {index + 1:02d} → {live.short_name(next_path)}")
+
+    def on_add_slot_button_requested(self, _event) -> None:
+        self._add_slot()
+
+    def on_chain_slot_widget_switch_requested(
+            self, event: ChainSlotWidget.SwitchRequested) -> None:
+        self._switch_slot_model(event.index, event.direction)
+
+    def on_chain_slot_widget_toggle_requested(
+            self, event: ChainSlotWidget.ToggleRequested) -> None:
+        self._toggle_slot(event.index)
+
+    def on_chain_slot_widget_delete_requested(
+            self, event: ChainSlotWidget.DeleteRequested) -> None:
+        self._delete_slot(event.index)
+
+    def on_chain_slot_widget_move_requested(
+            self, event: ChainSlotWidget.MoveRequested) -> None:
+        self._move_slot(event.index, event.direction)
 
     def _show_node_pack(self, kind: str) -> None:
         """Open the focused node's tone pack (all files) in the detail pane."""

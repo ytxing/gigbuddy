@@ -94,7 +94,7 @@ def test_library_more_is_a_clickable_action_token():
 
 
 def test_chain_hint_hover_styles_only_the_token_under_the_pointer():
-    """Moving across the TONE CHAIN hint must never color every action."""
+    """Moving across action tokens must never color the whole hint."""
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -105,7 +105,9 @@ def test_chain_hint_hover_styles_only_the_token_under_the_pointer():
             label_start = panel.region.x + max(
                 1, panel.region.width - cell_len(label) - 2)
 
-            for token in border_hint_segments(panel):
+            # The first visible segment is dynamic state (for example
+            # ``0/6 slots``), not a clickable action token.
+            for token in border_hint_segments(panel)[1:]:
                 span = hint_span(label, token)
                 assert span is not None
                 x = label_start + (span[0] + span[1]) // 2
@@ -141,18 +143,17 @@ def test_secondary_hints_fit_the_compact_single_hint_strip():
                     # plus the two cells passed into its label renderer.
                     assert cell_len(border_hint_label(widget)) <= widget.region.width - 6
                 chain = app.query_one(ChainPanel)
-                assert any(
-                    segment in {"d", "d del", "d delete"}
-                    for segment in border_hint_segments(chain)
-                )
-                assert "l loop" in border_hint_label(chain), \
-                    f"loop action must remain a complete token at {size}"
+                segments = border_hint_segments(chain)
+                assert any(segment in {"d", "d del", "d delete"}
+                           for segment in segments[1:])
+                # Low-priority playback may be hidden on the narrowest
+                # supported surface; core Slot mutation stays visible.
 
     run(scenario())
 
 
 def test_chain_panel_does_not_leave_growth_gap_before_parameters():
-    """Fixed v0.1 rows consume the chain surface without a dead growth area."""
+    """The zero-slot v0.2 panel has no fixed-row growth gap."""
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -161,11 +162,8 @@ def test_chain_panel_does_not_leave_growth_gap_before_parameters():
             chain = app.query_one(ChainPanel)
             detail = app.query_one(DetailPane)
             params = chain.query_one(".chain-params")
-            effects = list(chain.query(".chain-effect"))
-
-            assert chain.region.height == 18   # 聚焦 marquee 行已删（REQ-043）
+            assert chain.region.height == 7
             assert detail.region.y == chain.region.bottom
-            assert effects[-1].region.bottom == params.region.y
             assert params.region.bottom == chain.content_region.bottom
 
     run(scenario())

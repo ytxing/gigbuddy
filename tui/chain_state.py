@@ -330,6 +330,21 @@ class ChainState:
             chain_error=self._chain_error,
         )
 
+    def checkpoint(self) -> "ChainState":
+        """Return a process-local rollback checkpoint.
+
+        The checkpoint intentionally preserves private Slot object identity,
+        so target and bypass candidates can be restored after a failed UI
+        mutation without inventing a persistent Slot id.
+        """
+        return self._copy_state()
+
+    def restore_checkpoint(self, checkpoint: "ChainState") -> None:
+        """Restore a checkpoint produced by :meth:`checkpoint`."""
+        if not isinstance(checkpoint, ChainState):
+            raise ChainStateError("checkpoint must be a ChainState")
+        self._restore_state(checkpoint)
+
     def to_chain(self) -> dict[str, Any]:
         return _chain_with_slots(self._chain, [slot.path for slot in self._slots])
 

@@ -26,6 +26,9 @@ import library  # noqa: E402
 import tone3000  # noqa: E402
 
 from . import live  # noqa: E402
+from .chain_state import (MAX_SLOTS, ChainState, ChainStateError,
+                          SlotOverlay, SlotSnapshot, SlotStatus,
+                          chain_fingerprint)  # noqa: E402
 from .marquee import (MarqueeBar, ellipsis_window, marquee_window)  # noqa: E402
 from .metadata import (SelectableStatic, description_only, metadata_table,
                        preset_metadata_table, signed_fixed, theme_colors)  # noqa: E402
@@ -404,6 +407,83 @@ class NodeSwitchButton(Static):
                          classes="chain-switch-btn")
 
 
+class ChainParamFocusStop(Static):
+    """One focus stop over a fixed parameter column in the dynamic chain."""
+
+    can_focus = True
+    ALLOW_SELECT = False
+
+    def __init__(self, parameter_index: int) -> None:
+        self.parameter_index = parameter_index
+        super().__init__(
+            id=f"chain-param-{parameter_index}",
+            classes="chain-param-focus-stop",
+        )
+
+    @property
+    def owner(self):
+        return self.parent
+
+    def set_geometry(self, start: int, end: int) -> None:
+        self.styles.offset = (start + 1, 0)
+        self.styles.width = max(1, end - start)
+        self.styles.height = 1
+
+    def _content_x(self, x: int) -> int:
+        ranges = getattr(self.owner, "_parameter_ranges", ())
+        if self.parameter_index >= len(ranges):
+            return x
+        # The stop starts one cell after the parent's local origin; the
+        # parent's direct mouse path removes that same padding cell.
+        return ranges[self.parameter_index][0] + x + 1
+
+    def on_focus(self, _event: object) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_parameter_focus(self.parameter_index)
+
+    def on_blur(self, _event: object) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_parameter_blur(self.parameter_index)
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_mouse_down_content(self._content_x(event.x))
+        event.stop()
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_mouse_up_content()
+        event.stop()
+
+    def on_click(self, event: MouseEvent) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_click_content(self._content_x(event.x))
+        event.stop()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_mouse_move_content(self._content_x(event.x))
+        event.stop()
+
+    def on_leave(self, _event: Leave) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner._on_leave_content()
+
+    def render(self) -> str:
+        owner = self.owner
+        if owner is None or not hasattr(owner, "_controls"):
+            return ""
+        return owner._parameter_markup(
+            self.parameter_index, getattr(owner, "_hover_index", None))
+
+
 class ChainParams(Static):
     """Plain-text chain controls with clickable keyboard-hint keys.
 
@@ -457,8 +537,14 @@ class ChainParams(Static):
     EDIT_MAX_DECIMALS = 2
     EDIT_MAX_LENGTH = 8
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, split_focus: bool = False, **kwargs) -> None:
+        self.split_focus = split_focus
         super().__init__(*args, **kwargs)
+        if split_focus:
+            self.can_focus = False
+        self._focus_stops: list[ChainParamFocusStop] = []
+        self._parameter_ranges: list[tuple[int, int]] = []
+        self._focused_parameter: int | None = None
         # 按下状态：_press_span 为按下的 token 下标（None=未按下）；
         # _long_press_active 为真时释放的合成 click 不再步进；
         # _press_cancelled 为真时（移出 token/面板）click 被丢弃。
@@ -474,6 +560,35 @@ class ChainParams(Static):
         # _cursor_timer 每 0.5s 切换一次。
         self._cursor_visible = True
         self._cursor_timer = None
+
+    def compose(self) -> ComposeResult:
+        if self.split_focus:
+            self._focus_stops = [
+                ChainParamFocusStop(index) for index in range(3)
+            ]
+            yield from self._focus_stops
+
+    def _sync_focus_stops(self) -> None:
+        for stop in self._focus_stops:
+            if stop.parameter_index < len(self._parameter_ranges):
+                stop.set_geometry(*self._parameter_ranges[stop.parameter_index])
+                stop.refresh()
+
+    def _on_parameter_focus(self, index: int) -> None:
+        self._focused_parameter = index
+        self.refresh()
+
+    def _on_parameter_blur(self, index: int) -> None:
+        if self._editing is not None:
+            self._exit_edit()
+        if self._focused_parameter == index:
+            self._focused_parameter = None
+
+    def _focus_parameter(self, index: int) -> None:
+        if self.split_focus and index < len(self._focus_stops):
+            self._focus_stops[index].focus()
+        else:
+            self.focus()
 
     def set_values(self, gain: float, master: float, quality: float) -> None:
         controls = [
@@ -491,6 +606,7 @@ class ChainParams(Static):
         # separates the two click targets instead of merging them.  action
         # takes the step size (always positive); the sign is baked in.
         self._spans: list[tuple[str, int, int, Callable[[float], None]]] = []
+        self._parameter_ranges = []
         # 数值区域（单击进编辑）：(参数下标, start, end)，value 文本含
         # signed_fixed 的符号空格，整段可点。
         self._value_spans: list[tuple[int, int, int]] = []
@@ -499,7 +615,8 @@ class ChainParams(Static):
         offset = 0
         for index, (label, value, hint, decrease, increase) in enumerate(controls):
             if index:
-                offset += 3
+                offset += 1
+            parameter_start = offset
             prefix = f"{label}  {value} "
             value_start = offset + len(label) + 2
             self._value_spans.append((index, value_start, value_start + len(value)))
@@ -511,12 +628,46 @@ class ChainParams(Static):
             offset += 3
             self._spans.append((hi, offset, offset + len(hi), increase))
             offset += len(hi)
+            self._parameter_ranges.append((parameter_start, offset))
         self._controls = controls
         self._param_keys = ("gain", "master", "quality")
         # 长按进行中时 set_values（每次步进都会触发）保持按下 token 的高亮，
         # 否则重建会清掉它；普通更新则清空悬停。
         self._hover_index = self._press_span if self._long_press_active else None
         self._refresh_hint(self._hover_index)
+
+    def _parameter_markup(self, index: int, hovered: int | None) -> str:
+        """Render one fixed-width parameter segment."""
+        label, value, hint, _decrease, _increase = self._controls[index]
+        if self._editing == index:
+            cursor = "▌" if self._cursor_visible else " "
+            value_part = (
+                f"[b]{label}[/]  [b $background on $accent]"
+                f"{self._edit_text}[/][b $accent on $background]"
+                f"{cursor}[/] [dim]"
+            )
+        else:
+            value_style = "$background on $accent" if (
+                hovered is not None and hovered >= 10
+                and hovered - 10 == index) else "$accent"
+            value_part = (
+                f"[b]{label}[/]  [b {value_style}]{value}[/] [dim]"
+            )
+        lo, hi = (part.strip() for part in hint.split("·"))
+        lo_part = (
+            f"[b $background on $accent]{lo}[/]"
+            if hovered == index * 2 else lo
+        )
+        dot_part = (
+            " [b $background on $accent]·[/] "
+            if hovered is not None and hovered >= 20
+            and hovered - 20 == index else " · "
+        )
+        hi_part = (
+            f"[b $background on $accent]{hi}[/]"
+            if hovered == index * 2 + 1 else hi
+        )
+        return f"{value_part}{lo_part}{dot_part}{hi_part}[/]"
 
     def _refresh_hint(self, hovered: int | None = None) -> None:
         """Rebuild the whole line, highlighting only the hovered key half.
@@ -526,43 +677,12 @@ class ChainParams(Static):
         in "MASTER" first.
         """
         parts: list[str] = []
-        span_index = 0
-        for index, (label, value, hint, _dec, _inc) in enumerate(self._controls):
+        for index in range(len(self._controls)):
             if index:
-                parts.append("   ")
-            # 值区域：编辑态显示输入文本+闪烁光标（REQ-028，光标亮时 ▌、
-            # 暗时空格占位保持行宽）；悬停值区域（hovered 10+index 编码）
-            # 提示可点击编辑。
-            if self._editing == index:
-                cursor = "▌" if self._cursor_visible else " "
-                parts.append(f"[b]{label}[/]  "
-                             f"[b $background on $accent]{self._edit_text}[/]"
-                             f"[b $accent on $background]{cursor}[/] [dim]")
-            else:
-                value_style = "$background on $accent" if (
-                    hovered is not None and hovered >= 10
-                    and hovered - 10 == index) else "$accent"
-                parts.append(f"[b]{label}[/]  [b {value_style}]{value}[/] [dim]")
-            lo, hi = (part.strip() for part in hint.split("·"))
-            # g · G 顺序渲染：lo → 点 → hi（点必须夹在中间，REQ-027）
-            if hovered is not None and hovered == span_index:
-                parts.append(f"[b $background on $accent]{lo}[/]")
-            else:
-                parts.append(lo)
-            # 分隔点 = 恢复参数默认值（REQ-027）：自身 hover（20+index 编码）高亮，
-            # 与 g/G 风格一致；hover 别的 token/值/空白时点不亮（20+ 编码
-            # 保证 None 与其它 hovered 值都不会误命中）。
-            if hovered is not None and hovered >= 20 and hovered - 20 == index:
-                parts.append(" [b $background on $accent]·[/] ")
-            else:
-                parts.append(" · ")
-            if hovered is not None and hovered == span_index + 1:
-                parts.append(f"[b $background on $accent]{hi}[/]")
-            else:
-                parts.append(hi)
-            span_index += 2
-            parts.append("[/]")
+                parts.append(" ")
+            parts.append(self._parameter_markup(index, hovered))
         self.update("".join(parts))
+        self._sync_focus_stops()
 
     # ---- 鼠标点按/长按步进（REQ-007）----
 
@@ -613,7 +733,7 @@ class ChainParams(Static):
         if self._cursor_timer is None:
             self._cursor_timer = self.set_interval(0.5, self._toggle_cursor)
         self._refresh_hint()
-        self.focus()
+        self._focus_parameter(index)
 
     def _toggle_cursor(self) -> None:
         """0.5s 闪烁：光标 ▌/空格占位切换（占位保持行宽，token 不位移）。"""
@@ -736,14 +856,12 @@ class ChainParams(Static):
         if self._press_span is not None and not self._press_cancelled:
             self._step(self._press_span)
 
-    def on_mouse_down(self, event: MouseDown) -> None:
-        x = max(0, event.x - 1)  # chain-params has one cell of left padding
+    def _on_mouse_down_content(self, x: int) -> None:
         if self._editing is not None:
             # 编辑态中按下任何位置：先取消编辑（不应用），并复用
             # _press_cancelled 让随后的合成 click 不步进
             self._exit_edit()
             self._press_cancelled = True
-            event.stop()
             return
         self._cancel_timers()
         self._press_cancelled = False
@@ -751,52 +869,62 @@ class ChainParams(Static):
         self._press_span = self._span_at(x)
         if self._press_span is None:
             return
-        event.stop()
         # capture 保证按住拖出面板时仍能收到 move（移出即停止长按）；
         # mouse up 时在 on_mouse_up 里显式释放。
         self.capture_mouse()
         self._long_press_timer = self.set_timer(
             self.LONG_PRESS_DELAY, self._begin_long_press)
 
-    def on_mouse_up(self, event: MouseUp) -> None:
+    def on_mouse_down(self, event: MouseDown) -> None:
+        x = max(0, event.x - 1)  # chain-params has one cell of left padding
+        self._on_mouse_down_content(x)
+        if self._press_span is not None or self._editing is None:
+            event.stop()
+
+    def _on_mouse_up_content(self) -> None:
         self._cancel_timers()
         self._press_span = None
         self.release_mouse()
         # _long_press_active / _press_cancelled 留给紧随的合成 click 消费
 
-    def on_click(self, event: MouseEvent) -> None:
+    def on_mouse_up(self, event: MouseUp) -> None:
+        self._on_mouse_up_content()
+        event.stop()
+
+    def _on_click_content(self, x: int) -> None:
         if self._long_press_active or self._press_cancelled:
             # 长按释放 / 已取消的按下：合成 click 不再步进
             self._long_press_active = False
             self._press_cancelled = False
-            event.stop()
             return
         if self._editing is not None:
             # 编辑中点击：取消编辑（不应用）
             self._exit_edit()
-            event.stop()
             return
-        x = max(0, event.x - 1)  # chain-params has one cell of left padding
         # 分隔点：恢复参数默认值（REQ-027，走同一条写链路径）
         dot_hit = self._dot_at(x)
         if dot_hit is not None:
-            event.stop()
             key = self._param_keys[dot_hit - 20]
             self.app._set_chain_param(key, self.PARAM_DEFAULTS[key])
             return
         # 数值区域：进入手动编辑
         value_hit = self._value_at(x)
         if value_hit is not None:
-            event.stop()
             self._begin_edit(value_hit - 10)
             return
         span = self._span_at(x)
         if span is not None:
-            event.stop()
             self._step(span)
 
-    def on_mouse_move(self, event: MouseMove) -> None:
-        x = max(0, event.x - 1)
+    def on_click(self, event: MouseEvent) -> None:
+        x = max(0, event.x - 1)  # chain-params has one cell of left padding
+        self._on_click_content(x)
+        if (self._long_press_active or self._press_cancelled or
+                self._editing is not None or self._dot_at(x) is not None or
+                self._value_at(x) is not None or self._span_at(x) is not None):
+            event.stop()
+
+    def _on_mouse_move_content(self, x: int) -> None:
         if self._press_span is not None:
             # 按住期间：移出按下的 token 立即停止长按（capture 保证按住
             # 拖出仍收到 move）；停在原 token 上时不更新悬停。
@@ -814,16 +942,238 @@ class ChainParams(Static):
         self._hover_index = hovered
         self._refresh_hint(hovered)
 
-    def on_leave(self, event: Leave) -> None:
+    def on_mouse_move(self, event: MouseMove) -> None:
+        self._on_mouse_move_content(max(0, event.x - 1))
+
+    def _on_leave_content(self) -> None:
         self._cancel_press()
         if self._hover_index is not None:
             self._hover_index = None
             self._refresh_hint()
 
+    def on_leave(self, event: Leave) -> None:
+        self._on_leave_content()
+
     def on_unmount(self, event: Unmount) -> None:
         """链面板销毁时停止可能仍在跑的长按/闪烁光标定时器"""
         self._cancel_press()
         self._stop_cursor()
+
+
+class ChainSlotWidget(Static):
+    """One dynamically ordered v0.2 Slot.
+
+    The Slot has no fixed processing type. Its label is derived from the
+    owning Tone's native ``gear`` metadata and is only a display value; the
+    file extension remains the processing-type boundary in the protocol.
+    """
+
+    can_focus = True
+    ALLOW_SELECT = False
+
+    class SwitchRequested(Message):
+        def __init__(self, index: int, direction: int) -> None:
+            super().__init__()
+            self.index = index
+            self.direction = direction
+
+    class ToggleRequested(Message):
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
+    class DeleteRequested(Message):
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
+    class MoveRequested(Message):
+        def __init__(self, index: int, direction: int) -> None:
+            super().__init__()
+            self.index = index
+            self.direction = direction
+
+    BINDINGS = [
+        Binding("up", "switch_up", "prev model", show=False),
+        Binding("down", "switch_down", "next model", show=False),
+        Binding("enter", "toggle_bypass", "bypass/restore", show=False),
+        Binding("d", "delete_slot", "delete", show=False),
+        Binding("alt+up", "move_up", "move up", show=False),
+        Binding("alt+down", "move_down", "move down", show=False),
+    ]
+
+    def __init__(self, index: int, snapshot: SlotSnapshot,
+                 *, title: str | None = None, gear: str | None = None) -> None:
+        self.index = index
+        self.snapshot = snapshot
+        self.title = title
+        self.gear = gear
+        self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
+        super().__init__(classes="chain-slot")
+
+    @property
+    def status(self) -> SlotStatus:
+        return self.snapshot.status
+
+    def _display_label(self) -> str:
+        if self.status is SlotStatus.EMPTY:
+            return "SLOT"
+        return str(self.gear or "SLOT").upper()
+
+    def _state_lamp(self) -> str:
+        if self.status is SlotStatus.ACTIVE:
+            return "[bold $success]●[/]"
+        if self.status is SlotStatus.BYPASS:
+            return "[bold $error]●[/]"
+        return "[bold $state-idle]○[/]"
+
+    def _update_border(self) -> None:
+        parent = self.parent
+        if parent is None:
+            return
+        target = " - TARGET" if getattr(self, "is_target", False) else ""
+        parent.border_title = (
+            f"{self._state_lamp()} {self._display_label()}{target}")
+
+    def _content_width(self) -> int:
+        return max(12, (self.size.width or 28) - 2)
+
+    def _window(self, value: str, width: int) -> str:
+        if self.has_focus and cell_len(value) > width:
+            return marquee_window(value, width, getattr(self, "_offset", 0))
+        return ellipsis_window(value, width)
+
+    def on_mount(self) -> None:
+        self._offset = 0
+        self.is_target = getattr(self, "is_target", False)
+        self._update_border()
+
+    def on_focus(self, _event) -> None:
+        self._offset = 0
+        self._update_border()
+        self.refresh()
+
+    def on_blur(self, _event) -> None:
+        self._offset = 0
+        self.refresh()
+
+    def on_resize(self, _event) -> None:
+        self.refresh()
+
+    def set_target(self, value: bool) -> None:
+        if getattr(self, "is_target", False) == value:
+            return
+        self.is_target = value
+        self._update_border()
+        self.refresh()
+
+    def set_snapshot(self, snapshot: SlotSnapshot, *, title: str | None,
+                     gear: str | None) -> None:
+        self.snapshot = snapshot
+        self.title = title
+        self.gear = gear
+        self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
+        self._offset = 0
+        self._update_border()
+        self.refresh()
+
+    def render(self) -> str:
+        width = self._content_width()
+        if self.status is SlotStatus.EMPTY:
+            return f"[dim]{self.index + 1:02d}  NONE[/]\n"
+
+        filename = self.filename or ""
+        sequence = f"{self.index + 1:02d}  "
+        primary_width = max(1, width - len(sequence))
+        primary = sequence + self._window(self.title or filename, primary_width)
+        if self.status is SlotStatus.BYPASS:
+            secondary_width = max(1, width - len("  BYPASS"))
+            secondary = self._window(filename, secondary_width)
+            secondary = (
+                f"[dim]{_escape(secondary)}[/]  "
+                f"[b $error]BYPASS[/]")
+        else:
+            secondary = f"[dim]{_escape(self._window(filename, width))}[/]"
+        overlay = self.snapshot.overlay
+        if overlay is SlotOverlay.LOADING:
+            secondary += " [dim]loading…[/]"
+        elif overlay is SlotOverlay.ERROR and self.snapshot.error:
+            secondary += f" [b $error]{_escape(self.snapshot.error)}[/]"
+        return f"[b]{_escape(primary)}[/]\n{secondary}"
+
+    def on_click(self, event: MouseEvent) -> None:
+        self.focus()
+        if getattr(event, "chain", 1) >= 2:
+            self.post_message(self.ToggleRequested(self.index))
+        event.stop()
+
+    def action_switch_up(self) -> None:
+        self.post_message(self.SwitchRequested(self.index, -1))
+
+    def action_switch_down(self) -> None:
+        self.post_message(self.SwitchRequested(self.index, +1))
+
+    def action_toggle_bypass(self) -> None:
+        self.post_message(self.ToggleRequested(self.index))
+
+    def action_delete_slot(self) -> None:
+        self.post_message(self.DeleteRequested(self.index))
+
+    def action_move_up(self) -> None:
+        self.post_message(self.MoveRequested(self.index, -1))
+
+    def action_move_down(self) -> None:
+        self.post_message(self.MoveRequested(self.index, +1))
+
+
+class ChainSlotAction(Static):
+    """Fixed-width model-switch action cell beside one Slot."""
+
+    ALLOW_SELECT = False
+
+    def __init__(self, slot: ChainSlotWidget, direction: int) -> None:
+        self.slot = slot
+        self.direction = direction
+        arrow = "↑" if direction < 0 else "↓"
+        name = "up" if direction < 0 else "down"
+        super().__init__(f"[bold]{arrow}[/]", id=f"chain-slot-{slot.index}-{name}",
+                         classes="chain-slot-action")
+
+    def on_click(self, event: MouseEvent) -> None:
+        self.slot.focus()
+        self.slot.post_message(
+            ChainSlotWidget.SwitchRequested(self.slot.index, self.direction))
+        event.stop()
+
+
+class AddSlotButton(Static):
+    """The only way to create an Empty Slot."""
+
+    can_focus = True
+    ALLOW_SELECT = False
+
+    class Requested(Message):
+        pass
+
+    BINDINGS = [Binding("+", "add_slot", "add slot", show=False)]
+
+    def __init__(self, *, disabled: bool = False) -> None:
+        super().__init__(id="chain-add-slot", classes="chain-add-slot")
+        self.disabled = disabled
+
+    def render(self) -> str:
+        if self.disabled:
+            return f"[dim]6/{MAX_SLOTS} slots[/]"
+        return "[b $accent]+[/] add slot"
+
+    def on_click(self, event: MouseEvent) -> None:
+        if not self.disabled:
+            self.post_message(self.Requested())
+        event.stop()
+
+    def action_add_slot(self) -> None:
+        if not self.disabled:
+            self.post_message(self.Requested())
 
 
 class ChainPanel(Vertical):
@@ -838,6 +1188,9 @@ class ChainPanel(Vertical):
         Binding("right", "view_selection", "selection", show=False),
     ]
 
+    # Canonical v0.2 chains recompose only their dynamic Slot list. The
+    # legacy branch below exists for read-only compatibility with v0.1 test
+    # fixtures and is never used for a canonical ``slots[]`` chain.
     chain: reactive[dict] = reactive({}, recompose=False)
 
     def action_view_description(self) -> None:
@@ -850,8 +1203,108 @@ class ChainPanel(Vertical):
         super().__init__()
         self.border_title = "TONE CHAIN"
         self._hint_state = ""
-        # 提示行 d delete 的兜底目标：最后一次聚焦的 AMP/CAB 节点。
+        initial = live.read_chain()
+        self._legacy_mode = bool(initial) and "slots" not in initial
+        self.set_class(not self._legacy_mode, "chain-panel-dynamic")
+        self._state = ChainState(initial if not self._legacy_mode else {})
+        self._observed_chain_fingerprint: str | None = None
+        self._slot_metadata_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._slot_widgets: dict[int, ChainSlotWidget] = {}
+        self._last_focus_slot: int | None = None
+        # Legacy hint fallback: last focused fixed AMP/CAB node.
         self._last_focus_node: NodeWidget | None = None
+
+    @property
+    def state(self) -> ChainState:
+        """The process-local ordered state used by the dynamic panel."""
+        return self._state
+
+    @property
+    def slot_widgets(self) -> tuple[ChainSlotWidget, ...]:
+        return tuple(self._slot_widgets.values())
+
+    def _slot_metadata(self, path: str | None) -> tuple[str | None, str | None]:
+        if not path:
+            return None, None
+        if path in self._slot_metadata_cache:
+            return self._slot_metadata_cache[path]
+        title: str | None = None
+        gear: str | None = None
+        try:
+            title = library.tone_title_for_path(path)
+        except Exception:
+            pass
+        try:
+            models = library.local_models_by_tone(path) or []
+            if models:
+                tone = library.get_tone(models[0].get("tone_id")) or {}
+                title = tone.get("title") or title
+                gear = tone.get("gear") or None
+        except Exception:
+            pass
+        result = (title, str(gear) if gear else None)
+        self._slot_metadata_cache[path] = result
+        return result
+
+    def _dynamic_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
+        """Return the canonical ChainPanel action suffix.
+
+        The state prefix is rebuilt separately so a changing target/count can
+        grow to the left without moving the stable action suffix's right edge.
+        """
+        index = self._last_focus_slot
+        if index is None:
+            index = self.state.target_index
+
+        def send(message: Message) -> None:
+            slot = self._slot_widgets.get(index) if index is not None else None
+            if slot is None:
+                self.app.notify("Add or select a target slot", severity="warning")
+                return
+            message.set_sender(slot)
+            slot.post_message(message)
+
+        actions: list[tuple[str, Callable[[], None]]] = []
+        if self.state.slot_count < MAX_SLOTS:
+            actions.append((
+                "+ add", lambda: self.post_message(AddSlotButton.Requested())))
+        actions.extend([
+            ("d delete", lambda: send(
+                ChainSlotWidget.DeleteRequested(index))),
+            ("enter bypass/restore", lambda: send(
+                ChainSlotWidget.ToggleRequested(index))),
+            ("⌥↑ move", lambda: send(
+                ChainSlotWidget.MoveRequested(index, -1))),
+            ("⌥↓ move", lambda: send(
+                ChainSlotWidget.MoveRequested(index, +1))),
+            ("↑/↓ model", lambda: send(
+                ChainSlotWidget.SwitchRequested(index, +1))),
+            ("space play/pause", lambda: self._fire_node_message(
+                self.input_node, self.input_node.PlaybackRequested("toggle"))),
+        ])
+        # The generic hint fitter keeps a rightmost suffix when space is very
+        # tight. ChainPanel has a different priority contract: add/delete and
+        # the current Slot action must survive before move/model/playback. Keep
+        # the highest-priority prefix here, then let the shared fitter shorten
+        # complete labels to key-only tokens.
+        width = self.region.width or (self.size.width + 4)
+        budget = max(width - 6, 1)
+        selected: list[tuple[str, Callable[[], None]]] = []
+        for action in actions:
+            keys = [label.strip().split(None, 1)[0]
+                    for label, _callback in (*selected, action)]
+            if cell_len(" · ".join(keys)) > budget:
+                break
+            selected.append(action)
+        return selected or actions[:1]
+
+    def _dynamic_hint_state(self) -> str:
+        state = f"{self.state.slot_count}/{MAX_SLOTS} slots"
+        if self.state.target_index is not None:
+            state += f" · target {self.state.target_index + 1:02d}"
+        if self.state.chain_error:
+            state += " · error"
+        return state
 
     def _hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
         """Right-corner border hint, one clickable token per action.
@@ -862,6 +1315,8 @@ class ChainPanel(Vertical):
         case that actually works (d/space/s/l are lowercase bindings). ↑/↓
         model switching is a keyboard action with no click target — not hinted.
         """
+        if not self._legacy_mode:
+            return self._dynamic_hint_actions()
         width = self.region.width or (self.size.width + 4)
         # Match Textual's border subtitle budget: two edge cells plus one
         # corner cell on each side are unavailable to the label content.
@@ -927,8 +1382,9 @@ class ChainPanel(Vertical):
         self._fire_node_message(node, node.DeleteRequested(node.kind))
 
     def _refresh_hint(self) -> None:
+        state = self._dynamic_hint_state() if not self._legacy_mode else self._hint_state
         set_border_hint_layout(
-            self, self._hint_state,
+            self, state,
             [label for label, _action in self._hint_actions()])
 
     def on_mount(self) -> None:
@@ -939,6 +1395,32 @@ class ChainPanel(Vertical):
             self._refresh_hint()
 
     def compose(self) -> ComposeResult:
+        if not self._legacy_mode:
+            self._slot_widgets = {}
+            with Horizontal(classes="chain-node-row chain-node-row-input"):
+                self.input_node = InputNodeWidget()
+                yield self.input_node
+            for snapshot in self.state.slots:
+                path = snapshot.path or snapshot.candidate
+                title, gear = self._slot_metadata(path)
+                with Horizontal(
+                        classes="chain-slot-row",
+                        id=f"chain-slot-row-{snapshot.index}"):
+                    slot = ChainSlotWidget(
+                        snapshot.index, snapshot, title=title, gear=gear)
+                    slot.is_target = snapshot.index == self.state.target_index
+                    self._slot_widgets[snapshot.index] = slot
+                    yield slot
+                    with Horizontal(classes="chain-slot-actions"):
+                        yield ChainSlotAction(slot, -1)
+                        yield ChainSlotAction(slot, +1)
+            self.add_slot = AddSlotButton(
+                disabled=self.state.slot_count >= MAX_SLOTS)
+            yield self.add_slot
+            self.params = ChainParams(
+                "", classes="chain-params", split_focus=True)
+            yield self.params
+            return
         # REQ-043 追加：聚焦 marquee 行已删——节点框本身显示标题+文件名，
         # 边框标题显示 type；链面板顶部直接是 INPUT 行。
         with Horizontal(classes="chain-node-row chain-node-row-input"):
@@ -994,7 +1476,86 @@ class ChainPanel(Vertical):
         if hasattr(self, "input_node") and self.input_node.is_file:
             self.input_node.set_playback(state, pos_sec, self.input_node.play_loop)
 
+    def _refresh_dynamic_slots(self) -> None:
+        if self._legacy_mode:
+            return
+        target = self.state.target_index
+        for index, widget in self._slot_widgets.items():
+            if index >= self.state.slot_count:
+                continue
+            snapshot = self.state.slot(index)
+            path = snapshot.path or snapshot.candidate
+            title, gear = self._slot_metadata(path)
+            widget.set_snapshot(snapshot, title=title, gear=gear)
+            widget.set_target(index == target)
+        if hasattr(self, "add_slot"):
+            self.add_slot.disabled = self.state.slot_count >= MAX_SLOTS
+            self.add_slot.refresh()
+        if hasattr(self, "params"):
+            chain = self.state.to_chain()
+            self.params.set_values(
+                float(chain.get("gain", live.CHAIN_PARAMETER_DEFAULTS["gain"])),
+                float(chain.get("master", live.CHAIN_PARAMETER_DEFAULTS["master"])),
+                float(chain.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])),
+            )
+        self._refresh_hint()
+
+    async def _recompose_dynamic(self, focus_index: int | None = None) -> None:
+        await self.recompose()
+        self._refresh_dynamic_slots()
+        if focus_index is not None:
+            slot = self._slot_widgets.get(focus_index)
+            if slot is not None:
+                slot.focus()
+
+    def _schedule_dynamic_recompose(self, focus_index: int | None = None) -> None:
+        if self._legacy_mode or not getattr(self, "is_mounted", False):
+            return
+        if getattr(self, "_recompose_pending", False):
+            return
+        self._recompose_pending = True
+
+        async def refresh() -> None:
+            try:
+                await self._recompose_dynamic(focus_index)
+            finally:
+                self._recompose_pending = False
+
+        self.run_worker(refresh(), name="chain-recompose", exclusive=True)
+
     def watch_chain(self, chain: dict) -> None:
+        if self._legacy_mode and isinstance(chain, dict) and "slots" in chain:
+            self._legacy_mode = False
+            self.add_class("chain-panel-dynamic")
+            self._state = ChainState(chain)
+            self._observed_chain_fingerprint = None
+            self._schedule_dynamic_recompose()
+        if not self._legacy_mode:
+            if not isinstance(chain, dict):
+                return
+            try:
+                observed = chain_fingerprint(chain)
+            except (TypeError, ValueError):
+                observed = None
+            if observed != self._observed_chain_fingerprint:
+                self._state.reconcile(
+                    chain,
+                    fingerprint=live.last_chain_write_fingerprint(),
+                    revision=chain.get("revision"),
+                )
+                self._observed_chain_fingerprint = observed
+            if len(self._slot_widgets) != self.state.slot_count:
+                self._schedule_dynamic_recompose(self.state.target_index)
+            inp = live.chain_input(chain)
+            if inp.get("source") == "file" and inp.get("file"):
+                self.input_node.set_file(inp["file"])
+                state = inp.get("state", live.PLAY_STOPPED)
+                self.input_node.set_playback(state, 0.0, bool(inp.get("loop")))
+            else:
+                self.input_node.set_instrument(
+                    getattr(self.app, "_dev_in", "") or "default device")
+            self._refresh_dynamic_slots()
+            return
         inp = live.chain_input(chain)
         if inp.get("source") == "file" and inp.get("file"):
             self.input_node.set_file(inp["file"])
@@ -1011,6 +1572,14 @@ class ChainPanel(Vertical):
         self.params.set_values(gain, master, quality)
 
     def on_descendant_focus(self, event) -> None:
+        if not self._legacy_mode and isinstance(event.widget, ChainSlotWidget):
+            self._last_focus_slot = event.widget.index
+            try:
+                self.state.focus_slot(event.widget.index)
+            except ChainStateError:
+                return
+            self._refresh_dynamic_slots()
+            return
         if isinstance(event.widget, NodeWidget):
             if event.widget.kind in ("amp", "cab"):
                 self._last_focus_node = event.widget

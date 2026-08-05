@@ -2379,8 +2379,14 @@ def test_chain_blank_click_focuses_panel(monkeypatch):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
             panel = app.query_one(ChainPanel)
-            effect = app.query_one(".chain-effect")
-            await pilot.click(effect)
+            effects = list(app.query(".chain-effect"))
+            if effects:
+                # Legacy chains still expose a placeholder effect row.
+                await pilot.click(effects[0])
+            else:
+                # Canonical v0.2 chains have only dynamic Slots; exercise the
+                # same blank-panel fallback on the panel border instead.
+                await pilot.click(panel, offset=(panel.size.width - 1, 0))
             await pilot.pause()
             assert app.focused is panel
 
