@@ -10,11 +10,17 @@ lives at `data/gigbuddy.db` (SQLite, schema in docs/library-schema.md) — it is
 durable asset you write to and query through the `gigbuddy` CLI:
 
 ```
-bin/gigbuddy tone search <query> [--gear amp|cab|amp-cab] [--limit N]
+bin/gigbuddy tone search <query> [--gear amp|cab|amp-cab] [--author A] [--tag T] [--limit N]
 bin/gigbuddy tone import <id>        # metadata + model files -> DB + data/tones/
 bin/gigbuddy tone list [--gear ...] [--query ...] [--limit N]
-bin/gigbuddy tone show <id>
+bin/gigbuddy tone show <id> [--json] # full metadata incl. description (local library)
 bin/gigbuddy chain get / set '<json>'   # data/live_chain.json (engine hot-swaps, UI follows)
+bin/gigbuddy preset list [--json]    # named chain snapshots (manage below)
+bin/gigbuddy preset save <name> [--note "..."]   # snapshot the CURRENT live chain
+bin/gigbuddy preset load <name>      # apply a preset to the live chain
+bin/gigbuddy preset show <name> [--json] | preset current | preset rename <old> <new>
+bin/gigbuddy preset note <name> [text]   # rewrite a note without touching the chain
+bin/gigbuddy preset delete <name>
 ```
 
 ## Workflow
@@ -64,6 +70,48 @@ bin/gigbuddy chain get / set '<json>'   # data/live_chain.json (engine hot-swaps
 
 7. **Report**: chain JSON, local file paths, confidence annotations
    (confirmed = from real search/import output).
+
+## 批量 preset 生成
+
+触发场景：用户要"一系列 preset / 风格包 / 给我 N 个不同风格的链"（如"来 5 个风格包：清音、crunch、金属、布鲁斯、爵士"）。
+
+核心语义：`preset save <name>` **快照当前 live chain**（`data/live_chain.json` 的 model/ir/gain/master/quality；库内文件的 model/ir 存为逻辑引用 `model_id`，外部路径原样保留），不是"从参数构造链"。批量生成 = **逐风格循环**：`chain set` 写入链 → `preset save` 快照 → 下一个。`chain set` 是整体覆盖写（不是合并），每次必须给全 `model`/`ir`/`gain`/`master`。
+
+工作流：
+
+1. **解析意图 → 风格清单**：从用户描述归纳 N 个风格，每个风格明确：① amp 搜索词（风格/乐手/设备）② 期望性格（clean / overdrive / high-gain）③ 是否需要 cab IR。在报告中先列清单让用户确认（可一次性全部生成）。
+
+2. **逐风格搜索并记录真实 id**：
+   ```bash
+   bin/gigbuddy tone search "<amp terms>" --gear amp --limit 10
+   bin/gigbuddy tone search "<cab terms>" --gear cab --limit 10   # 需要 IR 时
+   bin/gigbuddy tone search "<terms>" --author <user> --tag <tag> # 可选精确过滤
+   ```
+   与单链流程一致：偏好 `gear=amp/amp-cab`、高下载、标题贴合；amp-cab 一体 tone 不再单独找 cab。**记录真实 tone_id**（Hard rules）。
+
+3. **Import 并读描述分析**（`tone show` 的 description 是 note 的素材来源）：
+   ```bash
+   bin/gigbuddy tone import <id>        # 幂等，重复导入无副作用
+   bin/gigbuddy tone show <id>          # 本地库全字段：description/tags/gear…
+   ```
+   从 description/tags 归纳该音色的性格、适用场景、音色特点（如"通透清音、适合 funk/雷鬼"），作为该 preset note 的分析结论。搜索 hit 本身不含 description——描述一律以 import 后的 `tone show` 为准。
+
+4. **组装链并批量快照**（循环每个风格）：
+   ```bash
+   bin/gigbuddy chain set '{"model": "data/tones/<id>-<title-slug>/<exact-basename>.nam", "ir": "...", "gain": 1.0, "master": 0.8}'
+   bin/gigbuddy preset save "<风格>-<特征>" --note "<分析摘要：性格/适用场景/音色特点>"
+   ```
+   命名建议：小写 ASCII 连字符 `<风格>-<特征>`（如 `blues-clean-70s`、`metal-modern-gain`、`jazz-clean-neck`）；同名会覆盖——批量前先 `preset list` 检查是否与既有 preset 冲突，冲突时换名或先问用户。注意 `preset save` 会把刚保存的 preset 设为 active preset（`preset current` 可见），批量保存后 active 指向最后一条——按需用 `preset load` 切回。
+
+5. **验证**：
+   ```bash
+   bin/gigbuddy preset list                 # 全部 preset + active 标记
+   bin/gigbuddy preset show <name> --json   # 单条：model_id/路径/gain/master/note
+   bin/gigbuddy preset load <name>          # 抽查：应用到 live chain（引擎 ~0.3s 热换）
+   ```
+   检查：每条 preset 的 model_id/路径来自真实输出、note 与分析结论一致、amp-cab 判断正确。
+
+后续维护（同样走 CLI）：改 note 不动链用 `preset note <name> "<新文本>"`（省略文本即清空）；改名 `preset rename <old> <new>`；删除 `preset delete <name>`。
 
 ## Hard rules
 

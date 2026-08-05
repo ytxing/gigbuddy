@@ -12,9 +12,13 @@ CLI:
     tone3000.py dry <dest> [name...]        # 下载试听干音素材（MIT，mayer/brit/rollin 等）
 """
 import json
+import http.client
 import re
+import ssl
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -30,14 +34,112 @@ KEY = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
        "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6eWJpdW9weGtkeGJ5dG5vamRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgwODIxNjUsImV4cCI6MjA1MzY1ODE2NX0."
        "Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU")
 
+ROOT = Path(__file__).resolve().parent.parent
+VERIFIED_FILE = ROOT / "data" / "verified_users.json"
+_verified_cache: set[str] | None = None
+_verified_write_lock = threading.Lock()
+
+# tone3000.com sits behind Cloudflare: the default urllib UA gets the
+# __next_error__ page, but a full browser UA passes through.
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/126.0 Safari/537.36")
+
+
+def verified_users() -> set[str]:
+    """Usernames carrying TONE3000's "Verified Profiles" badge.
+
+    The badge is rendered from server-side data the public REST API does not
+    expose (users table has no flag), so the list is mirrored from the website
+    author pages into data/verified_users.json; verify_username() adds entries
+    on demand and scripts/fetch_verified_users.py refreshes the whole set.
+    Falls back to empty on missing/corrupt file so callers never break.
+    """
+    global _verified_cache
+    if _verified_cache is None:
+        try:
+            with VERIFIED_FILE.open() as fh:
+                _verified_cache = set(json.load(fh).get("users") or [])
+        except (OSError, ValueError, TypeError, KeyError):
+            _verified_cache = set()
+    return _verified_cache
+
+
+def is_verified(username: str | None) -> bool:
+    """Return whether a username is present in the persisted positive cache."""
+    name = str(username or "").lower()
+    return bool(name) and name in verified_users()
+
+
+def verify_username(username: str, *, timeout: float = 8.0) -> bool | None:
+    """Check the "Verified Profiles" badge for one author, live.
+
+    The badge is server-rendered and the REST API exposes no flag, so the
+    author page is fetched (full browser UA passes Cloudflare) and scanned for
+    the badge's "Verified Profiles" tooltip string. Returns True/False on
+    success (True is persisted into verified_users.json so later lookups are
+    free); None on network/parse failure — callers then keep showing no badge
+    and may retry on the next detail view.
+    """
+    name = str(username or "").lower()
+    if not name:
+        return False
+    if name in verified_users():
+        return True
+    req = urllib.request.Request(
+        f"https://www.tone3000.com/{name}?_data",
+        headers={"User-Agent": BROWSER_UA,
+                 "Accept": "text/html,application/xhtml+xml"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            html = response.read(2 * 1024 * 1024)  # marker sits early in page
+    except Exception:
+        return None
+    ok = b"Verified Profiles" in html
+    if ok:
+        _remember_verified(name)
+    return ok
+
+
+def _remember_verified(name: str) -> None:
+    """Persist a freshly confirmed verification (atomic file replace)."""
+    global _verified_cache
+    with _verified_write_lock:
+        if _verified_cache is None:
+            verified_users()
+        _verified_cache.add(name)
+        try:
+            data = json.loads(VERIFIED_FILE.read_text())
+        except (OSError, ValueError, TypeError):
+            data = {"note": "TONE3000 'Verified Profiles' usernames."}
+        users = set(data.get("users") or []) | {name}
+        data["users"] = sorted(users)
+        data["verified_at"] = time.strftime("%Y-%m-%d")
+        tmp = VERIFIED_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.replace(VERIFIED_FILE)
+
+
+def _open_json(req):
+    """Read a TONE3000 API response with bounded retry for dropped TLS links."""
+    transient = (urllib.error.URLError, ssl.SSLError, TimeoutError,
+                 ConnectionResetError, http.client.IncompleteRead)
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read())
+        except transient:
+            if attempt == 2:
+                raise
+            time.sleep(0.5 * (2 ** attempt))
+
 
 def _get(url, **params):
     if params:
         url += "?" + "&".join(f"{k}={urllib.parse.quote(str(v), safe=',.')}" for k, v in params.items())
     req = urllib.request.Request(url, headers={
         "apikey": KEY, "Authorization": f"Bearer {KEY}", "content-profile": "public"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+    return _open_json(req)
 
 
 def _post(url, body):
@@ -45,21 +147,21 @@ def _post(url, body):
                                  headers={"apikey": KEY, "Authorization": f"Bearer {KEY}",
                                           "content-profile": "public", "Content-Type": "application/json"},
                                  method="POST")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+    return _open_json(req)
 
 
 def search(query="", page_size=50, order_by="trending", gear_filters=None,
-           usernames=None, tag_names=None):
+           usernames=None, tag_names=None, make_names=None, page_number=1):
     """search_tones_a2 RPC：关键词 + A2 架构 + 排序（trending / newest / best-match /
     downloads-all-time，对齐 tone3000.com 官网排序；空查询即 trending 流）
 
     gear_filters: None 或合法值列表 — ["amp"] / ["cab"] / ["amp-cab"]（TONE3000 值域，无 "ir"）
-    usernames: 作者名列表（精确），tag_names: 标签名列表（精确）—— 与 query 叠加过滤
+    usernames: 作者名列表（精确），tag_names: 标签名列表（精确），
+    make_names: 设备/Make 名列表（精确）—— 与 query 叠加过滤
     """
     return _post(f"{API}/rpc/search_tones_a2", {
-        "query_term": query, "page_number": 1, "page_size": page_size,
-        "order_by": order_by, "tag_names": tag_names, "make_names": None,
+        "query_term": query, "page_number": page_number, "page_size": page_size,
+        "order_by": order_by, "tag_names": tag_names, "make_names": make_names,
         "gear_filters": gear_filters, "is_calibrated": False, "size_filters": None,
         "usernames": usernames, "architecture_filter": "2"})
 
@@ -73,11 +175,96 @@ def top(limit=50):
 
 def top_favorites(limit=50):
     """收藏排行：search_tones_a2 RPC 无收藏排序（400），走 tones_counts 聚合表。
-    行形状与 search 结果兼容（缺 username/tags，表格显示 @?）。"""
-    return _get(f"{API}/tones_counts",
+
+    行形状与 search 结果兼容。REQ-023：行缺 username/avatar_url（此前表格
+    显示 @?）——按 user_id 批量联查 users 补上（一次 in 过滤请求）。
+    """
+    rows = _get(f"{API}/tones_counts",
                 select="id,title,gear,downloads_count,favorites_count,"
-                       "a2_models_count,irs_count,models_count,created_at",
+                       "a2_models_count,irs_count,models_count,created_at,user_id",
                 order="favorites_count.desc", limit=limit)
+    _attach_usernames(rows)
+    return rows
+
+
+def top_creators(sort_by="tones", page_size=100, page_number=1):
+    """Official TONE3000 creator leaderboard.
+
+    The website's ``/top-creators`` page reads ``user_public_counts`` directly;
+    use the same stable aggregate fields instead of rebuilding creator totals
+    from arbitrary pages of tone search results.
+    """
+    column = {
+        "tones": "public_tones_count",
+        "downloads": "downloads_count",
+        "favorites": "favorites_count",
+        "models": "public_models_count",
+    }.get(sort_by, "public_tones_count")
+    page_size = max(1, int(page_size))
+    page_number = max(1, int(page_number))
+    return _get(
+        f"{API}/user_public_counts",
+        select="*",
+        order=f"{column}.desc,username.asc",
+        limit=page_size,
+        offset=(page_number - 1) * page_size,
+        **{column: "gt.0"},
+    )
+
+
+def _attach_usernames(rows: list[dict]) -> None:
+    """按 user_id 批量联查 users，就地补 username/avatar_url（REQ-023）。"""
+    user_ids = sorted({r.get("user_id") for r in rows if r.get("user_id")})
+    if not user_ids:
+        return
+    users = _get(f"{API}/users", id=f"in.({','.join(user_ids)})",
+                 select="id,username,avatar_url", limit=len(user_ids))
+    by_id = {u["id"]: u for u in users}
+    for row in rows:
+        u = by_id.get(row.get("user_id"))
+        if u:
+            row["username"] = u.get("username")
+            row["avatar_url"] = u.get("avatar_url")
+
+
+def user(username: str) -> dict | None:
+    """用户资料（bio/display_name/avatar/verified 依据等）；查不到返回 None。
+
+    TOP CREATORS 聚焦作者行时展示作者信息用（REQ-012）；verified 徽章仍走
+    verify_username 的独立判定。
+    """
+    rows = _get(f"{API}/users", username=f"eq.{username}", limit=1)
+    return rows[0] if rows else None
+
+
+def user_stats(username: str) -> dict | None:
+    """作者资料 + 四项统计（作者页多行介绍用，REQ-020）。
+
+    stats: tones = 远程真实数（search usernames 的 total_count）；
+    downloads/favorites/models = tones_counts 按 user 的前 200 条求和
+    （PostgREST 聚合端点 400 被禁，这是可用的近似真实值）。
+    """
+    info = user(username)
+    if not info:
+        return None
+    stats = {"tones": None, "downloads": 0, "favorites": 0, "models": 0}
+    uid = info.get("id")
+    try:
+        hits = _get(f"{API}/tones_counts", user_id=f"eq.{uid}",
+                    select="downloads_count,favorites_count,models_count",
+                    limit=200)
+        stats["downloads"] = sum(h.get("downloads_count") or 0 for h in hits)
+        stats["favorites"] = sum(h.get("favorites_count") or 0 for h in hits)
+        stats["models"] = sum(h.get("models_count") or 0 for h in hits)
+    except Exception:
+        pass
+    try:
+        hits = search("", page_size=1, usernames=[username])
+        stats["tones"] = next((h.get("total_count") for h in hits
+                               if h.get("total_count") is not None), None)
+    except Exception:
+        pass
+    return {**info, "stats": stats}
 
 
 def models(tone_id, a2_only=True):
@@ -209,6 +396,36 @@ def tone_by_id(tone_id, with_models=False):
     return t
 
 
+def tones_for_model_ids(model_ids):
+    """Resolve exact TONE3000 model IDs to their parent tone search rows.
+
+    ``search_tones_a2`` has no model-id predicate, so this takes the model
+    lookup path instead of pretending a numeric ID is a title keyword. Each
+    returned tone carries ``matched_model_ids`` for the TUI result label.
+    """
+    ids = list(dict.fromkeys(int(model_id) for model_id in model_ids))
+    if not ids:
+        return []
+    chunks = ",".join(str(model_id) for model_id in ids)
+    models_by_id = {
+        int(row["id"]): row for row in _get(
+            f"{API}/models", id=f"in.({chunks})", select="id,tone_id", limit=len(ids))
+        if row.get("id") is not None and row.get("tone_id") is not None
+    }
+    matches: dict[int, list[int]] = {}
+    for model_id in ids:
+        row = models_by_id.get(model_id)
+        if row:
+            matches.setdefault(int(row["tone_id"]), []).append(model_id)
+    tones = []
+    for tone_id, matched_ids in matches.items():
+        tone = tone_by_id(tone_id)
+        if tone:
+            tone["matched_model_ids"] = matched_ids
+            tones.append(tone)
+    return tones
+
+
 def fmt(t):
     return (f"{t['id']:>7} | dl={t.get('downloads_count', 0):>6} fav={t.get('favorites_count', 0):>5} "
             f"a2={t.get('a2_models_count', 0):>3} | {t.get('gear', '?'):<8} | {t.get('title', '')[:58]} | @{t.get('username', '')}")
@@ -241,25 +458,47 @@ DRY_INPUTS = {
 }
 
 
-def fetch_dry_inputs(dest_dir, names=None):
-    """下载 TONE3000 试听干音（MIT）到 dest_dir。names 为 DRY_INPUTS 的 key 列表，缺省全下"""
+def fetch_dry_inputs(dest_dir, names=None, progress=None):
+    """下载 TONE3000 试听干音（MIT）到 dest_dir。names 为 DRY_INPUTS 的 key 列表，缺省全下。
+    progress(done, total, fname) 可选回调（每文件一次，done=已下载数）"""
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     keys = names or list(DRY_INPUTS)
+    total = len(keys)
+    done = 0
     got = 0
     for k in keys:
         fname = DRY_INPUTS[k]
         out = dest / fname
         if out.exists() and out.stat().st_size > 0:
+            done += 1
             got += 1
             continue
         url = f"{DRY_INPUTS_BASE}/{urllib.parse.quote(fname)}"
         with urllib.request.urlopen(url, timeout=60) as r:
             out.write_bytes(r.read())
+        done += 1
         got += 1
+        if progress:
+            progress(done, total, fname)
         time.sleep(0.1)
-    print(f"干音素材 {got}/{len(keys)} -> {dest}")
+    if progress:
+        progress(done, total, None)
+    print(f"干音素材 {got}/{total} -> {dest}")
     return got
+
+
+def fetch_dry_inputs_missing(dest_dir, names=None):
+    """返回 dest_dir 中缺失（不存在或为空）的干声素材 key 列表。
+    names 为 DRY_INPUTS 的 key 列表，缺省全部"""
+    dest = Path(dest_dir)
+    keys = names or list(DRY_INPUTS)
+    missing = []
+    for k in keys:
+        out = dest / DRY_INPUTS[k]
+        if not out.exists() or out.stat().st_size == 0:
+            missing.append(k)
+    return missing
 
 
 def main():

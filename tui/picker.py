@@ -5,16 +5,23 @@ imported through the same library.import_tone path as the CLI (metadata + downlo
 so any tone picked here is persisted in data/gigbuddy.db.
 """
 import asyncio
+from functools import partial
 import sys
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import VerticalScroll
+from textual.events import Leave, MouseEvent, MouseMove
 from textual.message import Message
 from textual.widgets import Input, Static, Tree
 
-from .modals import ClickSelectTree, GigBuddyModal, ModalBox
-from .metadata import metadata_table
+from .marquee import MarqueeBar
+from .modals import (ClickSelectTree, GigBuddyModal, ModalBox,
+                     border_hint_action_token, border_hint_click,
+                     set_border_hint_hover, set_border_hint_layout)
+from .metadata import SelectableStatic, description_only, theme_colors
+from .selection import NonSelectableStatic  # noqa: E402
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
@@ -68,12 +75,21 @@ class TonePickerScreen(GigBuddyModal):
     TonePickerScreen > ModalBox { width: 92%; height: 92%; margin: 2 4; }
     #pick-search { height: 3; }
     #pick-tree { height: 2fr; }
-    #pick-detail {
+    .pick-detail-scroll {
         height: 1fr; min-height: 11; border-top: solid $primary;
         padding: 0 1; overflow-y: auto;
+        scrollbar-size-horizontal: 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $secondary;
+        scrollbar-color-hover: $accent;
     }
-    #pick-status { height: 2; color: $text-muted; }
+    #pick-status { height: 1; color: $text-muted; }
     """
+
+    BINDINGS = [
+        *GigBuddyModal.BINDINGS,
+        Binding("r", "retry_search", "retry", show=False),
+    ]
 
     class Picked(Message):
         def __init__(self, kind: str, path: str | None,
@@ -91,39 +107,49 @@ class TonePickerScreen(GigBuddyModal):
         self.tone_type = tone_type
 
     def compose(self) -> ComposeResult:
-        title = "AMP tone" if self.kind == "amp" else "IR"
+        title = "AMP tone" if self.kind == "amp" else "CAB"
         box = ModalBox()
         box.border_title = f"PICK {title.upper()}"
         if self.tone_id is not None:
             tone = library.get_tone(self.tone_id) or {}
             if tone.get("title"):
                 box.border_title = f"{tone['title']}"
-                box.border_subtitle = f"pick {title} file · Enter · Esc back"
         with box:
-            hint = ("↑↓ browse files · Enter pick · Esc back" if self.tone_id
-                    is not None else "← search · ↑↓ browse · Enter pick · Esc cancel")
-            yield Static(hint, classes="modal-hint")
+            hint = ("↑↓ browse files · enter pick · esc back" if self.tone_id
+                    is not None else "← search · ↑↓ browse · enter pick · esc cancel")
+            yield NonSelectableStatic(hint, classes="modal-hint")
             yield PickerSearchInput(
                 placeholder="Search TONE3000 (e.g. 'marshall plexi' / 'greenback 1960')",
                 id="pick-search")
+            yield MarqueeBar(id="pick-marquee")
             tree = PickerTree("Library", id="pick-tree")
             tree.show_root = False
             yield tree
-            yield Static("", id="pick-detail")
-            yield Static("", id="pick-status")
+            yield VerticalScroll(
+                SelectableStatic("", id="pick-detail"),
+                classes="pick-detail-scroll")
+            yield MarqueeBar(id="pick-status")
 
     def on_mount(self) -> None:
+        self._request_generation = 0
+        self._last_query = ""
         if self.tone_id is not None:
             self.query_one("#pick-search", Input).display = False
         self._fill_local(expand_tone_id=self.tone_id)
         self.query_one("#pick-tree", Tree).focus()
+        box = self.query_one(ModalBox)
+        set_border_hint_layout(
+            box, "", [token for token, _ in self._border_hint_actions()])
+
+    def on_unmount(self) -> None:
+        self._request_generation = getattr(self, "_request_generation", 0) + 1
 
     def _fill_local(self, expand_tone_id: int | None = None) -> None:
         tree = self.query_one("#pick-tree", Tree)
         tree.reset("Library")
         tree.root.expand()
         if self.kind == "ir" and self.tone_id is None:
-            tree.root.add_leaf("— no IR (bypass) —", {"type": "bypass"})
+            tree.root.add_leaf("CAB — (none)", {"type": "bypass"})
         items = library.list_local_models("ir" if self.kind == "ir" else "amp")
         if self.tone_id is not None:
             items = [item for item in items if item["tone_id"] == self.tone_id]
@@ -147,41 +173,75 @@ class TonePickerScreen(GigBuddyModal):
             else:
                 tree.move_cursor(first)
 
-    def _fill_search(self, query: str) -> None:
+    def _request_alive(self, generation: int, query: str | None = None) -> bool:
+        return (generation == getattr(self, "_request_generation", -1)
+                and bool(getattr(self, "is_mounted", False))
+                and (query is None or query == getattr(self, "_last_query", "")))
+
+    async def _search_remote(self, query: str,
+                             generation: int | None = None) -> None:
+        """Search off the UI loop; keep the previous result until success."""
+        if generation is None:
+            self._request_generation += 1
+            generation = self._request_generation
+        if self._request_alive(generation, query):
+            self.query_one("#pick-status", MarqueeBar).content = (
+                "Searching TONE3000…")
+        try:
+            # IR picker only searches cabs — an amp search hit has no IR models.
+            rows = await asyncio.to_thread(
+                library.tone3000.search,
+                query, page_size=50,
+                gear_filters=["cab"] if self.kind == "ir" else None)
+            rows = await asyncio.to_thread(library.mark_download_state, rows)
+        except Exception as e:
+            if self._request_alive(generation, query):
+                self.query_one("#pick-status", MarqueeBar).content = (
+                    f"Search failed: {e} · press r to retry")
+            return
+        if not self._request_alive(generation, query):
+            return
         tree = self.query_one("#pick-tree", Tree)
         tree.reset("TONE3000 results")
         tree.root.expand()
-        try:
-            # IR picker only searches cabs — an amp search hit has no IR models
-            rows = library.tone3000.search(
-                query, page_size=50,
-                gear_filters=["cab"] if self.kind == "ir" else None)
-        except Exception as e:
-            tree.root.add_leaf(f"(search failed: {e})", None)
-            return
-        rows = library.mark_download_state(rows)
         for t in rows:
             detail = (f"dl={t.get('downloads_count', 0)} gear={t.get('gear', '?')} "
                       f"@{t.get('username', '')}")
             state = t.get("download_state")
             mark = {"all": "[bold $success]✓[/] ",
                     "partial": "[bold $warning]◐[/] ",
-                    "none": "[dim]○[/] "}.get(state, "")
+                    "none": "[bold $state-idle]○[/] "}.get(state, "")
             if state == "all" or state == "partial":
-                detail += f" [dim]已下载 {t.get('downloaded')}/{t.get('models_count', '?')}[/dim]"
+                detail += f" [dim]downloaded {t.get('downloaded')}/{t.get('models_count', '?')}[/dim]"
+            title = str(t.get("title") or "").replace("[", "\\[")
             tree.root.add_leaf(
-                f"{mark}{t.get('title', '')[:46]}  [dim]{detail}[/dim]",
+                f"{mark}{title}  [dim]{detail}[/dim]",
                 {"type": "remote", "tone": t})
+        self.query_one("#pick-status", MarqueeBar).content = (
+            "no results" if not rows else "")
         if tree.root.children:
             tree.move_cursor(tree.root.children[0])
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
+        self._last_query = query
         if query:
-            self._fill_search(query)
+            self._request_generation += 1
+            self.run_worker(
+                partial(self._search_remote, query, self._request_generation),
+                name="picker-search", exclusive=True)
         else:
             self._fill_local()
         self.query_one("#pick-tree", Tree).focus()
+
+    def action_retry_search(self) -> None:
+        query = getattr(self, "_last_query", "")
+        if not query:
+            return
+        self._request_generation += 1
+        self.run_worker(
+            partial(self._search_remote, query, self._request_generation),
+            name="picker-search", exclusive=True)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         self._show_detail(event.node.data)
@@ -199,10 +259,29 @@ class TonePickerScreen(GigBuddyModal):
         if tree.cursor_node is not None:
             self._handle_data(tree.cursor_node.data)
 
+    # ---- clickable border hints --------------------------------------------
+
+    def _border_hint_actions(self) -> list:
+        close_token = "esc back" if self.tone_id is not None else "esc cancel"
+        return [("enter pick", self._confirm), (close_token, self.dismiss)]
+
+    def on_click(self, event: MouseEvent) -> None:
+        border_hint_click(self.query_one(ModalBox), event,
+                          self._border_hint_actions())
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        box = self.query_one(ModalBox)
+        set_border_hint_hover(
+            box, border_hint_action_token(
+                box, event.screen_x, event.screen_y,
+                [token for token, _ in self._border_hint_actions()]))
+
     def _handle_data(self, data: dict | None) -> None:
         if not data:
             return
         kind = data.get("type")
+        if kind == "status":
+            return
         if kind == "bypass":
             self.post_message(self.Picked(self.kind, None, self.tone_type))
             self.dismiss()
@@ -214,45 +293,66 @@ class TonePickerScreen(GigBuddyModal):
             return
         if kind == "remote":
             tone_id = int(data["tone"]["id"])
+            self._request_generation += 1
             self.run_worker(
-                self._import_remote(tone_id), name="picker-import", exclusive=True)
+                partial(self._import_remote, tone_id, self._request_generation),
+                name="picker-import", exclusive=True)
 
-    async def _import_remote(self, tone_id: int) -> None:
+    async def _import_remote(self, tone_id: int,
+                             generation: int | None = None) -> None:
         """Import a remote tone, then open its folder for an explicit model choice."""
-        status = self.query_one("#pick-status", Static)
-        status.update(f"Importing tone {tone_id}…")
+        if generation is None:
+            self._request_generation += 1
+            generation = self._request_generation
+        if self._request_alive(generation):
+            self.query_one("#pick-status", MarqueeBar).content = (
+                f"Importing tone {tone_id}…")
         try:
             t = await asyncio.to_thread(library.import_tone, tone_id, quiet=True)
         except Exception as e:
-            status.update(f"Import failed: {e}")
+            if self._request_alive(generation):
+                self.query_one("#pick-status", MarqueeBar).content = (
+                    f"Import failed: {e}")
+            return
+        if not self._request_alive(generation):
             return
         if not t:
-            status.update(f"TONE3000 has no tone {tone_id}")
+            self.query_one("#pick-status", MarqueeBar).content = (
+                f"TONE3000 has no tone {tone_id}")
             return
         self.query_one("#pick-search", Input).value = ""
         self._fill_local(expand_tone_id=tone_id)
-        status.update(
+        self.query_one("#pick-status", MarqueeBar).content = (
             f"Imported {len(t.get('models') or [])} file(s) — choose a specific file")
         self.query_one("#pick-tree", Tree).focus()
 
     def _show_detail(self, data: dict | None) -> None:
+        banner = self.query_one("#pick-marquee", MarqueeBar)
         detail = self.query_one("#pick-detail", Static)
         if not data:
+            banner.content = None
             detail.update("")
             return
+        colors = theme_colors(self.app)
         kind = data.get("type")
         if kind == "bypass":
-            detail.update(metadata_table(
-                {"title": "IR bypass", "gear": "cab"},
-                note="No cabinet impulse response will be applied."))
+            banner.content = "CAB — (none)"
+            detail.update(description_only(
+                {"description": "No cabinet impulse response will be applied."},
+                colors=colors))
             return
         if kind == "remote":
             t = data["tone"]
-            detail.update(metadata_table(
-                t, note="Enter to import, then choose a specific downloaded file."))
+            banner.content = t.get("title") or ""
+            detail.update(description_only(t, colors=colors))
             return
         model = data.get("model")
         if not model:
+            banner.content = None
             detail.update("")
             return
-        detail.update(metadata_table(model, model))
+        tone = library.get_tone(model.get("tone_id")) or model
+        title = tone.get("title") or ""
+        filename = Path(model.get("local_path") or model.get("name") or "").name
+        banner.content = " · ".join(part for part in (title, filename) if part)
+        detail.update(description_only(tone, model, colors=colors))

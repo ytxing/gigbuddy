@@ -50,3 +50,31 @@
 - 每个节点 `model_file` 必须存在，缺失即报错并指明节点
 - `params.mix` 默认 1.0，越界报错
 - 渲染顺序 = nodes 数组顺序（amp → cab_ir → ...）
+
+## 实时引擎扩展：input 键（干声试听，live_chain.json）
+
+实时引擎（`bin/realtime_cli --live`）使用的扁平链格式（非 nodes DSL）额外支持
+顶层 `input` 键，控制输入源与干声试听回放：
+
+```json
+{
+  "model": "data/tones/.../x.nam",   // 相对项目根路径（portable v0.1，引擎按 --root/exe 位置解析）
+  "ir": "data/tones/.../cab.wav",    // 可省略；null = CAB 直通
+  "gain": 0.8, "master": 0.8, "quality": 1.0,
+  "input": {"source": "file", "file": "data/dry_inputs/Mayer - Guitar.wav",
+            "state": "playing", "loop": true}
+}
+```
+顶层键：`model`/`ir`（模型与箱体路径，均可为 null 表示直通）、`gain`/`master`/
+`quality`（参数）、`input`（输入源与干声试听，见下）。
+
+- `input` 缺失或 `source: "instrument"` → 乐器输入（音频接口，默认）
+- `source: "file"` → 干声 wav 作为输入（TONE3000 网页试听素材，
+  `data/dry_inputs/`，`tone3000.fetch_dry_inputs` 下载）
+- `state`: `playing`（推进）/ `paused`（保留位置）/ `stopped`（归零）
+- `loop`: 循环播放；非循环播完引擎自动回落 stopped
+- 引擎每 0.1s 在 `data/level.json` 回传实际状态：
+  `{"in":…, "out":…, "play_state": "playing", "play_pos": 3.75}`（播放位置秒）
+- TUI 播放控制：全局 `space` 播放/暂停、`s` 停止、`l` 循环；链面板顶部
+  INPUT 节点行显示来源与状态，单击打开输入源选择器
+- preset 只存音色链（不存 input）；加载 preset 保留当前输入源

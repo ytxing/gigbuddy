@@ -69,7 +69,12 @@ static bool read_wav(const char* path, WavData& out) {
                 int16_t v; memcpy(&v, p, 2);
                 out.samples.push_back(v / 32768.0f);
             } else if (bits == 24) {
-                int32_t v = (p[0] << 8) | (p[1] << 16) | (p[2] << 24);
+                // little-endian 24-bit: LSB..MSB with sign in p[2]'s top bit;
+                // the old shift pattern (p0<<8|p1<<16|p2<<24) read the value
+                // 256x too large, slamming every dry input / 24-bit IR into
+                // full-scale clipping.
+                int32_t v = (p[0]) | (p[1] << 8) | (p[2] << 16);
+                if (v & 0x800000) v |= 0xFF000000;   // sign-extend to 32 bit
                 out.samples.push_back(v / 8388608.0f);
             } else if (bits == 32) {
                 int32_t v; memcpy(&v, p, 4);
