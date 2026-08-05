@@ -19,9 +19,11 @@ CLI:
 """
 import argparse
 import json
+import math
 import shutil
 import sqlite3
 import sys
+import warnings
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,7 +139,7 @@ CREATE TABLE IF NOT EXISTS presets (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT UNIQUE NOT NULL,
     note        TEXT,
-    chain_json  TEXT NOT NULL,  -- model/IR refs plus gain, master, quality
+    chain_json  TEXT NOT NULL,  -- ordered Slot refs plus gain, master, quality
     created_at  TEXT,
     updated_at  TEXT
 );
@@ -357,13 +359,20 @@ def _uninstall_plan_for_models(models: list[dict]) -> dict:
     paths = {_to_abs_path(m["local_path"])
              for m in models if m.get("local_path")}
     live = chain_get()
-    active_paths = sorted(
-        path for path in (live.get("model"), live.get("ir")) if path in paths)
+    live_paths = {
+        slot.get("path")
+        for slot in live.get("slots", [])
+        if isinstance(slot, dict) and slot.get("path")
+    }
+    active_paths = sorted(path for path in live_paths if path in paths)
     model_ids = {m["id"] for m in models}
     preset_names = []
     for preset in preset_list():
-        ch = preset["chain"]
-        if ch.get("model_id") in model_ids or ch.get("ir_model_id") in model_ids:
+        ch = preset.get("chain")
+        if not isinstance(ch, dict):
+            continue
+        if any(slot.get("model_id") in model_ids
+               for slot in ch.get("slots", []) if isinstance(slot, dict)):
             preset_names.append(preset["name"])
     root = TONES_DIR.resolve()
     outside_paths = []
@@ -699,34 +708,199 @@ def preset_set_active(name: str | None) -> None:
     _setting_set("active_preset", name)
 
 
-def preset_save(name: str, note: str | None = None, *, set_active: bool = True) -> dict:
-    """Snapshot the current live chain as a named preset.
+_PRESET_DEFAULTS = {"gain": 1.0, "master": 1.0, "quality": 1.0}
 
-    model/ir paths that belong to the library are stored as logic references
-    (model_id) so renames/migrations never break a preset; arbitrary paths are
-    kept verbatim. Overwrites a preset with the same name.
+
+def _preset_number(value: object, name: str, lower: float, upper: float) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Preset {name} must be a finite number")
+    if not math.isfinite(value) or not lower <= value <= upper:
+        raise ValueError(f"Preset {name} must be between {lower} and {upper}")
+    return value
+
+
+def _preset_model_id(value: object, index: int) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Preset Slot {index + 1:02d} model_id is invalid")
+    return value
+
+
+def _preset_note_value(note: str | None) -> str:
+    if note is None:
+        return ""
+    if not isinstance(note, str):
+        raise ValueError("Preset note must be a string")
+    return note if note.strip() else ""
+
+
+def _preset_storage_path(path: object, index: int | None = None) -> str:
+    if not isinstance(path, str) or not path.strip():
+        label = f" Slot {index + 1:02d}" if index is not None else ""
+        raise ValueError(f"Preset{label} path must be a non-empty string")
+    # New writes are portable. Legacy absolute paths are accepted in memory and
+    # become relative only when an explicit save/overwrite occurs.
+    return _to_rel_path(_to_abs_path(path))
+
+
+def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
+    if not isinstance(item, dict):
+        raise ValueError(f"Preset Slot {index + 1:02d} must be an object")
+    if not legacy and "path" not in item:
+        raise ValueError(f"Preset Slot {index + 1:02d} must contain path")
+    model_id = _preset_model_id(item.get("model_id"), index)
+    raw_path = item.get("path")
+    if raw_path is None:
+        if model_id is not None and not legacy:
+            raise ValueError(
+                f"Preset Slot {index + 1:02d} cannot have model_id without path")
+        return {"model_id": model_id, "path": None}
+    return {"model_id": model_id,
+            "path": _preset_storage_path(raw_path, index)}
+
+
+def _legacy_slot(raw: dict, index: int, id_key: str,
+                 path_keys: tuple[str, ...]) -> dict | None:
+    model_id = raw.get(id_key)
+    raw_path = next((raw[key] for key in path_keys if key in raw), None)
+    if model_id is None and raw_path is None:
+        return None
+    # Very old records sometimes retained only the logical id. Resolve it for
+    # the in-memory view when possible; an unresolved id remains load-invalid.
+    if raw_path is None and model_id is not None:
+        raw_path = _model_path(_preset_model_id(model_id, index))
+    return _preset_slot_ref({"model_id": model_id, "path": raw_path}, index,
+                            legacy=True)
+
+
+def _canonical_preset_chain(raw: object) -> dict:
+    """Parse a stored snapshot into the in-memory canonical Preset shape.
+
+    This function is deliberately read-only. It does not update SQLite, so
+    legacy rows remain untouched until an explicit save or overwrite.
     """
+    if not isinstance(raw, dict):
+        raise ValueError("Preset chain must be an object")
+    slots: list[dict] = []
+    if "slots" in raw:
+        legacy_keys = {"model", "ir", "model_id", "model_path",
+                       "ir_model_id", "ir_path"}
+        if legacy_keys.intersection(raw):
+            warnings.warn(
+                "Preset contains slots and legacy model/ir fields; slots take precedence",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        raw_slots = raw["slots"]
+        if not isinstance(raw_slots, list) or len(raw_slots) > 6:
+            raise ValueError("Preset slots must contain between 0 and 6 items")
+        slots = [_preset_slot_ref(item, index)
+                 for index, item in enumerate(raw_slots)]
+    else:
+        for id_key, path_keys in (
+                ("model_id", ("model_path", "model")),
+                ("ir_model_id", ("ir_path", "ir"))):
+            slot = _legacy_slot(raw, len(slots), id_key, path_keys)
+            if slot is not None:
+                slots.append(slot)
+    return {
+        "slots": slots,
+        "gain": _preset_number(raw.get("gain", _PRESET_DEFAULTS["gain"]),
+                                "gain", 0, 10),
+        "master": _preset_number(raw.get("master", _PRESET_DEFAULTS["master"]),
+                                  "master", 0, 10),
+        "quality": _preset_number(
+            raw.get("quality", _PRESET_DEFAULTS["quality"]), "quality", 0, 1),
+    }
+
+
+def _preset_row(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    raw_json = d.pop("chain_json")
+    if d.get("note") is None:
+        d["note"] = ""
+    try:
+        d["chain"] = _canonical_preset_chain(json.loads(raw_json))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        # Keep an invalid row visible to the caller; loading/resolution will
+        # report the error without ever touching the live chain.
+        d["chain"] = None
+        d["chain_error"] = str(exc)
+    return d
+
+
+def _live_preset_chain(cfg: dict) -> dict:
+    """Convert the live path-only chain to a comparable Preset snapshot."""
+    if "slots" in cfg:
+        raw_slots = cfg.get("slots", [])
+    else:
+        # Compatibility for callers passing an old in-memory config directly.
+        raw_slots = []
+        for key in ("model", "ir"):
+            if cfg.get(key) is not None:
+                raw_slots.append({"path": cfg[key]})
+    slots = []
+    for index, item in enumerate(raw_slots):
+        if not isinstance(item, dict):
+            raise ValueError(f"Live Slot {index + 1:02d} is invalid")
+        path = item.get("path")
+        slots.append({"path": None if path is None else _to_abs_path(path)})
+    return {
+        "slots": slots,
+        "gain": cfg.get("gain", _PRESET_DEFAULTS["gain"]),
+        "master": cfg.get("master", _PRESET_DEFAULTS["master"]),
+        "quality": cfg.get("quality", _PRESET_DEFAULTS["quality"]),
+    }
+
+
+def _preset_chain_from_live(cfg: dict) -> dict:
+    raw_slots = cfg.get("slots")
+    if raw_slots is None:
+        raw_slots = []
+        for key in ("model", "ir"):
+            if cfg.get(key) is not None:
+                raw_slots.append({"path": cfg[key]})
+    if not isinstance(raw_slots, list) or len(raw_slots) > 6:
+        raise ValueError("Live chain must contain between 0 and 6 Slots")
+    slots = []
+    for index, item in enumerate(raw_slots):
+        if not isinstance(item, dict):
+            raise ValueError(f"Live Slot {index + 1:02d} is invalid")
+        path = item.get("path")
+        if path is None:
+            slots.append({"model_id": None, "path": None})
+            continue
+        slots.append({
+            "model_id": _model_id_for_path(path),
+            "path": _preset_storage_path(path, index),
+        })
+    return _canonical_preset_chain({
+        "slots": slots,
+        "gain": cfg.get("gain", _PRESET_DEFAULTS["gain"]),
+        "master": cfg.get("master", _PRESET_DEFAULTS["master"]),
+        "quality": cfg.get("quality", _PRESET_DEFAULTS["quality"]),
+    })
+
+
+def preset_save(name: str, note: str | None = None, *, set_active: bool = True) -> dict:
+    """Snapshot the current live chain as a canonical ordered Slot Preset."""
     name = name.strip()
     if not name:
         raise ValueError("Preset name cannot be empty.")
-    cfg = chain_get()
-    chain = {
-        "model_id": _model_id_for_path(cfg.get("model")),
-        "model_path": cfg.get("model"),
-        "ir_model_id": _model_id_for_path(cfg.get("ir")),
-        "ir_path": cfg.get("ir"),
-        "gain": cfg.get("gain", 1.0),
-        "master": cfg.get("master", 1.0),
-        "quality": cfg.get("quality", 1.0),
-    }
+    chain = _preset_chain_from_live(chain_get())
     now = datetime.now(timezone.utc).isoformat()
     with connect() as conn:
+        existing = conn.execute(
+            "SELECT note FROM presets WHERE name = ?", (name,)).fetchone()
+        stored_note = (_preset_note_value(existing["note"])
+                       if note is None and existing else _preset_note_value(note))
         conn.execute(
             "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET note=COALESCE(excluded.note, presets.note), "
+            "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
             "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
-            (name, note, json.dumps(chain, ensure_ascii=False), now, now))
+            (name, stored_note, json.dumps(chain, ensure_ascii=False), now, now))
         if set_active:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES ('active_preset', ?) "
@@ -738,27 +912,18 @@ def preset_save(name: str, note: str | None = None, *, set_active: bool = True) 
 
 
 def preset_get(name: str) -> dict | None:
-    """One preset row (chain_json parsed); None if not found."""
+    """Return one Preset with its chain parsed to the in-memory Slot shape."""
     with connect() as conn:
         row = conn.execute("SELECT * FROM presets WHERE name = ?", (name,)).fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        d["chain"] = json.loads(d.pop("chain_json"))
-        return d
+        return _preset_row(row) if row else None
 
 
 def preset_list() -> list[dict]:
-    """All presets, newest first."""
+    """All Presets, newest first; invalid rows remain inspectable."""
     with connect() as conn:
         rows = conn.execute(
             "SELECT * FROM presets ORDER BY updated_at DESC").fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            d["chain"] = json.loads(d.pop("chain_json"))
-            out.append(d)
-        return out
+        return [_preset_row(row) for row in rows]
 
 
 def preset_delete(name: str) -> bool:
@@ -800,10 +965,11 @@ def preset_rename(old_name: str, new_name: str) -> dict:
 def preset_update_note(name: str, note: str | None) -> dict:
     """Replace a preset note without changing its chain snapshot."""
     now = datetime.now(timezone.utc).isoformat()
+    note = _preset_note_value(note)
     with connect() as conn:
         cur = conn.execute(
             "UPDATE presets SET note = ?, updated_at = ? WHERE name = ?",
-            (note or None, now, name),
+            (note, now, name),
         )
         if not cur.rowcount:
             raise ValueError(f"Preset '{name}' not found.")
@@ -811,17 +977,72 @@ def preset_update_note(name: str, note: str | None) -> dict:
     return preset_get(name)
 
 
+def _validate_preset_file(path: str, index: int) -> str:
+    candidate = Path(_to_abs_path(path))
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to((ROOT / "data" / "tones").resolve(strict=False))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"Slot {index + 1:02d} file missing or outside data/tones: {path}") from exc
+    if not resolved.is_file():
+        raise ValueError(f"Slot {index + 1:02d} file is not regular: {path}")
+    if resolved.suffix.lower() not in {".nam", ".wav"}:
+        raise ValueError(f"Slot {index + 1:02d} has unsupported file format: {path}")
+    return str(resolved)
+
+
+def _resolve_preset_slot(slot: dict, index: int) -> str | None:
+    model_id = slot.get("model_id")
+    saved_path = slot.get("path")
+    if model_id is None and saved_path is None:
+        return None
+    candidates: list[str] = []
+    if model_id is not None:
+        current_path = _model_path(model_id)
+        if current_path:
+            candidates.append(current_path)
+    if saved_path:
+        candidates.append(saved_path)
+    seen: set[str] = set()
+    errors: list[str] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return _validate_preset_file(candidate, index)
+        except ValueError as exc:
+            errors.append(str(exc))
+    if not candidates:
+        raise ValueError(
+            f"Slot {index + 1:02d} model file missing (model_id {model_id})")
+    raise ValueError(
+        f"Slot {index + 1:02d} model file missing or unsupported: "
+        + " | ".join(errors))
+
+
 def _resolved_preset_chain(preset: dict) -> dict:
+    if not isinstance(preset.get("chain"), dict):
+        error = preset.get("chain_error", "invalid chain")
+        raise ValueError(f"Preset '{preset['name']}' is invalid: {error}")
     ch = preset["chain"]
-    return {
-        "model": _model_path(ch["model_id"]) if ch.get("model_id")
-        else (_to_abs_path(ch["model_path"]) if ch.get("model_path") else None),
-        "ir": _model_path(ch["ir_model_id"]) if ch.get("ir_model_id")
-        else (_to_abs_path(ch["ir_path"]) if ch.get("ir_path") else None),
-        "gain": ch.get("gain", 1.0),
-        "master": ch.get("master", 1.0),
-        "quality": ch.get("quality", 1.0),
-    }
+    slots = []
+    errors = []
+    for index, slot in enumerate(ch["slots"]):
+        try:
+            slots.append({"model_id": slot.get("model_id"),
+                          "path": _resolve_preset_slot(slot, index)})
+        except ValueError as exc:
+            errors.append(str(exc))
+            slots.append({"model_id": slot.get("model_id"), "path": None})
+    if errors:
+        raise ValueError(f"Preset '{preset['name']}' cannot be loaded: "
+                         + "; ".join(errors))
+    return {"slots": slots,
+            "gain": ch.get("gain", _PRESET_DEFAULTS["gain"]),
+            "master": ch.get("master", _PRESET_DEFAULTS["master"]),
+            "quality": ch.get("quality", _PRESET_DEFAULTS["quality"])}
 
 
 def preset_resolved_chain(name: str) -> dict:
@@ -833,58 +1054,46 @@ def preset_resolved_chain(name: str) -> dict:
 
 
 def preset_is_dirty(name: str | None = None, chain: dict | None = None) -> bool:
-    """Whether the live chain differs from a preset's effective settings."""
+    """Whether the live chain differs from a Preset's effective Slot snapshot."""
     name = name or preset_current()
     p = preset_get(name) if name else None
     if not p:
         return True
     current = chain_get() if chain is None else chain
-    expected = _resolved_preset_chain(p)
-    actual = {
-        "model": current.get("model"),
-        "ir": current.get("ir"),
-        "gain": current.get("gain", 1.0),
-        "master": current.get("master", 1.0),
-        "quality": current.get("quality", 1.0),
-    }
-    return actual != expected
+    try:
+        expected = _resolved_preset_chain(p)
+        actual = _live_preset_chain(current)
+    except (TypeError, ValueError, KeyError):
+        return True
+    expected_paths = [slot["path"] for slot in expected["slots"]]
+    actual_paths = [slot["path"] for slot in actual["slots"]]
+    return (actual_paths != expected_paths
+            or actual["gain"] != expected["gain"]
+            or actual["master"] != expected["master"]
+            or actual["quality"] != expected["quality"])
 
 
 def preset_load(name: str) -> dict | None:
-    """Apply a preset to the live chain (engine hot-swaps within ~0.3s).
-
-    Model ids resolve to their current library paths; a preset whose files are
-    gone raises ValueError naming the missing file. Returns the written config.
-    """
+    """Atomically resolve and apply a whole Preset Slot snapshot."""
     p = preset_get(name)
     if not p:
         raise ValueError(f"Preset '{name}' not found.")
-    ch = p["chain"]
-    cfg: dict = {"gain": ch.get("gain", 1.0), "master": ch.get("master", 1.0),
-                 "quality": ch.get("quality", 1.0)}
-
-    model = _model_path(ch["model_id"]) if ch.get("model_id") else ch.get("model_path")
-    if not model or not Path(model).is_file():
-        why = f"(model_id {ch['model_id']} unresolved)" if ch.get("model_id") else "(no model)"
-        raise ValueError(f"Preset '{name}': model file missing -> {model or why}")
-    cfg["model"] = model
-
-    ir = _model_path(ch["ir_model_id"]) if ch.get("ir_model_id") else ch.get("ir_path")
-    if ir:
-        if not Path(ir).is_file():
-            raise ValueError(f"Preset '{name}': IR file missing -> {ir}")
-        cfg["ir"] = ir
-    else:
-        # preset 没有 CAB：显式置 null 让引擎移除旧 IR——键缺失时引擎不会
-        # 更新（apply_chain 只处理存在的键），旧 CAB 会残留并误显示在链上
-        cfg["ir"] = None
-    # 输入源（乐器/干声文件+播放状态）不属于 preset 内容：加载 preset 保留当前输入源
+    resolved = _resolved_preset_chain(p)
+    # Resolve every Slot before constructing or writing the replacement. A
+    # missing later Slot must leave the current live file untouched.
     cur = chain_get()
+    cfg: dict = {
+        "slots": [{"path": slot["path"]} for slot in resolved["slots"]],
+        "gain": resolved["gain"],
+        "master": resolved["master"],
+        "quality": resolved["quality"],
+        "mute": cur.get("mute", False),
+    }
     if isinstance(cur.get("input"), dict):
         cfg["input"] = cur["input"]
     chain_set(cfg)
     preset_set_active(name)
-    return cfg
+    return chain_get()
 
 
 # Built-in catalog, resolved from exact local model ids at seed time.
@@ -1018,18 +1227,19 @@ def preset_seed(*, replace: bool = False) -> int:
             print(f"[preset seed] skipped {name}: model {amp_id} is not available locally")
             continue
         chain = {
-            "model_id": amp_id,
-            "model_path": _model_path(amp_id),
-            "ir_model_id": None, "ir_path": None,
-            "gain": 0.8, "master": 0.8,
-            "quality": 1.0,
+            "slots": [{"model_id": amp_id,
+                       "path": _preset_storage_path(_model_path(amp_id))}],
+            "gain": 0.8, "master": 0.8, "quality": 1.0,
         }
         if ir_id is not None:
             if not _model_path(ir_id):
                 print(f"[preset seed] skipped {name}: IR model {ir_id} is not available locally")
                 continue
-            chain["ir_model_id"] = ir_id
-            chain["ir_path"] = _model_path(ir_id)
+            chain["slots"].append({
+                "model_id": ir_id,
+                "path": _preset_storage_path(_model_path(ir_id)),
+            })
+        chain = _canonical_preset_chain(chain)
         now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
             conn.execute(
@@ -1046,6 +1256,23 @@ def preset_seed(*, replace: bool = False) -> int:
 
 
 # ---- CLI -----------------------------------------------------------------
+
+def _preset_slot_summary(chain: dict | None) -> str:
+    if not isinstance(chain, dict):
+        return "invalid"
+    labels = []
+    for slot in chain.get("slots", []):
+        if not isinstance(slot, dict):
+            labels.append("INVALID")
+            continue
+        if slot.get("path") is None:
+            labels.append("NONE" if slot.get("model_id") is None
+                          else f"#{slot['model_id']}")
+        elif slot.get("model_id") is not None:
+            labels.append(f"#{slot['model_id']}")
+        else:
+            labels.append(Path(slot["path"]).name)
+    return " > ".join(labels) if labels else "(empty)"
 
 def _fmt_table(tones: list[dict]) -> str:
     rows = [
@@ -1191,12 +1418,11 @@ def main(argv: list[str] | None = None) -> int:
             elif presets:
                 active = preset_current()
                 for p in presets:
-                    ch = p["chain"]
-                    amp = ch.get("model_id") or ch.get("model_path") or "—"
-                    ir = ch.get("ir_model_id") or ch.get("ir_path") or "bypass"
+                    ch = p["chain"] or {}
                     marker = ">" if p["name"] == active else " "
                     dirty = " *" if p["name"] == active and preset_is_dirty(active) else ""
-                    print(f"{marker} {p['name']:<28}{dirty} | amp {amp} | ir {ir} | "
+                    print(f"{marker} {p['name']:<28}{dirty} | slots "
+                          f"{_preset_slot_summary(ch)} | "
                           f"gain {ch.get('gain')} master {ch.get('master')} "
                           f"quality {ch.get('quality', 1.0)}"
                           + (f" | {p.get('note')}" if p.get("note") else ""))
@@ -1220,7 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
             if not p:
                 print(f"Preset '{args.name}' not found.")
                 return 1
-            ch = p["chain"]
+            ch = p["chain"] or {}
             if args.json:
                 print(json.dumps(p, ensure_ascii=False, indent=2))
                 return 0
@@ -1229,13 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"note       {p['note']}")
             print(f"created    {p.get('created_at')}")
             print(f"updated    {p.get('updated_at')}")
-            print(f"amp model  {ch.get('model_id') or '(external path)'}  -> "
-                  f"{ch.get('model_path') or '—'}")
-            if ch.get("ir_model_id") or ch.get("ir_path"):
-                print(f"IR model   {ch.get('ir_model_id') or '(external path)'}  -> "
-                      f"{ch.get('ir_path') or '—'}")
-            else:
-                print("IR         bypass")
+            print(f"slots      {_preset_slot_summary(ch)}")
             print(f"gain       {ch.get('gain')}   master {ch.get('master')}   "
                   f"quality {ch.get('quality', 1.0)}")
         elif args.preset_cmd == "current":
