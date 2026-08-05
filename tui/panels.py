@@ -39,6 +39,7 @@ from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      set_border_hint_layout)  # noqa: E402
 from .library_panel import VerifiedAuthor
 from .selection import NonSelectableStatic  # noqa: E402
+from .view_controls import ViewTabStrip  # noqa: E402
 
 
 def _escape(text: str) -> str:
@@ -1717,11 +1718,13 @@ class PackFileTable(ClickSelectTable):
         pane.toggle_view(+1)
 
     def action_legacy_view_description(self) -> None:
-        if self.screen.query_one(DetailPane)._pack_slot_index is None:
+        pane = self.screen.query_one(DetailPane)
+        if pane._legacy_view_enabled():
             self.action_view_description()
 
     def action_legacy_view_selection(self) -> None:
-        if self.screen.query_one(DetailPane)._pack_slot_index is None:
+        pane = self.screen.query_one(DetailPane)
+        if pane._legacy_view_enabled():
             self.action_view_selection()
 
     def on_click(self, event) -> None:
@@ -1745,57 +1748,41 @@ class PackFileTable(ClickSelectTable):
 
 
 
-class DetailViewTabs(Static):
+class DetailViewTabs(ViewTabStrip):
     """One focus stop for the Description/Pack view tabs."""
 
-    can_focus = True
-    ALLOW_SELECT = False
-
-    class Changed(Message):
+    class Changed(ViewTabStrip.Changed):
         def __init__(self, mode: str) -> None:
-            super().__init__()
+            super().__init__(mode)
             self.mode = mode
 
-    BINDINGS = [
-        Binding("[", "previous_view", "previous view", show=False),
-        Binding("]", "next_view", "next view", show=False),
-    ]
-
     def __init__(self) -> None:
-        super().__init__(id="detail-view-tabs")
-        self._mode = "description"
+        super().__init__(
+            "DETAIL",
+            [("description", "DESCRIPTION"), ("selection", "PACK")],
+            active="description",
+            id="detail-view-tabs",
+        )
         self._has_pack = False
 
     def set_view(self, mode: str, *, has_pack: bool) -> None:
-        self._mode = mode
         self._has_pack = has_pack
         self.display = has_pack
+        if has_pack:
+            self.set_active(mode)
         self.refresh()
 
-    def render(self) -> str:
-        if not self._has_pack:
-            return ""
-        description = ("[b $accent]DESCRIPTION[/]"
-                       if self._mode == "description" else "DESCRIPTION")
-        pack = ("[b $accent]PACK[/]"
-                 if self._mode == "selection" else "PACK")
-        return f"{description}  {pack}"
-
-    def _activate(self, mode: str) -> None:
-        if self._has_pack and mode != self._mode:
-            self.post_message(self.Changed(mode))
-
     def action_previous_view(self) -> None:
-        self._activate("description")
+        if self._has_pack:
+            super().action_previous_view()
 
     def action_next_view(self) -> None:
-        self._activate("selection")
+        if self._has_pack:
+            super().action_next_view()
 
     def on_click(self, event: MouseEvent) -> None:
-        if not self._has_pack:
-            return
-        self._activate("description" if event.x < 13 else "selection")
-        event.stop()
+        if self._has_pack:
+            super().on_click(event)
 
 
 class DetailPane(Vertical):
@@ -2229,12 +2216,19 @@ class DetailPane(Vertical):
             self.toggle_view(+1)
 
     def action_legacy_view_description(self) -> None:
-        if self._pack_slot_index is None:
+        if self._legacy_view_enabled():
             self.action_view_description()
 
     def action_legacy_view_selection(self) -> None:
-        if self._pack_slot_index is None:
+        if self._legacy_view_enabled():
             self.action_view_selection()
+
+    def _legacy_view_enabled(self) -> bool:
+        """Keep old arrow bindings isolated from canonical v0.2 view tabs."""
+        try:
+            return bool(self.app.query_one(ChainPanel)._legacy_mode)
+        except Exception:
+            return False
 
     def toggle_view(self, direction: int) -> None:
         """Switch between the Description and Selection views.
@@ -2264,7 +2258,7 @@ class DetailPane(Vertical):
 
     def _mode_hint(self, *, selection: bool) -> str:
         """Return the stable action vocabulary used by both detail modes."""
-        return "← description · → selection"
+        return "view tabs [/]"
 
     # ---- REQ-038 pack 表多选安装/卸载（i install / u uninstall）----
 
@@ -3080,8 +3074,8 @@ class DetailPane(Vertical):
     def _border_hint_actions(self) -> list:
         """DetailPane 右下角可点 token → 动作。
 
-        Selection 视图：i install / u uninstall 常驻（REQ-038 多选批量），
-        宽面板额外保留 ←/→ 视图切换 token（窄面板省略，Esc 仍可返回）。
+        Selection 视图：i install / u uninstall 常驻（REQ-038 多选批量）。
+        Description/Pack 通过顶部 view tabs 切换，不重复提供底部动作。
         """
         if self._view_mode == "selection":
             if self._pack_busy is not None:
@@ -3092,17 +3086,9 @@ class DetailPane(Vertical):
             ]
             if self._pack_error and not self._pack_loading:
                 actions.insert(0, ("r retry", self.retry_remote_pack))
-            if (self.region.width or 44) - 4 >= 56:
-                actions = [
-                    ("← description", lambda: self.toggle_view(-1)),
-                    ("→ selection", lambda: self.toggle_view(+1)),
-                ] + actions
             return actions
         if self._view_mode == "description":
-            return [
-                ("← description", lambda: self.toggle_view(-1)),
-                ("→ selection", lambda: self.toggle_view(+1)),
-            ]
+            return []
         if self._view_mode == "empty":
             return [
                 ("enter browse", self.action_browse_empty_slot),

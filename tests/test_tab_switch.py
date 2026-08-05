@@ -151,10 +151,13 @@ def test_creator_load_more_keeps_cursor_and_viewport(monkeypatch, tmp_path):
     run(scenario())
 
 
-def test_creator_scroll_bottom_does_not_snap_to_top(monkeypatch, tmp_path):
-    """Wheel-scrolling to the bottom (cursor stays at row 0) triggers the
-    append; after the refill the viewport must stay pinned to the new bottom
-    instead of jumping upward into the old page."""
+def test_creator_scroll_bottom_preserves_viewport_anchor(monkeypatch, tmp_path):
+    """Appending a page keeps the existing viewport anchor.
+
+    The next page belongs below the rows already on screen. Re-pinning to the
+    new max would immediately retrigger load-more while the user is still at
+    the old bottom, causing repeated requests and visible number changes.
+    """
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
@@ -184,9 +187,9 @@ def test_creator_scroll_bottom_does_not_snap_to_top(monkeypatch, tmp_path):
             table.scroll_to(y=table.max_scroll_y, animate=False)
             await pilot.pause(0.3)
             assert table.scroll_y > 0
+            old_bottom = table.scroll_y
             await pilot.pause(1.0)   # append lands
             assert table.row_count == 200
-            assert table.scroll_y == table.max_scroll_y, (
-                "viewport jumped upward after load more"
-            )
+            assert table.scroll_y == old_bottom, "viewport moved during append"
+            assert calls["n"] == 2, "append must not recursively load another page"
     run(scenario())

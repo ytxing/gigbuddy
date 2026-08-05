@@ -249,60 +249,32 @@ class GigBuddyApp(App):
     LibraryPanel > TabbedContent, LibraryPanel TabPane { height: 1fr; }
     LibraryPanel TabPane { layout: vertical; }
     LibraryPanel DataTable { height: 1fr; }
+    LibraryPanel > #library-view-tabs {
+        width: 100%; height: 1; padding: 0 1;
+        background: $surface; color: $text-muted;
+    }
+    LibraryPanel > .legacy-filter-control {
+        display: none;
+    }
+    LibraryPanel > #type-filter-menu {
+        position: absolute; layer: type-filter;
+        display: none; width: 24; height: 1;
+        background: $surface; border: none;
+    }
+    LibraryPanel > #type-filter-menu.-expanded { display: block; }
+    /* ContentTabs remains as the content switcher's compatibility mechanism;
+       its visible labels are replaced by the single-focus custom strip. */
+    LibraryPanel > TabbedContent > ContentTabs {
+        position: absolute; layer: compatibility-tabs;
+        width: 100%; height: 1; opacity: 0;
+    }
     /* Remote download states are a persistent list legend, not a result row. */
     #tone-status {
         dock: bottom; height: 1; padding: 0 1;
         color: $text-muted; content-align: left middle;
     }
     #import-progress { dock: bottom; height: 1; }
-    /* explicit height:3 keeps the Select's round border inside the row —
-       auto height (content+border) grows to 5 rows, clipping the border and
-       skewing the TYPE label off-center */
-    #type-filter-local, #type-filter-tone { width: 24; height: 3; }
-    #sort-filter { width: 26; height: 3; }
-    /* LOCAL/TONE3000 filters share their tab strip (tone3000.com 网站右上角
-      风格). They use the same quiet outline as the tab labels rather than the
-       filled input surface. */
-    #tone-filter-row, #local-type-filter-row, #creator-filter-row {
-        dock: top; layer: filter-controls;
-        width: auto; height: 3; padding: 0;
-        align: right middle; background: transparent;
-        /* 初始 offset 避开 tab 标签（LOCAL/TONE3000/TOP CREATORS 约 47 列）：
-           首帧布局就按此定位，防止 dock 行盖住 tab 并拦截最初的点击；
-           Python 侧按最后一个标签右缘做精确修正 */
-        offset: 47 0;
-    }
-    #tone-filter-row.filter-row--compact,
-    #local-type-filter-row.filter-row--compact,
-    #creator-filter-row.filter-row--compact {
-        dock: none; layer: default;
-        width: 100%; height: 3; margin-bottom: 1;
-        align: left middle;
-    }
-    #tone-filter-row .filter-label, #local-type-filter-row .filter-label,
-    #creator-filter-row .filter-label {
-        width: auto; min-width: 5; height: 3;
-        margin: 0 1; content-align: left middle;
-        color: $text-muted; text-style: bold;
-    }
-    #tone-filter-row Select, #local-type-filter-row Select, #creator-filter-row Select {
-        background: $background;
-        border: round $surface-lighten-2;
-        margin: 0 1 0 0;
-    }
-    /* REQ-036：creators 条只有单个控件，Select 会被 auto 宽度撑到 60——
-       定宽与 TONE3000 的 SORT 框一致（26） */
-    #creator-filter-row Select { width: 26; }
-    #tone-filter-row Select > SelectCurrent,
-    #local-type-filter-row Select > SelectCurrent,
-    #creator-filter-row Select > SelectCurrent {
-        background: $background;
-    }
-    #tone-filter-row Select:focus, #local-type-filter-row Select:focus,
-    #creator-filter-row Select:focus {
-        background: $background;
-        border: round $accent;
-    }
+    #type-filter-local, #type-filter-tone { width: 1; height: 1; }
     #lib-status { color: $text-muted; padding: 0 1; }
     PresetPanel > MarqueeBar, ChainPanel > MarqueeBar {
         height: 1; padding: 0 1; color: $text;

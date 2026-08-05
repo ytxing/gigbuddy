@@ -16,10 +16,10 @@ from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.events import Leave, MouseEvent, MouseMove
 from textual.message import Message
-from textual.widgets import (DataTable, Input, ProgressBar, Select, Static,
+from textual.widgets import (DataTable, Input, ProgressBar, Select,
                              TabbedContent, TabPane)
 from textual.widgets._tabbed_content import ContentTabs  # noqa: E402
 
@@ -36,8 +36,8 @@ from .modals import (ClickSelectTable, border_hint_action_token,
                      refresh_border_hint_layout,
                      set_border_hint_layout)  # noqa: E402
 from .search_query import SearchSpec, SearchSyntaxError, parse_search  # noqa: E402
-from .selection import NonSelectableStatic  # noqa: E402
 from .uninstall_screen import LocalUninstallScreen  # noqa: E402
+from .view_controls import SearchBar, TypeFilterMenu, ViewTabStrip  # noqa: E402
 
 
 def _arch(t: dict) -> str:
@@ -355,8 +355,13 @@ class LibraryTable(ClickSelectTable):
         self.screen.query_one(LibraryPanel).uninstall_local_selection()
 
 
-TYPE_CHOICES = [("All types", "all"), ("Amp", "amp"), ("Cab", "cab"),
-                ("Amp + Cab", "amp-cab")]
+# Local sorting is intentionally a real SearchBar control even though the
+# SQLite query currently has one canonical order.
+LOCAL_SORT_CHOICES = [("Default", "default")]
+# Kept only for callers/tests that still address the pre-v0.2 hidden Select
+# ids. The visible Type menu is generated from the current table rows.
+LEGACY_TYPE_CHOICES = [("ALL", "all"), ("AMP", "amp"),
+                       ("CAB", "cab"), ("AMP-CAB", "amp-cab")]
 # mirror tone3000.com's sort options; favorites comes from tones_counts
 # (the search RPC rejects favorites ordering)
 SORT_CHOICES = [("Trending", "trending"), ("Best match", "best-match"),
@@ -371,12 +376,34 @@ LOCAL_PAGE_SIZE = 200
 CREATOR_PAGE_SIZE = 100
 LOAD_AHEAD_ROWS = 5
 TITLE_CELL_LIMIT = 40
-# TONE3000 结果按 (query, TYPE, SORT, author) 组合缓存（REQ-010）：
+# TONE3000 结果按 (query, TYPE, SORT) 组合缓存（REQ-010）：
 # 切换筛选命中缓存直接显示，不发网络请求；超限按最早写入淘汰。
 _TONE_CACHE_MAX = 20
-# The tab labels occupy roughly 47 columns. Keep the filter bar in a separate
-# flow row until the library is wide enough for both groups to coexist.
+# Keep the SearchBar's standard and compact tracks deterministic at the
+# terminal widths used by the TUI; content never participates in track sizing.
 FILTER_BAR_COMPACT_WIDTH = 118
+
+
+class LibraryContentTabs(TabbedContent):
+    """Content switcher owned by the custom view-tab strip.
+
+    Textual normally infers the active tab from any focused descendant. That
+    lets a hidden worker completion or a table repaint yank the Library back
+    to another view. The visible strip is the only tab activation authority in
+    v0.2, so descendant focus must not mutate ``active``.
+    """
+
+    def _on_tab_pane_focused(self, event) -> None:
+        event.stop()
+        event.prevent_default()
+
+    def on_mount(self) -> None:
+        # The visible ViewTabStrip owns navigation in v0.2. Keep Textual's
+        # compatibility ContentTabs available for ``active`` updates, but
+        # remove it and its child tabs from the global focus cycle.
+        tabs = self.query_one(ContentTabs)
+        tabs.can_focus = False
+        tabs.can_focus_children = False
 
 
 class LibraryPanel(Vertical):
@@ -421,40 +448,52 @@ class LibraryPanel(Vertical):
         return table
 
     def compose(self) -> ComposeResult:
-        # TONE3000 与 LOCAL 的 TYPE/SORT 筛选都挂在各自 tab 条的右上角
-        # （参考 tone3000.com 网站）：宽终端 dock 悬浮于 tab 行右侧，窄终端
-        # 回退为普通 flow。
-        with Horizontal(id="tone-filter-row"):
-            yield NonSelectableStatic("TYPE", classes="filter-label")
-            yield Select(TYPE_CHOICES, value="all", allow_blank=False,
-                         compact=True, id="type-filter-tone")
-            yield NonSelectableStatic("SORT", classes="filter-label")
-            yield Select(SORT_CHOICES, value="trending",
-                         allow_blank=False, compact=True,
-                         id="sort-filter")
-        with Horizontal(id="local-type-filter-row"):
-            yield NonSelectableStatic("TYPE", classes="filter-label")
-            yield Select(TYPE_CHOICES, value="all", allow_blank=False,
-                         compact=True, id="type-filter-local")
-        with Horizontal(id="creator-filter-row"):
-            yield NonSelectableStatic("SORT", classes="filter-label")
-            yield Select(CREATOR_SORT_CHOICES, value="tones",
-                         allow_blank=False, compact=True,
-                         id="sort-filter-creators")
-        with TabbedContent(initial="pane-local"):
+        yield ViewTabStrip(
+            "LIBRARY",
+            [("pane-local", "LOCAL"),
+             ("pane-tone", "TONE3000"),
+             ("pane-creators", "TOP CREATORS")],
+            active="pane-local",
+            id="library-view-tabs",
+        )
+        # Compatibility controls for callers that still set the old ids.
+        # They are never visible or focusable; Type is now opened from the
+        # result table header through the dynamic menu below.
+        yield Select(LEGACY_TYPE_CHOICES, value="all", allow_blank=False,
+                     id="type-filter-tone", classes="legacy-filter-control")
+        yield Select(LEGACY_TYPE_CHOICES, value="all", allow_blank=False,
+                     id="type-filter-local", classes="legacy-filter-control")
+        yield TypeFilterMenu()
+        with LibraryContentTabs(initial="pane-local"):
             with TabPane("LOCAL", id="pane-local"):
-                yield LibrarySearchInput(
+                yield SearchBar(
+                    input_id="local-search",
+                    sort_options=LOCAL_SORT_CHOICES,
+                    sort_id="sort-filter-local",
                     placeholder="Search terms · model:ID · @author · #tag",
-                    id="local-search")
+                    input_cls=LibrarySearchInput,
+                    id="local-search-bar",
+                )
                 yield self._make_table("lib-table-local", selectable=True)
             with TabPane("TONE3000", id="pane-tone"):
-                yield LibrarySearchInput(
+                yield SearchBar(
+                    input_id="tone-search",
+                    sort_options=SORT_CHOICES,
+                    sort_id="sort-filter",
                     placeholder="Search terms · model:ID · @author · #tag",
-                    id="tone-search")
+                    input_cls=LibrarySearchInput,
+                    id="tone-search-bar",
+                )
                 yield self._make_table("lib-table-tone")
                 yield MarqueeBar(id="tone-status")
                 yield ProgressBar(total=1, show_eta=False, id="import-progress")
             with TabPane("TOP CREATORS", id="pane-creators"):
+                yield SearchBar(
+                    input_id=None,
+                    sort_options=CREATOR_SORT_CHOICES,
+                    sort_id="sort-filter-creators",
+                    id="creators-search-bar",
+                )
                 yield self._make_creators_table()
 
     def on_mount(self) -> None:
@@ -463,9 +502,14 @@ class LibraryPanel(Vertical):
         self._sort = "trending"
         self._last_active = "pane-local"  # initial state: first tick is a no-op
         self._type_filter = "all"
-        self._author_filter: str | None = None
         self._query = ""
         self._search_spec = SearchSpec()
+        self._view_states = {
+            "pane-local": {"query": "", "sort": "default", "type_filter": "all"},
+            "pane-tone": {"query": "", "sort": "trending", "type_filter": "all"},
+            "pane-creators": {"query": "", "sort": "tones", "type_filter": "all"},
+        }
+        self._type_filters = {"pane-local": "all", "pane-tone": "all"}
         self._users: list[str] = []
         self._tags: list[str] = []
         self._makes: list[str] = []
@@ -504,7 +548,7 @@ class LibraryPanel(Vertical):
         # LOCAL/TONE3000/TOP CREATORS —— 禁掉这个键位，左右只能在表格/
         # 搜索框里操作，防止误操作跳到别的视图。
         self._disable_tab_arrow_keys()
-        self._sync_tone_filter_bar()
+        self._sync_search_bars()
         self.refresh_rows()
         # REQ-010: 启动即预取默认 TONE3000（trending）与 TOP CREATORS。
         # silent 只填缓存与隐藏表格、不碰状态栏/副标题，用户首次进入对应
@@ -554,14 +598,14 @@ class LibraryPanel(Vertical):
             tabs._bindings.bind(key, "noop_tab", show=False, priority=True)
 
     def on_resize(self, event) -> None:
-        """布局尺寸确定后立即同步筛选条。
+        """布局尺寸确定后立即同步 SearchBar。
 
         on_mount 时 content_region 尚未计算（宽度为 0），compact 判断会误判，
-        导致 dock 悬浮/flow 的首帧布局与 0.1s tick 修正后不一致——用户在首帧
-        点击 tab 时坐标会落空。resize 在首次布局时触发，让首帧布局直接稳定。
+        导致首帧轨道与后续 tick 修正后不一致。resize 在首次布局时触发，让
+        首帧布局直接稳定。
         """
         if hasattr(self, "_active_pane"):
-            self._sync_tone_filter_bar()
+            self._sync_search_bars()
             # REQ-040：副标题的宽度自适应 token（space/Esc/d 的宽窄写法）
             # 在 mount 时按宽度 0 算过——resize 落定后必须重算，否则提示词
             # 与实际可点 token 脱节（点 "space" 找不到 "space select"）。
@@ -576,42 +620,167 @@ class LibraryPanel(Vertical):
             else:
                 refresh_border_hint_layout(self)
 
-    def _sync_tone_filter_bar(self) -> None:
-        """Show and place the TYPE/SORT controls for the current viewport.
-
-        Each tab's filter bar docks over the right of its own tab strip,
-        hugging the tab labels with a fixed 2-column gap (tone3000.com 网站
-        风格——筛选紧跟内容，不贴面板右缘，避免大片空白);
-        narrow terminals fall back to normal flow with a small margin.
-        """
-        for bar_id, pane_id in (("#tone-filter-row", "pane-tone"),
-                                ("#local-type-filter-row", "pane-local"),
-                                ("#creator-filter-row", "pane-creators")):
+    def _sync_search_bars(self) -> None:
+        """Apply the normal/compact fixed tracks to every SearchBar."""
+        compact = ((self.content_region.width
+                    or self.app.size.width * 3 // 5)
+                   < FILTER_BAR_COMPACT_WIDTH)
+        for bar_id in ("#local-search-bar", "#tone-search-bar",
+                       "#creators-search-bar"):
             try:
-                bar = self.query_one(bar_id, Horizontal)
+                self.query_one(bar_id, SearchBar).set_compact(compact)
             except Exception:
-                continue
-            bar.display = self._active_pane == pane_id
-            # on_mount 时布局未完成 content_region.width=0。首帧布局必须与
-            # tick 修正后一致，否则初始的 tab 点击坐标会因布局切换落空；
-            # 用可推导的面板内容宽预测（终端宽 ×3/5 ≈ left-col 3fr 内容宽）。
-            compact = ((self.content_region.width
-                        or self.app.size.width * 3 // 5)
-                       < FILTER_BAR_COMPACT_WIDTH)
-            bar.set_class(compact, "filter-row--compact")
-            # A docked auto-width row starts at the panel's left edge. Offset it
-            # right of the last tab label so the controls never intercept tab
-            # clicks and keep a readable gap from the tab names.
-            if compact:
-                bar.styles.offset = (0, 0)
-            elif bar.size.width:
-                # ContentTabs 的直接 children 含非标签容器，须按 Tab 类型取
-                tab_right = max(
-                    (t.region.right for t in
-                     self.query_one("ContentTabs").query("Tab")),
-                    default=0)
-                bar.styles.offset = (
-                    max(0, tab_right - self.content_region.x + 2), 0)
+                pass
+
+    def _table_for_pane(self, pane_id: str) -> DataTable | None:
+        table_id = {
+            "pane-local": "lib-table-local",
+            "pane-tone": "lib-table-tone",
+            "pane-creators": "lib-table-creators",
+        }.get(pane_id)
+        if table_id is None:
+            return None
+        try:
+            return self.query_one(f"#{table_id}", DataTable)
+        except Exception:
+            return None
+
+    def _capture_view_state(self, pane_id: str | None = None) -> None:
+        pane_id = pane_id or getattr(self, "_active_pane", "pane-local")
+        state = getattr(self, "_view_states", {}).get(pane_id)
+        if state is None:
+            return
+        try:
+            search_id = {
+                "pane-local": "local-search",
+                "pane-tone": "tone-search",
+            }.get(pane_id)
+            if search_id:
+                state["query"] = self.query_one(
+                    f"#{search_id}", Input).value
+            if pane_id == "pane-tone":
+                state["sort"] = self._sort
+            elif pane_id == "pane-creators":
+                state["sort"] = self._creator_sort
+            state["type_filter"] = self._type_filters.get(pane_id, "all")
+            table = self._table_for_pane(pane_id)
+            if table is not None:
+                rows = table.ordered_rows
+                state["cursor_key"] = (
+                    rows[table.cursor_row].key.value
+                    if 0 <= table.cursor_row < len(rows) else None)
+                state["cursor_column"] = table.cursor_column
+                state["scroll_y"] = table.scroll_y
+                state["scroll_x"] = table.scroll_x
+        except Exception:
+            pass
+
+    def _restore_view_state(self, pane_id: str) -> None:
+        state = self._view_states[pane_id]
+        self._type_filters[pane_id] = state.get("type_filter", "all")
+        self._type_filter = self._type_filters[pane_id]
+        if pane_id == "pane-tone":
+            self._sort = state.get("sort", "trending")
+            self._query = state.get("query", "")
+            self._search_spec = self._parse_or_notify(self._query) or SearchSpec()
+            self.query_one("#tone-search", Input).value = self._query
+            self.query_one("#sort-filter", Select).value = self._sort
+        elif pane_id == "pane-local":
+            self._query = state.get("query", "")
+            self._search_spec = self._parse_or_notify(self._query) or SearchSpec()
+            self.query_one("#local-search", Input).value = self._query
+            self.query_one("#sort-filter-local", Select).value = state.get(
+                "sort", "default")
+        else:
+            self._creator_sort = state.get("sort", "tones")
+            self.query_one("#sort-filter-creators", Select).value = self._creator_sort
+
+    def _restore_view_anchor(self, pane_id: str) -> None:
+        """Restore a tab-local row key and viewport after a table reconcile."""
+        state = self._view_states.get(pane_id, {})
+        table = self._table_for_pane(pane_id)
+        if table is None:
+            return
+        key = state.get("cursor_key")
+        rows = table.ordered_rows
+        row_index = next(
+            (index for index, row in enumerate(rows) if row.key.value == key),
+            None,
+        )
+        if row_index is not None:
+            table.move_cursor(
+                row=row_index,
+                column=state.get("cursor_column", table.cursor_column),
+                animate=False,
+                scroll=False,
+            )
+        table.scroll_to(
+            x=state.get("scroll_x", table.scroll_x),
+            y=state.get("scroll_y", table.scroll_y),
+            animate=False,
+        )
+
+    def on_view_tab_strip_changed(self, event: ViewTabStrip.Changed) -> None:
+        self.activate_view_tab(event.view_tab_id)
+
+    def activate_view_tab(self, pane_id: str) -> None:
+        if pane_id not in self._view_states:
+            return
+        old = getattr(self, "_active_pane", pane_id)
+        if old == pane_id:
+            return
+        strip = self.query_one("#library-view-tabs", ViewTabStrip)
+        keep_strip_focus = strip.has_focus
+        self._capture_view_state(old)
+        self.query_one(TabbedContent).active = pane_id
+        strip.set_active(pane_id)
+        # Keep the existing worker routing in one place. The application tick
+        # will see the same transition, but immediate reconcile prevents a
+        # visible click from waiting for that tick.
+        self._last_active = old
+        self.check_active_tab()
+        if keep_strip_focus:
+            strip.focus()
+
+    def _type_values_for_table(self, table: DataTable) -> list[str]:
+        values: set[str] = set()
+        for row in table.ordered_rows:
+            key = row.key.value
+            tone = self._tone_for_key(key)
+            if tone and tone.get("gear"):
+                value = str(tone["gear"]).strip()
+                if value:
+                    values.add(value)
+        return sorted(values, key=str.casefold)
+
+    def _sync_legacy_type_options(self, table: DataTable) -> None:
+        options = [("ALL", "all")]
+        options.extend((value.upper(), value)
+                       for value in self._type_values_for_table(table))
+        for control_id in ("#type-filter-local", "#type-filter-tone"):
+            try:
+                control = self.query_one(control_id, Select)
+                current = control.value
+                control.set_options(options)
+                if current in {value for _, value in options}:
+                    control.value = current
+            except Exception:
+                pass
+
+    def _open_type_filter(self, table: DataTable) -> None:
+        if table.id not in {"lib-table-local", "lib-table-tone"}:
+            return
+        pane_id = "pane-local" if table.id == "lib-table-local" else "pane-tone"
+        menu = self.query_one(TypeFilterMenu)
+        menu.target_table_id = table.id
+        values = self._type_values_for_table(table)
+        menu.configure_values(values, self._type_filters.get(pane_id, "all"))
+        menu.display = True
+        # The menu is absolutely positioned and its SelectOverlay is screen
+        # based, so it never changes the table or SearchBar height.
+        menu.styles.offset = (max(0, table.region.x + 6), table.region.y + 1)
+        menu.focus()
+        menu.action_show_overlay()
 
     # ---- tab / table routing ---------------------------------------------
 
@@ -636,6 +805,9 @@ class LibraryPanel(Vertical):
             return
         try:
             if self.query_one(TabbedContent).active == pane:
+                strip = self.query_one("#library-view-tabs", ViewTabStrip)
+                if strip.has_focus:
+                    return
                 table.focus()
         except Exception:
             pass
@@ -651,9 +823,7 @@ class LibraryPanel(Vertical):
     def _search_creator(self, name: str) -> None:
         """REQ-033：作者行 Enter/双击 → 跳 TONE3000 tab，搜索栏填
         @author 并触发真实搜索（显示该作者全部音色结果）。"""
-        # 用户路径切 tab（post Clicked 不会被 Textual 的 tab 回滚吞掉）
-        tab = self.query_one("#--content-tab-pane-tone")
-        tab.post_message(tab.Clicked(tab))
+        self.activate_view_tab("pane-tone")
         query = f"@{name}"
         self.query_one("#tone-search", Input).value = query
         # _query 同步设置：tab 切换后 check_active_tab 的加载（exclusive）
@@ -666,6 +836,10 @@ class LibraryPanel(Vertical):
         """Keep the raw input and its normalized form together."""
         self._query = query
         self._search_spec = spec
+        state = getattr(self, "_view_states", {}).get(
+            getattr(self, "_active_pane", "pane-local"))
+        if state is not None:
+            state["query"] = query
         self._users = list(spec.authors)
         self._tags = list(spec.tags)
         self._makes = list(spec.makes)
@@ -678,9 +852,7 @@ class LibraryPanel(Vertical):
             return None
 
     def _effective_authors(self, spec: SearchSpec) -> list[str]:
-        if spec.authors:
-            return list(spec.authors)
-        return [self._author_filter] if self._author_filter else []
+        return list(spec.authors)
 
     def _selected_order(self) -> str:
         return {
@@ -811,13 +983,20 @@ class LibraryPanel(Vertical):
             active = self.query_one(TabbedContent).active
         except Exception:
             return
-        self._sync_tone_filter_bar()
+        self._sync_search_bars()
         if active == getattr(self, "_last_active", None):
             return
+        strip = self.query_one("#library-view-tabs", ViewTabStrip)
+        keep_strip_focus = strip.has_focus
+        previous = getattr(self, "_active_pane", None)
+        if previous and previous != active:
+            self._capture_view_state(previous)
         self.clear_local_selection()
         self._last_active = active
         self._active_pane = active
-        self._sync_tone_filter_bar()
+        self._restore_view_state(active)
+        self.query_one("#library-view-tabs", ViewTabStrip).set_active(active)
+        self._sync_search_bars()
         self._mode = "local" if active == "pane-local" else "tone"
         self._highlighted_key = None
         if active == "pane-tone":
@@ -838,7 +1017,10 @@ class LibraryPanel(Vertical):
             self._fingerprint = None
             self.refresh_rows()
         table = self._table()
-        table.focus()
+        if keep_strip_focus:
+            strip.focus()
+        else:
+            table.focus()
         self._publish_highlight(table)
 
     def focus_search(self) -> None:
@@ -850,14 +1032,9 @@ class LibraryPanel(Vertical):
         search.value = ""
         self.query_one("#local-search", Input).value = ""
         self.query_one("#tone-search", Input).value = ""
-        self._author_filter = None
         self._set_search_spec("", SearchSpec())
         if self._mode != "local":
-            # Programmatic `tabs.active = ...` rolls back in Textual (the Tabs
-            # watcher re-posts a stale TabActivated), so activate the tab the
-            # same way a user click does: post Tab.Clicked.
-            tab = self.query_one("#--content-tab-pane-local")
-            tab.post_message(tab.Clicked(tab))
+            self.activate_view_tab("pane-local")
             self._mode = "local"
             self._fingerprint = None
             self.query_one("#tone-status", MarqueeBar).content = ""
@@ -918,12 +1095,14 @@ class LibraryPanel(Vertical):
         for t in tones:
             checked = "\\[x]" if t["id"] in self._local_selected else "\\[ ]"
             table.add_row(checked, *self._row_cells(t), key=f"local:{t['id']}")
+        self._sync_legacy_type_options(table)
         if not tones:
             self._status_row(
                 table,
                 "[bold $state-idle]○[/] no local tones — switch to TONE3000 "
                 "to search and import")
         self._update_local_selection_status()
+        self._restore_view_anchor("pane-local")
         self._publish_highlight(table)
 
     async def _load_more_local(self) -> None:
@@ -961,6 +1140,7 @@ class LibraryPanel(Vertical):
         for tone in tones:
             checked = "\\[x]" if tone["id"] in self._local_selected else "\\[ ]"
             table.add_row(checked, *self._row_cells(tone), key=f"local:{tone['id']}")
+        self._sync_legacy_type_options(table)
         self._local_page = page
         self._local_has_more = len(tones) == LOCAL_PAGE_SIZE
         self._update_local_selection_status()
@@ -1059,8 +1239,6 @@ class LibraryPanel(Vertical):
     def _tone_status_hint(self, spec: SearchSpec) -> str:
         """The hint shown in the #tone-status line for the current view."""
         extra = []
-        if self._author_filter and not spec.authors:
-            extra.append(f"author {self._author_filter}")
         if spec.authors:
             extra.append("@" + ", @".join(spec.authors))
         if spec.tags:
@@ -1102,6 +1280,7 @@ class LibraryPanel(Vertical):
                 f"({self._tone_status_hint(self._search_spec)}"
                 " · ✓ downloaded · ◐ partial · ○ new)")
         self._update_tone_subtitle()
+        self._restore_view_anchor("pane-tone")
         self._publish_highlight(table)
         self._focus_if_pane_active(table)
 
@@ -1110,7 +1289,7 @@ class LibraryPanel(Vertical):
                            refresh: bool = False, silent: bool = False) -> None:
         """Load one 40-row TONE3000 page, preserving prior rows on append.
 
-        Results are cached per (query, TYPE filter, SORT, author filter); a
+        Results are cached per (query, TYPE filter, SORT); a
         cache hit renders the page set without a network request. `refresh`
         bypasses the cache (manual reload); `silent` (startup prefetch) only
         fills the cache and the hidden table without touching status chrome.
@@ -1125,7 +1304,7 @@ class LibraryPanel(Vertical):
         else:
             self._tone_request_id += 1
             request_id = self._tone_request_id
-            key = (query, self._type_filter, self._sort, self._author_filter)
+            key = (query, self._type_filter, self._sort)
             self._tone_cache_key = key
             self._tone_error = False
         self._set_search_spec(query, spec)
@@ -1228,6 +1407,7 @@ class LibraryPanel(Vertical):
             if tone_id not in self._remote_tones:
                 self._remote_tones[tone_id] = t
                 table.add_row(*self._row_cells(t), key=f"remote:{tone_id}")
+        self._sync_legacy_type_options(table)
         self._tone_has_more = not spec.model_ids and (
             len(self._remote_tones) < self._tone_total
             if self._tone_total is not None else len(hits) == REMOTE_PAGE_SIZE)
@@ -1267,8 +1447,7 @@ class LibraryPanel(Vertical):
         if sort == "favorites":
             self._tone_request_id += 1
             request_id = self._tone_request_id
-            key = (self._query, self._type_filter, "favorites",
-                   self._author_filter)
+            key = (self._query, self._type_filter, "favorites")
             self._tone_cache_key = key
             if not refresh and key in self._tone_cache:
                 if self._tone_alive(generation, request_id):
@@ -1316,6 +1495,7 @@ class LibraryPanel(Vertical):
                 self.post_message(ToneHighlighted(None))
                 self._focus_if_pane_active(table)
                 return
+            self._restore_view_anchor("pane-tone")
             self._publish_highlight(table)
             self._focus_if_pane_active(table)
         else:
@@ -1435,6 +1615,7 @@ class LibraryPanel(Vertical):
         if not ranked:
             self._status_row(table, "No creator data")
         self._update_creator_subtitle()
+        self._restore_view_anchor("pane-creators")
         self._publish_highlight(table)
         self._focus_if_pane_active(table)
 
@@ -1535,6 +1716,8 @@ class LibraryPanel(Vertical):
         self._save_creator_cache()
         if not silent:
             self._update_creator_subtitle()
+            if not append:
+                self._restore_view_anchor("pane-creators")
             self._publish_highlight(table)
             self._focus_if_pane_active(table)
 
@@ -1800,12 +1983,20 @@ class LibraryPanel(Vertical):
             return
         if event.select.id == "sort-filter":
             self._sort = str(event.value)
+            self._view_states["pane-tone"]["sort"] = self._sort
             if self._active_pane == "pane-tone":
                 self.run_worker(partial(self._reload_tone_table), name="search",
                                 exclusive=True)
             return
+        if event.select.id == "sort-filter-local":
+            self._view_states["pane-local"]["sort"] = str(event.value)
+            if self._active_pane == "pane-local":
+                self._fingerprint = None
+                self.refresh_rows()
+            return
         if event.select.id == "sort-filter-creators":
             self._creator_sort = str(event.value)
+            self._view_states["pane-creators"]["sort"] = self._creator_sort
             if self._active_pane == "pane-creators":
                 # Each sort is a distinct official leaderboard query; the
                 # currently loaded page is not a complete local data set.
@@ -1813,12 +2004,39 @@ class LibraryPanel(Vertical):
                 self.run_worker(partial(self._show_top_creators, refresh=True),
                                 name="creators", exclusive=True)
             return
+        if event.select.id == "type-filter-menu":
+            menu = event.select
+            if menu.target_table_id not in {"lib-table-local", "lib-table-tone"}:
+                # Select emits its initial value after the panel is mounted.
+                # The menu has no target until a result-table TYPE header is
+                # opened, so that event must not reload TONE3000 implicitly.
+                return
+            pane_id = ("pane-local" if menu.target_table_id == "lib-table-local"
+                       else "pane-tone")
+            value = str(event.value)
+            self._type_filters[pane_id] = value
+            self._view_states[pane_id]["type_filter"] = value
+            self._type_filter = value
+            menu.display = False
+            if pane_id == "pane-local":
+                self.clear_local_selection()
+                self._fingerprint = None
+                self.refresh_rows()
+            else:
+                self.run_worker(partial(self._reload_tone_table), name="search",
+                                exclusive=True)
+            self._table_for_pane(pane_id).focus()
+            return
         if event.select.id not in ("type-filter-local", "type-filter-tone"):
             return
-        if event.select.id == "type-filter-local":
+        pane_id = ("pane-local" if event.select.id == "type-filter-local"
+                   else "pane-tone")
+        if pane_id == "pane-local":
             self.clear_local_selection()
         self._type_filter = str(event.value)
-        if event.select.id == "type-filter-tone":
+        self._type_filters[pane_id] = self._type_filter
+        self._view_states[pane_id]["type_filter"] = self._type_filter
+        if pane_id == "pane-tone":
             # re-apply the current sort (type + sort filters combine)
             if self._active_pane == "pane-tone":
                 self.run_worker(partial(self._reload_tone_table), name="search",
@@ -1829,32 +2047,19 @@ class LibraryPanel(Vertical):
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         col = event.column_key.value
-        is_tone = event.control.id == "lib-table-tone"
         if col == "type":
-            values = ["all", "amp", "cab", "amp-cab"]
-            current = values.index(self._type_filter)
-            self.query_one("#type-filter-tone" if is_tone else "#type-filter-local",
-                           Select).value = values[(current + 1) % len(values)]
+            self._open_type_filter(event.control)
+
+    def on_type_filter_menu_closed(self, _event: TypeFilterMenu.Closed) -> None:
+        """Return focus to the table after dismissing the transient menu."""
+        menu = self.query_one(TypeFilterMenu)
+        if menu.target_table_id not in {"lib-table-local", "lib-table-tone"}:
             return
-        if col == "author":
-            # cycle: no filter → cursor row's author → clear
-            if self._author_filter:
-                self._author_filter = None
-            else:
-                table = event.control
-                rows = table.ordered_rows
-                if 0 <= table.cursor_row < len(rows):
-                    key = rows[table.cursor_row].key.value
-                    t = self._tone_for_key(key)
-                    if t and t.get("username"):
-                        self._author_filter = t["username"]
-            if is_tone:
-                self.run_worker(partial(self._show_search, self._query,
-                                        order_by=self._selected_order()),
-                                name="search", exclusive=True)
-            else:
-                self._fingerprint = None
-                self.refresh_rows()
+        table = self._table_for_pane(
+            "pane-local" if menu.target_table_id == "lib-table-local"
+            else "pane-tone")
+        if table is not None and table.is_attached:
+            table.focus()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         # Only the active tab's table drives the detail pane. The hidden tab's
