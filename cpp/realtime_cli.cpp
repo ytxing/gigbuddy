@@ -1,4 +1,4 @@
-// realtime_cli: 实时吉他音色链（NeuralAudio amp + IR FIR cab），PortAudio(CoreAudio) 低延迟
+// realtime_cli: 实时吉他音色链（0-6 NAM/IR Slots），PortAudio(CoreAudio) 低延迟
 // usage: realtime_cli <model.nam> [ir.wav] [block=256] [sr=48000]
 //        --list            列出输入/输出设备
 //        --in NAME         指定输入设备（模糊匹配，如 "Your Device"）
@@ -6,21 +6,23 @@
 //        --ch N            输入通道号（多输入设备，如 "Your Device": 0=INPUT1 1=INPUT2）
 //        --gain X          输入增益（模型前，默认 1.0；>1 推驱动更过载，<1 更清）
 //        --master X        输出音量（模型后，默认 1.0；高增益模型压到 0.3 防削波）
-//        --live FILE       热切换模式：监听 FILE（JSON: model/ir/gain/master/quality/input），
+//        --live FILE       热切换模式：监听 FILE（JSON: slots/gain/master/quality/input），
 //                          文件变化时运行时切换，音频不中断；
 //                          input 键 = {source:"instrument"|"file", file:<wav>, state:"playing"|"paused"|"stopped", loop:bool}
 //                          干声文件输入源（替代乐器输入，试听用）：播放/暂停/停止/循环
 //        --level-file FILE 电平输出：0.1s 写 {"in":x,"out":y} 到 FILE（TUI 电平表用）
 //        --record-out FILE 旁路录制：实时输出写为 16-bit WAV（无设备验证/录音用）
-// 输入: 音频接口（吉他）→ amp(NeuralAudio) → IR(cab) → 输出: 监听设备
+// 输入: 音频接口（吉他）→ gain → ordered Slots → master → 输出: 监听设备
 #include "NeuralModel.h"
 #include "json.hpp"
 #include <portaudio.h>
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #ifdef __APPLE__
@@ -47,7 +49,9 @@ public:
     void set_ir(const std::vector<float>& ir) {
         taps = ir;
         if (taps.size() > MAX_TAPS) taps.resize(MAX_TAPS);
-        hist.assign(taps.size() - 1, 0.0f);
+        // Keep one history cell per tap.  A one-tap IR is valid and must not
+        // index an empty ring; tap zero also remains sample-aligned.
+        hist.assign(taps.size(), 0.0f);
         pos = 0;
     }
     // 逐样本处理：x 入缓冲，输出卷积；无 IR 时直通
@@ -100,8 +104,10 @@ public:
         uint32_t srcSr = 0;
         std::vector<float> raw;
         if (!read_wav_ir(path.c_str(), raw, srcSr)) return false;
+        if (raw.empty() || srcSr == 0 || targetSr <= 0) return false;
         if (srcSr != (uint32_t)targetSr) {
             std::vector<float> rs((size_t)(raw.size() * (double)targetSr / srcSr));
+            if (rs.empty()) return false;
             for (size_t i = 0; i < rs.size(); i++) {
                 double t = i * (double)srcSr / targetSr;
                 size_t a = (size_t)t, b = a + 1 < raw.size() ? a + 1 : a;
@@ -147,12 +153,32 @@ private:
     int rampPos = 0;   // 回调线程私有
 };
 
+enum class NodeKind { Nam, Ir };
+
+// A prepared chain is immutable after publication. The model/FIR objects are
+// stateful, but only the audio callback processes them. The main thread builds
+// a complete replacement before the shared pointer is exchanged.
+struct ChainNode {
+    NodeKind kind;
+    std::shared_ptr<NeuralAudio::NeuralModel> nam;
+    std::shared_ptr<FirFilter> ir;
+    std::string path;
+};
+
+struct PreparedChain {
+    std::vector<ChainNode> nodes;
+    std::vector<std::string> signature;
+    float gain = 1.0f;
+    float master = 1.0f;
+    bool mute = false;
+    float quality = 1.0f;
+    uint64_t revision = 0;
+};
+
 struct Ctx {
-    // 实时线程读取的共享状态：shared_ptr + atomic_load/atomic_store 原子交换（libc++ 无 atomic<shared_ptr> 特化）
-    std::shared_ptr<NeuralAudio::NeuralModel> model;
-    std::shared_ptr<FirFilter> fir;
-    std::atomic<float> inputGain{1.0f};   // 输入增益（模型前）
-    std::atomic<float> master{1.0f};      // 输出音量（模型后）
+    // shared_ptr + atomic_load/atomic_store gives a complete chain swap.
+    std::shared_ptr<PreparedChain> chain;
+    std::atomic<uint64_t> runtimeRevision{0};
     // 去咔哒状态机（fadeState/fadeReady 主线程与回调协作；fadePos 仅回调私有）：
     //   fadeState: 0=无 1=淡出(1→0) 2=淡入(0→1)；主线程只发 1，回调推进
     //   fadeReady: 1=已到静音点（回调置位）——主线程据此等待后再交换，
@@ -174,16 +200,17 @@ struct Ctx {
     std::atomic<float> inPeak{0.0f};   // 输入电平（VU 监控）
     std::atomic<float> outPeak{0.0f};  // 输出电平
     // 主线程私有：live 热切换记录（不参与并发）
-    std::string liveModelPath, liveIrPath, liveInputPath;
-    float liveQuality = 1.0f;   // A2 质量档位（0~1，模型默认 1.0 = Full）
+    std::string liveInputPath;
 };
 
 // 读 IR 文件 → 重采样/归一 → FirFilter（失败返回 nullptr）
 static std::shared_ptr<FirFilter> make_ir(const std::string& path, int sr) {
     std::vector<float> ir; uint32_t irSr = 0;
     if (!read_wav_ir(path.c_str(), ir, irSr)) return nullptr;
+    if (ir.empty() || irSr == 0 || sr <= 0) return nullptr;
     if (irSr != (uint32_t)sr) {   // 线性重采样
         std::vector<float> rs((size_t)(ir.size() * (double)sr / irSr));
+        if (rs.empty()) return nullptr;
         for (size_t i = 0; i < rs.size(); i++) {
             double t = i * (double)irSr / sr;
             size_t a = (size_t)t, b = a + 1 < ir.size() ? a + 1 : a;
@@ -212,11 +239,12 @@ static void request_fade_and_wait(Ctx& c) {
     }
 }
 
-// live 热切换：按配置更新 model/ir/gain/master/quality（有变化才重载，加载失败保留旧值）
+// live 热切换：按配置更新完整 Slot chain 和全局参数（有变化才重载，加载失败保留旧值）
 // REQ-035 portable：模型/IR/live 文件路径相对时按项目根解析。
 // 项目根 = --root 参数（TUI/CLI 显式传入）或 exe 所在目录的父目录
 // （bin/realtime_cli → 项目根）；引擎从任意 cwd 启动都可靠。
 static std::string g_root = ".";
+static bool g_rootExplicit = false;
 
 static std::string executable_dir() {
 #ifdef __APPLE__
@@ -245,112 +273,440 @@ static std::string resolve_path(const std::string& p) {
     return g_root + "/" + p;
 }
 
-static void apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader& loader,
-                        Ctx& ctx, int sr) {
-    if (j.contains("model")) {
-        if (j["model"].is_null()) {
-            // AMP bypass：移除模型 → 输入直通（process_block 无模型时透传）
-            if (!ctx.liveModelPath.empty()) {
-                request_fade_and_wait(ctx);
-                std::atomic_store(&ctx.model, std::shared_ptr<NeuralAudio::NeuralModel>());
-                ctx.liveModelPath.clear();
-                fprintf(stderr, "[live] 模型移除（直通）\n");
-            }
-        } else if (j["model"].is_string()) {
-            std::string p = j["model"].get<std::string>();
-            if (p != ctx.liveModelPath) {
-                auto nm = std::shared_ptr<NeuralAudio::NeuralModel>(loader.CreateFromFile(resolve_path(p)));
-                if (nm) {
-                    request_fade_and_wait(ctx);        // 淡出旧输出到静音点
-                    std::atomic_store(&ctx.model, nm); // 静音处交换
-                    ctx.liveModelPath = p;             // 成功才记录（失败保留旧值可重试）
-                    ctx.liveQuality = 1.0f; fprintf(stderr, "[live] 模型 -> %s\n", p.c_str());
-                }
-                else fprintf(stderr, "[live] 模型加载失败: %s\n", p.c_str());
-            }
+struct SlotSpec {
+    bool empty = true;
+    NodeKind kind = NodeKind::Nam;
+    std::string path;
+};
+
+struct InputSpec {
+    bool isFile = false;
+    std::string path;
+    int state = 0;       // stopped=0, playing=1, paused=2
+    bool loop = false;
+};
+
+static std::string lower_ascii(std::string value) {
+    for (char& ch : value) {
+        if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+    }
+    return value;
+}
+
+static bool has_parent_component(const std::filesystem::path& path) {
+    for (const auto& part : path) {
+        if (part == "..") return true;
+    }
+    return false;
+}
+
+static std::filesystem::path absolute_root() {
+    std::error_code ec;
+    auto root = std::filesystem::absolute(std::filesystem::path(g_root), ec);
+    return (ec ? std::filesystem::path(g_root) : root).lexically_normal();
+}
+
+static bool path_is_within(const std::filesystem::path& candidate,
+                           const std::filesystem::path& root) {
+    std::error_code ec;
+    const auto canonicalCandidate = std::filesystem::weakly_canonical(candidate, ec);
+    if (ec) return false;
+    ec.clear();
+    const auto canonicalRoot = std::filesystem::weakly_canonical(root, ec);
+    if (ec) return false;
+    auto candidateIt = canonicalCandidate.begin();
+    for (auto rootIt = canonicalRoot.begin(); rootIt != canonicalRoot.end(); ++rootIt) {
+        if (candidateIt == canonicalCandidate.end() || *candidateIt != *rootIt)
+            return false;
+        ++candidateIt;
+    }
+    return true;
+}
+
+// Resolve a live-protocol path and enforce the protocol's allowed root. The
+// external CLI path mode deliberately skips this restriction for v0.1 users.
+static bool resolve_asset_path(const std::string& raw, const char* allowedDir,
+                               bool allowExternal, bool requireRegular,
+                               std::string& resolved, std::string& error) {
+    if (raw.empty()) {
+        error = "empty path";
+        return false;
+    }
+    const std::filesystem::path rawPath(raw);
+    if (!allowExternal && !rawPath.is_absolute() && has_parent_component(rawPath)) {
+        error = "path traversal is not allowed";
+        return false;
+    }
+    const auto root = absolute_root();
+    const auto candidate = rawPath.is_absolute() ? rawPath : root / rawPath;
+    std::error_code ec;
+    const auto canonical = std::filesystem::weakly_canonical(candidate, ec);
+    if (ec) {
+        error = "path cannot be resolved";
+        return false;
+    }
+    if (!allowExternal && !path_is_within(canonical, root / allowedDir)) {
+        error = "path is outside the allowed project directory";
+        return false;
+    }
+    if (requireRegular && !std::filesystem::is_regular_file(canonical, ec)) {
+        error = "path is not a regular file";
+        return false;
+    }
+    if (!requireRegular && !allowExternal) {
+        const bool exists = std::filesystem::exists(canonical, ec);
+        if (ec || (exists && !std::filesystem::is_regular_file(canonical, ec))) {
+            error = "path is not a regular file";
+            return false;
         }
     }
-    if (j.contains("quality")) {
-        float q = (float)j["quality"];
-        if (q != ctx.liveQuality) {
-            ctx.liveQuality = q;
-            auto m = std::atomic_load(&ctx.model);
-            if (m && m->HasQualityScaling()) {
-                m->SetQualityScaleFactor(q);
-                fprintf(stderr, "[live] A2 quality -> %.2f\n", q);
+    resolved = canonical.string();
+    return true;
+}
+
+static bool parse_slot_specs(const nlohmann::json& j, std::vector<SlotSpec>& slots,
+                             std::string& error) {
+    if (j.contains("slots")) {
+        if (!j.at("slots").is_array()) {
+            error = "slots must be an array";
+            return false;
+        }
+        if (j.at("slots").size() > 6) {
+            error = "slot limit is 6";
+            return false;
+        }
+        for (const auto& item : j.at("slots")) {
+            SlotSpec spec;
+            if (!item.is_object()) {
+                error = "slot must be an object";
+                return false;
             }
+            if (!item.contains("path") || item.at("path").is_null()) {
+                slots.push_back(std::move(spec));
+                continue;
+            }
+            if (!item.at("path").is_string()) {
+                error = "slot.path must be a string or null";
+                return false;
+            }
+            spec.path = item.at("path").get<std::string>();
+            const auto extension = lower_ascii(std::filesystem::path(spec.path).extension().string());
+            if (extension == ".nam") spec.kind = NodeKind::Nam;
+            else if (extension == ".wav") spec.kind = NodeKind::Ir;
+            else {
+                error = "slot path must end in .nam or .wav";
+                return false;
+            }
+            spec.empty = false;
+            slots.push_back(std::move(spec));
+        }
+        return true;
+    }
+
+    // Read-only v0.1 compatibility. Missing/null legacy fields produce no
+    // slot, preserving the old model -> IR ordering.
+    for (const char* key : {"model", "ir"}) {
+        if (!j.contains(key) || j.at(key).is_null()) continue;
+        if (!j.at(key).is_string()) {
+            error = std::string("legacy ") + key + " must be a string or null";
+            return false;
+        }
+        SlotSpec spec;
+        spec.path = j.at(key).get<std::string>();
+        const auto extension = lower_ascii(std::filesystem::path(spec.path).extension().string());
+        if (extension == ".nam") spec.kind = NodeKind::Nam;
+        else if (extension == ".wav") spec.kind = NodeKind::Ir;
+        else {
+            error = std::string("legacy ") + key + " has an unsupported extension";
+            return false;
+        }
+        spec.empty = false;
+        slots.push_back(std::move(spec));
+    }
+    return true;
+}
+
+static bool resolve_slot_specs(std::vector<SlotSpec>& slots, bool allowExternal,
+                               std::string& error) {
+    for (auto& slot : slots) {
+        if (slot.empty) continue;
+        std::string resolved;
+        if (!resolve_asset_path(slot.path, "data/tones", allowExternal, true,
+                                resolved, error)) {
+            error = "slot " + slot.path + ": " + error;
+            return false;
+        }
+        slot.path = std::move(resolved);
+    }
+    return true;
+}
+
+static bool parse_input_spec(const nlohmann::json& j, bool allowExternal,
+                             InputSpec& input, std::string& error) {
+    if (!j.contains("input")) return true;
+    const auto& value = j.at("input");
+    if (!value.is_object()) {
+        error = "input must be an object";
+        return false;
+    }
+    std::string source = "instrument";
+    if (value.contains("source")) {
+        if (!value.at("source").is_string()) {
+            error = "input.source must be a string";
+            return false;
+        }
+        source = value.at("source").get<std::string>();
+    }
+    if (source != "instrument" && source != "file") {
+        error = "input.source must be instrument or file";
+        return false;
+    }
+    const bool hasFile = value.contains("file") && !value.at("file").is_null();
+    std::string file;
+    if (hasFile) {
+        if (!value.at("file").is_string()) {
+            error = "input.file must be a string or null";
+            return false;
+        }
+        file = value.at("file").get<std::string>();
+    }
+    std::string state = "stopped";
+    if (value.contains("state")) {
+        if (!value.at("state").is_string()) {
+            error = "input.state must be a string";
+            return false;
+        }
+        state = value.at("state").get<std::string>();
+    }
+    if (state != "stopped" && state != "playing" && state != "paused") {
+        error = "input.state is invalid";
+        return false;
+    }
+    bool loop = false;
+    if (value.contains("loop")) {
+        if (!value.at("loop").is_boolean()) {
+            error = "input.loop must be boolean";
+            return false;
+        }
+        loop = value.at("loop").get<bool>();
+    }
+
+    input.isFile = source == "file";
+    input.state = state == "playing" ? 1 : state == "paused" ? 2 : 0;
+    input.loop = loop;
+    if (!input.isFile) {
+        if (hasFile || input.state != 0 || input.loop) {
+            error = "instrument input cannot have a file, playback or loop state";
+            return false;
+        }
+        return true;
+    }
+    if (file.empty() || lower_ascii(std::filesystem::path(file).extension().string()) != ".wav") {
+        error = "file input requires a .wav file";
+        return false;
+    }
+    if (!resolve_asset_path(file, "data/dry_inputs", allowExternal, false,
+                            input.path, error)) {
+        return false;
+    }
+    return true;
+}
+
+static bool read_chain_number(const nlohmann::json& j, const char* key,
+                              float defaultValue, float minValue, float maxValue,
+                              float& result, std::string& error) {
+    result = defaultValue;
+    if (!j.contains(key)) return true;
+    if (!j.at(key).is_number()) {
+        error = std::string(key) + " must be a number";
+        return false;
+    }
+    result = j.at(key).get<float>();
+    if (!std::isfinite(result) || result < minValue || result > maxValue) {
+        error = std::string(key) + " is out of range";
+        return false;
+    }
+    return true;
+}
+
+static bool read_chain_revision(const nlohmann::json& j, uint64_t& revision,
+                                std::string& error) {
+    revision = 0;
+    if (!j.contains("revision")) return true;
+    const auto& value = j.at("revision");
+    if (value.is_number_unsigned()) {
+        revision = value.get<uint64_t>();
+        return true;
+    }
+    if (value.is_number_integer()) {
+        const int64_t signedValue = value.get<int64_t>();
+        if (signedValue >= 0) {
+            revision = (uint64_t)signedValue;
+            return true;
         }
     }
-    if (j.contains("ir")) {
-        std::string p = j["ir"].is_null() ? "" : j["ir"].get<std::string>();
-        if (p != ctx.liveIrPath) {
-            if (p.empty()) {
-                request_fade_and_wait(ctx);  // 淡出旧输出 → 静音点再移除 FIR
-                std::atomic_store(&ctx.fir, std::shared_ptr<FirFilter>());
-                ctx.liveIrPath = p;
-                fprintf(stderr, "[live] IR 移除\n");
-            } else {
-                // 慢加载（IR 重采样可能几百 ms）在 fade 请求之前，否则淡出窗
-                // 早于交换结束 → 突跳无衰减
-                auto f = make_ir(resolve_path(p), sr);
-                if (f) {
-                    request_fade_and_wait(ctx);
-                    std::atomic_store(&ctx.fir, f);
-                    ctx.liveIrPath = p;
-                    fprintf(stderr, "[live] IR -> %s\n", p.c_str());
-                }
-                else fprintf(stderr, "[live] IR 读取失败: %s\n", p.c_str());
+    error = "revision must be a non-negative integer";
+    return false;
+}
+
+static std::vector<std::string> slot_signature(const std::vector<SlotSpec>& slots) {
+    std::vector<std::string> signature;
+    signature.reserve(slots.size());
+    for (const auto& slot : slots) {
+        if (slot.empty) signature.emplace_back("empty");
+        else signature.push_back((slot.kind == NodeKind::Nam ? "nam:" : "ir:") + slot.path);
+    }
+    return signature;
+}
+
+static std::shared_ptr<NeuralAudio::NeuralModel>
+make_nam(const std::string& path, NeuralAudio::NeuralModelLoader& loader,
+         std::string& error) {
+    std::ifstream stream(path, std::ifstream::binary);
+    if (!stream) {
+        error = "cannot open NAM";
+        return nullptr;
+    }
+    try {
+        // Pass a canonical lowercase extension so .NAM remains supported even
+        // though NeuralAudio's loader compares the extension literally.
+        auto* raw = loader.CreateFromStream(stream, std::filesystem::path("model.nam"));
+        if (!raw) {
+            error = "NAM loader rejected the file";
+            return nullptr;
+        }
+        return std::shared_ptr<NeuralAudio::NeuralModel>(raw);
+    } catch (const std::exception& exception) {
+        error = std::string("NAM load failed: ") + exception.what();
+        return nullptr;
+    }
+}
+
+static bool build_prepared_chain(const std::vector<SlotSpec>& slots, float quality,
+                                 uint64_t revision, NeuralAudio::NeuralModelLoader& loader,
+                                 int sr, std::shared_ptr<PreparedChain>& result,
+                                 std::string& error) {
+    auto chain = std::make_shared<PreparedChain>();
+    chain->quality = quality;
+    chain->revision = revision;
+    chain->signature = slot_signature(slots);
+    chain->nodes.reserve(slots.size());
+    for (const auto& slot : slots) {
+        if (slot.empty) continue;
+        ChainNode node;
+        node.kind = slot.kind;
+        node.path = slot.path;
+        if (slot.kind == NodeKind::Nam) {
+            node.nam = make_nam(slot.path, loader, error);
+            if (!node.nam) {
+                error = "slot preparation failed for " + slot.path + ": " + error;
+                return false;
             }
+            if (node.nam->HasQualityScaling())
+                node.nam->SetQualityScaleFactor(quality);
+        } else {
+            node.ir = make_ir(slot.path, sr);
+            if (!node.ir) {
+                error = "slot preparation failed for " + slot.path + ": invalid WAV/IR";
+                return false;
+            }
+        }
+        chain->nodes.push_back(std::move(node));
+    }
+    result = std::move(chain);
+    return true;
+}
+
+static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader& loader,
+                        Ctx& ctx, int sr, bool allowExternalPaths = false) {
+    if (!j.is_object()) {
+        fprintf(stderr, "[live] chain must be an object\n");
+        return false;
+    }
+    std::string error;
+    std::vector<SlotSpec> slots;
+    if (!parse_slot_specs(j, slots, error) || !resolve_slot_specs(slots, allowExternalPaths, error)) {
+        fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+        return false;
+    }
+    float gain = 1.0f, master = 1.0f, quality = 1.0f;
+    if (!read_chain_number(j, "gain", 1.0f, 0.0f, 10.0f, gain, error) ||
+        !read_chain_number(j, "master", 1.0f, 0.0f, 10.0f, master, error) ||
+        !read_chain_number(j, "quality", 1.0f, 0.0f, 1.0f, quality, error)) {
+        fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+        return false;
+    }
+    bool mute = false;
+    if (j.contains("mute")) {
+        if (!j.at("mute").is_boolean()) {
+            fprintf(stderr, "[live] chain rejected: mute must be boolean\n");
+            return false;
+        }
+        mute = j.at("mute").get<bool>();
+    }
+    uint64_t revision = 0;
+    if (!read_chain_revision(j, revision, error)) {
+        fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+        return false;
+    }
+    InputSpec input;
+    if (!parse_input_spec(j, allowExternalPaths, input, error)) {
+        fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+        return false;
+    }
+
+    auto current = std::atomic_load(&ctx.chain);
+    const auto signature = slot_signature(slots);
+    const bool chainChanged = !current || current->signature != signature;
+    std::shared_ptr<PreparedChain> next;
+    if (chainChanged) {
+        if (!build_prepared_chain(slots, quality, revision, loader, sr, next, error)) {
+            fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+            return false;
+        }
+    } else {
+        // Parameter/revision-only updates reuse the prepared nodes. Quality is
+        // applied by the callback at the next block boundary, so the main
+        // thread never mutates a model while it is being processed.
+        next = std::make_shared<PreparedChain>(*current);
+        next->quality = quality;
+        next->revision = revision;
+    }
+    next->gain = gain;
+    next->master = master;
+    next->mute = mute;
+
+    auto nextWav = std::atomic_load(&ctx.wavIn);
+    const bool inputPathChanged = input.isFile && input.path != ctx.liveInputPath;
+    if (input.isFile && (inputPathChanged || !nextWav)) {
+        auto candidate = std::make_shared<WavInput>();
+        if (candidate->load(input.path, sr)) {
+            nextWav = std::move(candidate);
+        } else {
+            nextWav.reset();
+            fprintf(stderr, "[live] dry input unavailable: %s\n", input.path.c_str());
         }
     }
-    if (j.contains("gain")) ctx.inputGain.store((float)j["gain"]);
-    if (j.contains("master")) ctx.master.store((float)j["master"]);
-    // 输入源：input = {source: "instrument"|"file", file, state, loop}
-    //   缺失或 source=instrument → 乐器输入（现状）；file 变化才重载 wav（慢操作
-    //   在 fade 前完成，同 IR 模式）；source/state/loop 原子切换，不触发链重载
-    if (j.contains("input") && j["input"].is_object()) {
-        const auto& inp = j["input"];
-        if (inp.contains("file") && inp["file"].is_string()) {
-            std::string p = inp["file"].get<std::string>();
-            if (p != ctx.liveInputPath) {
-                auto wi = std::make_shared<WavInput>();
-                if (wi->load(p, sr)) {
-                    request_fade_and_wait(ctx);
-                    std::atomic_store(&ctx.wavIn, wi);
-                    ctx.liveInputPath = p;
-                    ctx.playState.store(0);
-                    ctx.loop.store(false);
-                    fprintf(stderr, "[live] 干声输入 -> %s\n", p.c_str());
-                }
-                else fprintf(stderr, "[live] 干声读取失败: %s\n", p.c_str());
-            }
-        }
-        if (inp.contains("source")) {
-            bool isFile = inp["source"].get<std::string>() == "file";
-            if (isFile != ctx.inIsFile.load()) {
-                request_fade_and_wait(ctx);   // 乐器 ↔ 文件切换：fade 防信号源突变咔哒
-                ctx.inIsFile.store(isFile);
-                fprintf(stderr, "[live] 输入源 -> %s\n", isFile ? "干声文件" : "乐器");
-            }
-        }
-        if (inp.contains("state")) {
-            std::string s = inp["state"].get<std::string>();
-            int st = (s == "playing") ? 1 : (s == "paused") ? 2 : 0;
-            if (st != ctx.playState.load()) {
-                if (st == 1 && ctx.playState.load() == 0 && ctx.wavIn)
-                    ctx.wavIn->reset();   // stopped → playing：从头播放
-                ctx.playState.store(st);
-                fprintf(stderr, "[live] 播放 -> %s\n", s.c_str());
-            }
-        }
-        if (inp.contains("loop")) {
-            bool l = inp["loop"].get<bool>();
-            if (l != ctx.loop.load()) {
-                ctx.loop.store(l);
-                fprintf(stderr, "[live] 循环 -> %s\n", l ? "开" : "关");
-            }
-        }
-    }
+    const bool sourceChanged = input.isFile != ctx.inIsFile.load(std::memory_order_relaxed);
+    if (current && (chainChanged || sourceChanged || inputPathChanged))
+        request_fade_and_wait(ctx);
+
+    // The only runtime publication point: all nodes and the input file have
+    // been prepared, so readers see either the old complete state or this one.
+    std::atomic_store(&ctx.chain, next);
+    ctx.runtimeRevision.store(revision, std::memory_order_release);
+    std::atomic_store(&ctx.wavIn, nextWav);
+    ctx.liveInputPath = input.isFile ? input.path : "";
+    ctx.inIsFile.store(input.isFile, std::memory_order_release);
+    ctx.loop.store(input.isFile && input.loop, std::memory_order_release);
+    const int previousState = ctx.playState.load(std::memory_order_relaxed);
+    const int effectiveState = input.isFile && nextWav ? input.state : 0;
+    if (effectiveState == 1 && previousState == 0 && nextWav)
+        nextWav->reset();
+    ctx.playState.store(effectiveState, std::memory_order_release);
+    fprintf(stderr, "[live] chain revision %llu: %zu slot(s), %zu node(s)\n",
+            (unsigned long long)revision, slots.size(), next->nodes.size());
+    return true;
 }
 
 static float block_peak(const float* buf, int n) {
@@ -389,23 +745,43 @@ static void apply_fade(float* out, int frames, Ctx& c) {
 }
 
 // 纯 DSP 链（无 PortAudio 依赖，输出端可插拔——pa_callback 与未来其它输出端共用）：
-// mono 输入(scratch) → gain → amp(NeuralAudio) → IR(FIR) → 去咔哒 fade → master → out
+// mono 输入(scratch) → gain → slot[0..n] → 去咔哒 fade → master/mute → out
 static void process_block(const float* in, float* out, int frames, Ctx& c) {
-    if (c.inputGain != 1.0f)
-        for (int i = 0; i < frames; i++) c.scratch[i] = in[i] * c.inputGain;
+    auto chain = std::atomic_load(&c.chain);
+    const float inputGain = chain ? chain->gain : 1.0f;
+    if (inputGain != 1.0f)
+        for (int i = 0; i < frames; i++) c.scratch[i] = in[i] * inputGain;
     else if (in != c.scratch.data())
         std::copy(in, in + frames, c.scratch.begin());
     c.inPeak.store(block_peak(c.scratch.data(), frames), std::memory_order_relaxed);
-    auto m = std::atomic_load(&c.model);
-    if (m) m->Process(c.scratch.data(), c.scratch.data(), frames);
-    // AMP bypass（model=null）：输入直通，不做任何处理（与 IR 直通对称）
-    auto f = std::atomic_load(&c.fir);
-    if (f) f->process(c.scratch.data(), out, frames);
-    else std::copy(c.scratch.begin(), c.scratch.begin() + frames, out);
+    if (chain) {
+        for (auto& node : chain->nodes) {
+            if (node.kind == NodeKind::Nam && node.nam) {
+                // Quality changes are applied by the audio thread at a block
+                // boundary. This preserves node reuse without racing NAM's
+                // mutable quality state from the live-file watcher.
+                if (node.nam->HasQualityScaling() &&
+                    node.nam->GetQualityScaleFactor() != chain->quality) {
+                    node.nam->SetQualityScaleFactor(chain->quality);
+                }
+                node.nam->Process(c.scratch.data(), c.scratch.data(), frames);
+            } else if (node.kind == NodeKind::Ir && node.ir) {
+                // FirFilter is sample-aligned and supports in-place processing;
+                // no additional audio block or staging buffer is introduced.
+                node.ir->process(c.scratch.data(), c.scratch.data(), frames);
+            }
+        }
+        std::copy(c.scratch.begin(), c.scratch.begin() + frames, out);
+    } else {
+        std::copy(c.scratch.begin(), c.scratch.begin() + frames, out);
+    }
     apply_fade(out, frames, c);
-    float mstr = c.master.load(std::memory_order_relaxed);
-    if (mstr != 1.0f)
-        for (int i = 0; i < frames; i++) out[i] *= mstr;
+    const float master = chain ? chain->master : 1.0f;
+    if (chain && chain->mute) {
+        std::fill(out, out + frames, 0.0f);
+    } else if (master != 1.0f) {
+        for (int i = 0; i < frames; i++) out[i] *= master;
+    }
 }
 
 static int pa_callback(const void* in, void* out, unsigned long frames,
@@ -544,10 +920,16 @@ static bool read_wav_ir(const char* path, std::vector<float>& out, uint32_t& sr)
         }
     }
     if (!haveFmt || !haveData) { fclose(f); return false; }
+    if (channels == 0 || sampleRate == 0 ||
+        (fmtTag != 1 && fmtTag != 3) || (bits != 16 && bits != 24 && bits != 32)) {
+        fclose(f);
+        return false;
+    }
     std::vector<uint8_t> raw(dataSize);
     if (fread(raw.data(), 1, dataSize, f) != dataSize) { fclose(f); return false; }
     fclose(f);
     const uint32_t frameBytes = channels * (bits / 8);
+    if (frameBytes == 0 || dataSize % frameBytes != 0) return false;
     const uint32_t n = dataSize / frameBytes;
     out.clear(); out.reserve(n);
     if (fmtTag == 3 && bits == 32) {
@@ -598,9 +980,9 @@ int main(int argc, char** argv) {
     const char* levelFile = nullptr;
     const char* recordOut = nullptr;
     if (argc >= 2 && !strcmp(argv[1], "--list")) listOnly = true;
-    const char* modelPath = argv[1];
+    const char* modelPath = argv[1][0] == '-' ? nullptr : argv[1];
     // argv[2] 是 IR 路径；以 '-' 开头则视为 flag（无 IR 时 --in 等不会误判）
-    const char* irPath = (argc > 2 && argv[2][0] != '-') ? argv[2] : nullptr;
+    const char* irPath = (modelPath && argc > 2 && argv[2][0] != '-') ? argv[2] : nullptr;
     int block = 256, sr = 48000;
     // 从 1 开始：model 可能是位置参数（argv[1]）也可能是 flag（--live 模式）；位置参数非 flag 自然跳过
     for (int i = 1; i < argc; i++) {
@@ -610,7 +992,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--gain")) { gainArg = (float)atof(argv[++i]); }
         else if (!strcmp(argv[i], "--master")) { masterArg = (float)atof(argv[++i]); }
         else if (!strcmp(argv[i], "--live")) { livePath = argv[++i]; }
-        else if (!strcmp(argv[i], "--root")) { g_root = argv[++i]; }
+        else if (!strcmp(argv[i], "--root")) { g_root = argv[++i]; g_rootExplicit = true; }
         else if (!strcmp(argv[i], "--level-file")) { levelFile = argv[++i]; }
         else if (!strcmp(argv[i], "--record-out")) { recordOut = argv[++i]; }
         else if (!strcmp(argv[i], "--list")) { listOnly = true; }
@@ -620,6 +1002,10 @@ int main(int argc, char** argv) {
             if (block == 256) block = atoi(argv[i]);
             else sr = atoi(argv[i]);
         }
+    }
+    if (!g_rootExplicit) {
+        const auto executable = std::filesystem::path(executable_dir());
+        if (executable != ".") g_root = executable.parent_path().string();
     }
     PaStream* stream = nullptr;
     PaError err = Pa_Initialize();
@@ -639,11 +1025,10 @@ int main(int argc, char** argv) {
 
     NeuralAudio::NeuralModelLoader loader;
     loader.SetDefaultMaxAudioBufferSize(block);
+    loader.SetExternalSampleRate(sr);
 
     Ctx ctx;
     ctx.scratch.assign(block, 0.0f);
-    ctx.inputGain.store(gainArg);
-    ctx.master.store(masterArg);
 
     // 统一错误退出：任何失败路径都 finalize 录制文件、关 stream、Terminate
     auto fail = [&](const char* msg, const char* detail = "") -> int {
@@ -665,21 +1050,26 @@ int main(int argc, char** argv) {
     // 初始模型/IR：live 模式以配置文件为准，否则用命令行参数
     if (livePath) {
         try {
-            apply_chain(nlohmann::json::parse(std::ifstream(resolve_path(livePath))), loader, ctx, sr);
+            if (!apply_chain(nlohmann::json::parse(std::ifstream(resolve_path(livePath))),
+                             loader, ctx, sr)) {
+                return fail("live 配置被拒绝");
+            }
         } catch (const std::exception& e) {
             return fail("live 配置解析失败", e.what());
         }
-        // 空链仍拒绝（静默退出），但 AMP bypass（model=null）+ 干声文件输入合法
-        if (!std::atomic_load(&ctx.model) && !ctx.inIsFile.load())
-            return fail("live 配置缺少有效 model 字段");
     } else {
-        auto model = std::shared_ptr<NeuralAudio::NeuralModel>(loader.CreateFromFile(resolve_path(modelPath)));
-        if (!model) return fail("模型加载失败", modelPath);
-        std::atomic_store(&ctx.model, model);
-        if (irPath) {
-            auto f = make_ir(resolve_path(irPath), sr);
-            if (f) { std::atomic_store(&ctx.fir, f); fprintf(stderr, "IR 已加载: %s\n", irPath); }
-            else fprintf(stderr, "IR 读取失败，仅 amp\n");
+        if (!modelPath) return fail("非 live 模式需要 model.nam");
+        nlohmann::json initial = nlohmann::json::object();
+        initial["slots"] = nlohmann::json::array();
+        initial["slots"].push_back({{"path", modelPath}});
+        if (irPath) initial["slots"].push_back({{"path", irPath}});
+        initial["gain"] = gainArg;
+        initial["master"] = masterArg;
+        initial["quality"] = 1.0f;
+        initial["mute"] = false;
+        initial["revision"] = 0;
+        if (!apply_chain(initial, loader, ctx, sr, true)) {
+            return fail("模型或 IR 加载失败");
         }
     }
 
@@ -719,7 +1109,7 @@ int main(int argc, char** argv) {
     if (err != paNoError)
         return fail("启动流失败", Pa_GetErrorText(err));
     fprintf(stderr, "实时运行中: %s @ %dHz, block=%d, 理论延迟≈%.1fms — Ctrl+C 退出\n",
-            modelPath, sr, block, block * 1000.0 / sr);
+            modelPath ? modelPath : "<live chain>", sr, block, block * 1000.0 / sr);
     fprintf(stderr, "输入: %s  →  输出: %s\n",
             Pa_GetDeviceInfo(inDev)->name, Pa_GetDeviceInfo(outDev)->name);
     // 实际流延迟（PortAudio/CoreAudio 报告的缓冲延迟，含硬件，≈端到端感知延迟）
@@ -740,11 +1130,12 @@ int main(int argc, char** argv) {
         Pa_Sleep(100);
         if (livePath) {
             std::error_code ec;
-            auto t = std::filesystem::last_write_time(livePath, ec);
+            auto t = std::filesystem::last_write_time(resolve_path(livePath), ec);
             if (!ec && t != lastWrite) {
                 lastWrite = t;
                 try {
-                    apply_chain(nlohmann::json::parse(std::ifstream(resolve_path(livePath))), loader, ctx, sr);
+                    apply_chain(nlohmann::json::parse(std::ifstream(resolve_path(livePath))),
+                                loader, ctx, sr);
                 } catch (...) { fprintf(stderr, "[live] 配置解析失败\n"); }
             }
         }
@@ -752,14 +1143,15 @@ int main(int argc, char** argv) {
         const float outL = ctx.outPeak.load(std::memory_order_relaxed);
         print_levels("VU", inL, outL);
         // 干声回放：播完检测（非循环）→ 自动停止归零；位置秒数回传 TUI
-        if (ctx.inIsFile.load(std::memory_order_relaxed) && ctx.wavIn) {
+        auto wi = std::atomic_load(&ctx.wavIn);
+        if (ctx.inIsFile.load(std::memory_order_relaxed) && wi) {
             if (ctx.playState.load() == 1 && !ctx.loop.load() &&
-                ctx.wavIn->position() >= ctx.wavIn->size()) {
+                wi->position() >= wi->size()) {
                 ctx.playState.store(0);
-                ctx.wavIn->reset();
+                wi->reset();
                 fprintf(stderr, "[live] 干声播完\n");
             }
-            ctx.playPosSec.store((float)ctx.wavIn->position() / sr,
+            ctx.playPosSec.store((float)wi->position() / sr,
                                  std::memory_order_relaxed);
         } else {
             ctx.playPosSec.store(0.0f, std::memory_order_relaxed);
