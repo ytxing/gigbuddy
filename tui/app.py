@@ -39,8 +39,9 @@ from .chain_state import (ChainStateError, SlotStatus,
 import library  # noqa: E402
 from .input_screen import InputSourceScreen  # noqa: E402
 from .install_screen import PackInstallScreen  # noqa: E402
-from .library_panel import (LibraryPanel, LibraryTable, ToneHighlighted,
-                            ToneSelected, VerifiedAuthor)  # noqa: E402
+from .library_panel import (LibraryPanel, LibraryTable, RemoteToneSelected,
+                            ToneHighlighted, ToneSelected,
+                            VerifiedAuthor)  # noqa: E402
 from .marquee import MarqueeBar  # noqa: E402
 from .metadata import signed_fixed  # noqa: E402
 from .panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar,
@@ -1348,9 +1349,13 @@ class GigBuddyApp(App):
             panel._observed_chain_fingerprint = None
         panel.chain = persisted
         panel._refresh_dynamic_slots()
+        detail = self.query_one(DetailPane)
+        keep_pack_focus = detail._pack_mode and detail._pack_origin != "slot"
+        if detail._pack_slot_index is not None:
+            detail.refresh_pack_active(persisted)
         if not panel.state.slot_count:
-            self.query_one(DetailPane).clear()
-        if focus_index is not None:
+            detail.clear()
+        if focus_index is not None and not keep_pack_focus:
             self.call_after_refresh(
                 lambda index=focus_index: self._focus_slot(index))
         self.notify(note)
@@ -1374,7 +1379,7 @@ class GigBuddyApp(App):
         panel = self.query_one(ChainPanel)
         snapshot = panel.state.slot(index)
         if snapshot.status is SlotStatus.EMPTY:
-            self.notify("Empty Slot cannot bypass", severity="warning")
+            self._browse_empty_slot(index)
             return
         label = "restored" if snapshot.status is SlotStatus.BYPASS else "bypassed"
         self._commit_slot_mutation(
@@ -1437,6 +1442,79 @@ class GigBuddyApp(App):
     def on_chain_slot_widget_move_requested(
             self, event: ChainSlotWidget.MoveRequested) -> None:
         self._move_slot(event.index, event.direction)
+
+    def on_chain_panel_slot_focused(self, event: ChainPanel.SlotFocused) -> None:
+        """Slot focus establishes target and updates the matching Detail view."""
+        self._show_slot_detail(event.index)
+
+    def _show_slot_detail(self, index: int) -> None:
+        panel = self.query_one(ChainPanel)
+        detail = self.query_one(DetailPane)
+        if panel._legacy_mode:
+            return
+        try:
+            snapshot = panel.state.slot(index)
+        except ChainStateError:
+            return
+        if snapshot.status is SlotStatus.EMPTY:
+            detail.show_slot_empty(
+                index, target=panel.state.target_index == index)
+            return
+
+        path = snapshot.path or snapshot.candidate
+        if not path:
+            detail.show_slot_empty(
+                index, target=panel.state.target_index == index)
+            return
+        try:
+            local_models = library.local_models_by_tone(path) or []
+        except Exception:
+            local_models = []
+        local_models = [model for model in local_models
+                        if model.get("local_path")]
+        tone = {}
+        if local_models:
+            try:
+                tone = library.get_tone(local_models[0].get("tone_id")) or {}
+            except Exception:
+                tone = {}
+        if not tone:
+            try:
+                title = library.tone_title_for_path(path)
+            except Exception:
+                title = None
+            tone = {
+                "title": title or Path(path).stem,
+                "gear": None,
+                "models": [],
+            }
+        models = tone.get("models") or local_models
+        if not models:
+            # Keep a valid external/local file visible instead of leaving the
+            # DetailPane blank. Protocol validation still decides whether a
+            # later replacement can be committed.
+            models = [{
+                "id": None,
+                "name": Path(path).name,
+                "local_path": path,
+                "architecture": "IR" if Path(path).suffix.lower() == ".wav"
+                else "A1",
+            }]
+        detail.show_slot_pack(
+            tone, models, panel.state.to_chain(), index, snapshot)
+
+    def _browse_empty_slot(self, index: int) -> None:
+        """Return an Empty Slot to the local Library without changing target."""
+        panel = self.query_one(ChainPanel)
+        try:
+            panel.state.focus_slot(index)
+        except ChainStateError:
+            return
+        library_panel = self.query_one(LibraryPanel)
+        tab = library_panel.query_one("#--content-tab-pane-local")
+        tab.post_message(tab.Clicked(tab))
+        library_panel.query_one("#lib-table-local").focus()
+        self.notify(f"Select a tone for Slot {index + 1:02d}")
 
     def _show_node_pack(self, kind: str) -> None:
         """Open the focused node's tone pack (all files) in the detail pane."""
@@ -1686,6 +1764,29 @@ class GigBuddyApp(App):
         加载，与 BYPASS 的"加载但直通"不同）；amp-cab 包选 AMP 行时
         CAB 显式置 null（pop 不会让引擎移除旧 IR）。
         """
+        if event.slot_index is not None:
+            panel = self.query_one(ChainPanel)
+            index = event.slot_index
+            if not event.path:
+                return
+            if panel._legacy_mode:
+                self.notify("v0.2 Slot action unavailable for legacy chain",
+                            severity="warning")
+                return
+            if panel.state.target_index != index:
+                self.notify("Select the target Slot before loading a file",
+                            severity="warning")
+                return
+            if Path(event.path).suffix.lower() not in {".nam", ".wav"}:
+                self.notify("Unsupported Slot file format",
+                            severity="error")
+                return
+            if self._commit_slot_mutation(
+                    lambda state: state.load_file(index, event.path),
+                    f"Slot {index + 1:02d} → {live.short_name(event.path)}"):
+                self.query_one(DetailPane).refresh_pack_active(
+                    panel.state.to_chain())
+            return
         cfg = live.read_chain()
         if not event.path:
             return
@@ -1721,7 +1822,10 @@ class GigBuddyApp(App):
 
     def on_detail_pane_pack_closed(self, event) -> None:
         """Esc 从 pack 文件列表回到链节点（其 ↑/↓ 换模型、双击切换恢复）。"""
-        self._focus_node(event.kind)
+        if event.slot_index is not None:
+            self._focus_slot(event.slot_index)
+        elif event.kind:
+            self._focus_node(event.kind)
 
     def on_preset_name_modal_saved(self, event: PresetNameModal.Saved) -> None:
         self.query_one(PresetPanel)._fingerprint = None
@@ -1753,9 +1857,16 @@ class GigBuddyApp(App):
         """
         t = library.get_tone(event.tone_id)
         if t:
+            if not self.query_one(ChainPanel)._legacy_mode:
+                self.query_one(DetailPane).show(t)
+                return
             kind = "ir" if t.get("gear") == "cab" else "amp"
             self.push_screen(TonePickerScreen(
                 kind, tone_id=int(t["id"]), tone_type=t.get("gear") or "amp"))
+
+    def on_remote_tone_selected(self, event: RemoteToneSelected) -> None:
+        """Canonical remote rows open Remote Description in DetailPane."""
+        self.query_one(DetailPane).show(event.tone)
 
     def on_link_clicked(self, event) -> None:
         """Click a metadata link (author/tag) → TONE3000 search for it."""

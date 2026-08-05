@@ -1184,8 +1184,8 @@ class ChainPanel(Vertical):
     can_focus = True
 
     BINDINGS = [
-        Binding("left", "view_description", "description", show=False),
-        Binding("right", "view_selection", "selection", show=False),
+        Binding("left", "legacy_view_description", "description", show=False),
+        Binding("right", "legacy_view_selection", "selection", show=False),
     ]
 
     # Canonical v0.2 chains recompose only their dynamic Slot list. The
@@ -1193,11 +1193,30 @@ class ChainPanel(Vertical):
     # fixtures and is never used for a canonical ``slots[]`` chain.
     chain: reactive[dict] = reactive({}, recompose=False)
 
+    class SlotFocused(Message):
+        """A canonical Slot became the focused target."""
+
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
     def action_view_description(self) -> None:
+        if not self._legacy_mode:
+            return
         self.screen.query_one(DetailPane).toggle_view(-1)
 
     def action_view_selection(self) -> None:
+        if not self._legacy_mode:
+            return
         self.screen.query_one(DetailPane).toggle_view(+1)
+
+    def action_legacy_view_description(self) -> None:
+        if self._legacy_mode:
+            self.action_view_description()
+
+    def action_legacy_view_selection(self) -> None:
+        if self._legacy_mode:
+            self.action_view_selection()
 
     def __init__(self) -> None:
         super().__init__()
@@ -1579,6 +1598,7 @@ class ChainPanel(Vertical):
             except ChainStateError:
                 return
             self._refresh_dynamic_slots()
+            self.post_message(self.SlotFocused(event.widget.index))
             return
         if isinstance(event.widget, NodeWidget):
             if event.widget.kind in ("amp", "cab"):
@@ -1636,8 +1656,10 @@ class PackFileTable(ClickSelectTable):
 
     BINDINGS = [
         Binding("escape", "close_pack", "back", show=False),
-        Binding("left", "view_description", "description", show=False),
-        Binding("right", "view_selection", "selection", show=False),
+        Binding("left", "legacy_view_description", "description", show=False),
+        Binding("right", "legacy_view_selection", "selection", show=False),
+        Binding("[", "view_description", "description", show=False),
+        Binding("]", "view_selection", "selection", show=False),
         Binding("space", "toggle_pick", "select", show=False),
         Binding("a", "toggle_all_pick", "all/none", show=False),
         Binding("i", "install_selected", "install", show=False),
@@ -1670,7 +1692,10 @@ class PackFileTable(ClickSelectTable):
 
     def action_close_pack(self) -> None:
         pane = self.screen.query_one(DetailPane)
-        if pane._pack_origin == "description":
+        if pane._pack_origin == "slot" and pane._pack_slot_index is not None:
+            self.post_message(DetailPane.PackClosed(
+                self.pack_kind, slot_index=pane._pack_slot_index))
+        elif pane._pack_origin == "description":
             # Entered via the view switch: Esc returns to the description
             # view instead of focusing a chain node the user never touched.
             pane.toggle_view(-1)
@@ -1688,7 +1713,16 @@ class PackFileTable(ClickSelectTable):
         pane.focus()
 
     def action_view_selection(self) -> None:
-        self.screen.query_one(DetailPane).toggle_view(+1)
+        pane = self.screen.query_one(DetailPane)
+        pane.toggle_view(+1)
+
+    def action_legacy_view_description(self) -> None:
+        if self.screen.query_one(DetailPane)._pack_slot_index is None:
+            self.action_view_description()
+
+    def action_legacy_view_selection(self) -> None:
+        if self.screen.query_one(DetailPane)._pack_slot_index is None:
+            self.action_view_selection()
 
     def on_click(self, event) -> None:
         """Pick 列单击 = 鼠标点选（REQ-040）；其余列单击移光标（基类），
@@ -1711,6 +1745,59 @@ class PackFileTable(ClickSelectTable):
 
 
 
+class DetailViewTabs(Static):
+    """One focus stop for the Description/Pack view tabs."""
+
+    can_focus = True
+    ALLOW_SELECT = False
+
+    class Changed(Message):
+        def __init__(self, mode: str) -> None:
+            super().__init__()
+            self.mode = mode
+
+    BINDINGS = [
+        Binding("[", "previous_view", "previous view", show=False),
+        Binding("]", "next_view", "next view", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__(id="detail-view-tabs")
+        self._mode = "description"
+        self._has_pack = False
+
+    def set_view(self, mode: str, *, has_pack: bool) -> None:
+        self._mode = mode
+        self._has_pack = has_pack
+        self.display = has_pack
+        self.refresh()
+
+    def render(self) -> str:
+        if not self._has_pack:
+            return ""
+        description = ("[b $accent]DESCRIPTION[/]"
+                       if self._mode == "description" else "DESCRIPTION")
+        pack = ("[b $accent]PACK[/]"
+                 if self._mode == "selection" else "PACK")
+        return f"{description}  {pack}"
+
+    def _activate(self, mode: str) -> None:
+        if self._has_pack and mode != self._mode:
+            self.post_message(self.Changed(mode))
+
+    def action_previous_view(self) -> None:
+        self._activate("description")
+
+    def action_next_view(self) -> None:
+        self._activate("selection")
+
+    def on_click(self, event: MouseEvent) -> None:
+        if not self._has_pack:
+            return
+        self._activate("description" if event.x < 13 else "selection")
+        event.stop()
+
+
 class DetailPane(Vertical):
     """Full metadata of the tone selected in the library (from the SQLite DB).
 
@@ -1725,18 +1812,23 @@ class DetailPane(Vertical):
     class PackFilePicked(Message):
         """A file in the pack list was selected — hot-swap that chain slot."""
 
-        def __init__(self, slot: str, path: str, tone_gear: str | None) -> None:
+        def __init__(self, slot: str | None, path: str,
+                     tone_gear: str | None = None, *,
+                     slot_index: int | None = None) -> None:
             super().__init__()
-            self.slot = slot  # "model" | "ir"
+            self.slot = slot  # legacy: "model" | "ir"
             self.path = path
             self.tone_gear = tone_gear
+            self.slot_index = slot_index
 
     class PackClosed(Message):
         """Esc on the pack file table — return keyboard focus to the chain node."""
 
-        def __init__(self, kind: str) -> None:
+        def __init__(self, kind: str | None = None, *,
+                     slot_index: int | None = None) -> None:
             super().__init__()
             self.kind = kind
+            self.slot_index = slot_index
 
     class PackInstallRequested(Message):
         """selection 视图里 Enter/双击一行 → 打开该 tone 的二级菜单详情页
@@ -1763,8 +1855,12 @@ class DetailPane(Vertical):
             self.count = count
 
     BINDINGS = [
-        Binding("left", "view_description", "description", show=False),
-        Binding("right", "view_selection", "selection", show=False),
+        Binding("left", "legacy_view_description", "description", show=False),
+        Binding("right", "legacy_view_selection", "selection", show=False),
+        Binding("[", "view_description", "description", show=False),
+        Binding("]", "view_selection", "selection", show=False),
+        Binding("enter", "browse_empty_slot", "browse", show=False),
+        Binding("d", "delete_empty_slot", "delete", show=False),
         Binding("r", "retry_detail", "retry", show=False),
         Binding("escape", "back_from_creator", "back", show=False),
     ]
@@ -1775,8 +1871,29 @@ class DetailPane(Vertical):
 
     def action_back_from_creator(self) -> None:
         """作者介绍页 Esc：回到 TOP CREATORS 表继续浏览（REQ-020）。"""
-        if self._pack_origin == "creators":
+        if (self._pack_origin == "slot"
+                and self._pack_slot_index is not None):
+            self._close_slot_detail()
+        elif self._pack_origin == "creators":
             self.screen.query_one("#lib-table-creators").focus()
+
+    def _close_slot_detail(self) -> None:
+        if self._pack_origin != "slot" or self._pack_slot_index is None:
+            return
+        self.post_message(self.PackClosed(
+            "slot", slot_index=self._pack_slot_index))
+
+    def action_browse_empty_slot(self) -> None:
+        if self._view_mode == "empty" and self._pack_slot_index is not None:
+            handler = getattr(self.app, "_browse_empty_slot", None)
+            if handler is not None:
+                handler(self._pack_slot_index)
+
+    def action_delete_empty_slot(self) -> None:
+        if self._view_mode == "empty" and self._pack_slot_index is not None:
+            handler = getattr(self.app, "_delete_slot", None)
+            if handler is not None:
+                handler(self._pack_slot_index)
 
     DEFAULT_CSS = """
     DetailPane #detail-marquee {
@@ -1795,6 +1912,10 @@ class DetailPane(Vertical):
         height: 1; padding: 0 1; margin-bottom: 1;
         color: $text-muted; background: $panel;
         text-style: bold;
+    }
+    DetailPane #detail-view-tabs {
+        height: 1; padding: 0 1; margin-bottom: 1;
+        color: $text-muted; background: $panel;
     }
     DetailPane #detail-slots {
         height: 1; padding: 0 1; margin-bottom: 1;
@@ -1818,6 +1939,8 @@ class DetailPane(Vertical):
         self._marquee = MarqueeBar(id="detail-marquee", style="b $primary")
         self._title: Static = self._marquee
         self._summary: MarqueeBar = MarqueeBar("", id="detail-summary", markup=True)
+        self._view_tabs = DetailViewTabs()
+        self._view_tabs.display = False
         # Tone detail is the intentional copy surface. Keep its title and
         # compact summary lines selectable alongside the metadata body.
         for text_widget in (self._marquee, self._summary):
@@ -1830,6 +1953,9 @@ class DetailPane(Vertical):
         self._pack_mode = False
         self._pack_remote = False  # 远程（未下载）pack：Enter 走安装二级页
         self._pack_kind = "amp"
+        self._pack_slot_index: int | None = None
+        self._pack_slot_status: SlotStatus | None = None
+        self._pack_slot_label: str | None = None
         self._pack_tone: dict = {}
         # row key ("m<model id>") → model; local_path → row key; last chain.
         self._pack_rows: dict[str, dict] = {}
@@ -1885,6 +2011,7 @@ class DetailPane(Vertical):
     def compose(self) -> ComposeResult:
         yield self._marquee
         yield self._summary
+        yield self._view_tabs
         with VerticalScroll(id="detail-scroll"):
             yield self._body
         yield self._pack_table
@@ -2048,23 +2175,48 @@ class DetailPane(Vertical):
         self.query_one("#detail-scroll", VerticalScroll).display = not on
         self._pack_table.display = on
 
-    def _exit_pack_mode(self) -> None:
+    def _exit_pack_mode(self, *, preserve_slot: bool = False) -> None:
         if getattr(self, "_pack_mode", False):
             self._set_pack_mode(False)
         # A pack response that belongs to the previous view must never be able
         # to re-enter the table after the user has moved elsewhere.
         self._pack_remote = False
         self._pack_tone = {}
+        self._pack_rows = {}
+        self._pack_path_to_key = {}
+        self._pack_picked = set()
+        if getattr(self, "_pack_table", None) is not None:
+            self._pack_table.clear()
+        if not preserve_slot:
+            self._pack_slot_index = None
+            self._pack_slot_status = None
+            self._pack_slot_label = None
         self._pack_error = False
         self._pack_busy = None
         self._pack_operation_generation += 1
         set_border_hint_layout(self, "", [])
         self._pack_progress_status = ""
+        self._refresh_view_tabs()
 
     def _set_summary(self, content: str) -> None:
         """摘要行更新；空内容时去掉行背景——未选中态不允许任何带背景的行。"""
         self._summary.content = content
         self._summary.set_class(not content, "detail-summary--empty")
+
+    def _refresh_view_tabs(self) -> None:
+        """Keep the visible Description/Pack strip aligned with the view."""
+        has_pack = bool(
+            self._current_tone
+            and (self._pack_remote or self._pack_rows
+                 or self._pack_slot_index is not None)
+        )
+        mode = self._view_mode if self._view_mode in {
+            "description", "selection"
+        } else "description"
+        self._view_tabs.set_view(mode, has_pack=has_pack)
+
+    def on_detail_view_tabs_changed(self, event: DetailViewTabs.Changed) -> None:
+        self.toggle_view(-1 if event.mode == "description" else +1)
 
     # ---- description / selection view modes --------------------------------
 
@@ -2076,6 +2228,14 @@ class DetailPane(Vertical):
         if self._view_mode == "description":
             self.toggle_view(+1)
 
+    def action_legacy_view_description(self) -> None:
+        if self._pack_slot_index is None:
+            self.action_view_description()
+
+    def action_legacy_view_selection(self) -> None:
+        if self._pack_slot_index is None:
+            self.action_view_selection()
+
     def toggle_view(self, direction: int) -> None:
         """Switch between the Description and Selection views.
 
@@ -2084,7 +2244,8 @@ class DetailPane(Vertical):
         stays on the description view.
         """
         if self._view_mode == "selection" and direction < 0:
-            self._enter_description(self._current_tone)
+            self._enter_description(self._current_tone,
+                                    preserve_slot_context=True)
         elif self._view_mode == "description" and direction > 0:
             tone = self._current_tone
             if tone and not (tone.get("models") or []):
@@ -2093,7 +2254,13 @@ class DetailPane(Vertical):
                 self.show_remote_pack(tone)
             else:
                 self._enter_selection(tone=tone,
-                                      origin="description", focus_table=True)
+                                      slot_index=self._pack_slot_index,
+                                      slot_status=self._pack_slot_status,
+                                      slot_label=self._pack_slot_label,
+                                      origin=(self._pack_origin
+                                              if self._pack_slot_index is not None
+                                              else "description"),
+                                      focus_table=True)
 
     def _mode_hint(self, *, selection: bool) -> str:
         """Return the stable action vocabulary used by both detail modes."""
@@ -2369,13 +2536,27 @@ class DetailPane(Vertical):
             parts.append(f"MODEL #{model_id}")
         return " · ".join(parts)
 
-    def _enter_description(self, tone: dict | None) -> None:
+    def _enter_description(self, tone: dict | None, *,
+                           preserve_slot_context: bool = False,
+                           slot_index: int | None = None,
+                           slot_status: SlotStatus | None = None) -> None:
         """Description view: the two-line header carries the key metadata and
         the body shows the tone's description — the text for understanding
         how the tone is named."""
         generation = self._invalidate_view()
         tone = tone or self._current_tone or {}
-        self._exit_pack_mode()
+        if preserve_slot_context:
+            slot_index = self._pack_slot_index
+            slot_status = self._pack_slot_status
+            slot_label = self._pack_slot_label
+        else:
+            slot_label = None
+        origin = self._pack_origin if preserve_slot_context else "description"
+        self._exit_pack_mode(preserve_slot=preserve_slot_context)
+        self._pack_slot_index = slot_index
+        self._pack_slot_status = slot_status
+        self._pack_slot_label = slot_label
+        self._pack_origin = origin
         self.border_title = "TONE DETAIL"
         self._current_tone = tone
         self._summary_mode = "tone"
@@ -2383,12 +2564,19 @@ class DetailPane(Vertical):
         self._set_marquee(self._marquee_content(
             tone, self._chain_model_id(tone)))
         self._marquee.set_class(False, "detail-marquee--empty")
-        self._set_summary(self._tone_summary(tone))
+        summary = self._tone_summary(tone)
+        if slot_index is not None:
+            state = (slot_status.value.upper() if slot_status else "SLOT")
+            summary = " · ".join(
+                part for part in (summary, state,
+                                  f"TARGET {slot_index + 1:02d}") if part)
+        self._set_summary(summary)
         self._ensure_verification(tone)
         colors = self._theme_colors()
         self._body.update(description_only(tone, colors=colors))
         self._rerender = lambda: self._body.update(
             description_only(tone, colors=self._theme_colors()))
+        self._refresh_view_tabs()
         set_border_hint_layout(
             self, "", [token for token, _action in self._border_hint_actions()])
         return generation
@@ -2397,6 +2585,9 @@ class DetailPane(Vertical):
                          models: list[dict] | None = None,
                          chain: dict | None = None,
                          kind: str | None = None,
+                         slot_index: int | None = None,
+                         slot_status: SlotStatus | None = None,
+                         slot_label: str | None = None,
                          origin: str | None = None,
                          focus_table: bool = False,
                          remote: bool = False) -> None:
@@ -2420,10 +2611,22 @@ class DetailPane(Vertical):
                                 severity="warning")
             if not remote:
                 return
+        if slot_index is None:
+            try:
+                panel = self.app.query_one(ChainPanel)
+                if not panel._legacy_mode:
+                    slot_index = panel.state.target_index
+                    if slot_index is not None and slot_status is None:
+                        slot_status = panel.state.slot(slot_index).status
+            except Exception:
+                pass
         self._pack_tone = tone
         self._pack_remote = remote
         self._pack_creator = None
         self._pack_kind = kind or "amp"
+        self._pack_slot_index = slot_index
+        self._pack_slot_status = slot_status
+        self._pack_slot_label = slot_label or tone.get("gear")
         self._pack_table.pack_kind = self._pack_kind
         self._current_tone = tone
         self.border_title = "TONE DETAIL"
@@ -2443,6 +2646,7 @@ class DetailPane(Vertical):
         self._set_summary(self._tone_summary(tone))
         self._ensure_verification(tone)
         self.refresh_pack_active(chain or live.read_chain())
+        self._refresh_view_tabs()
         self._rerender = None
         if focus_table:
             # Take keyboard focus so Esc/← (the pack table bindings) work
@@ -2504,6 +2708,54 @@ class DetailPane(Vertical):
                 size_cell = "[dim]—[/]"
             table.add_row("\\[ ]", "·", self._arch_tag(model.get("architecture"), colors),
                           file_cell, size_cell, key=key)
+
+    def show_slot_pack(self, tone: dict, models: list[dict], chain: dict,
+                       slot_index: int, snapshot: SlotSnapshot,
+                       *, focus_table: bool = False) -> None:
+        """Show the pack owned by one canonical Slot.
+
+        The slot index is the target identity for the current view.  The
+        detail pane never infers a target from a file extension or from the
+        tone gear label; those are display/processing metadata only.
+        """
+        self._exit_pack_mode()
+        self._enter_selection(
+            tone=tone,
+            models=models,
+            chain=chain,
+            kind="slot",
+            slot_index=slot_index,
+            slot_status=snapshot.status,
+            slot_label=tone.get("gear") if tone else None,
+            origin="slot",
+            focus_table=focus_table,
+        )
+
+    def show_slot_empty(self, slot_index: int, *, target: bool = True) -> None:
+        """Show an Empty Slot without retaining the previous pack context."""
+        self._invalidate_view()
+        self._exit_pack_mode()
+        self._pack_slot_index = slot_index
+        self._pack_slot_status = SlotStatus.EMPTY
+        self._pack_origin = "slot"
+        self._current_tone = None
+        self._pack_rows = {}
+        self._pack_path_to_key = {}
+        self._pack_table.clear()
+        self._summary_mode = "empty-slot"
+        self._view_mode = "empty"
+        self.border_title = f"SLOT {slot_index + 1:02d}"
+        self._set_marquee(f"SLOT {slot_index + 1:02d}")
+        self._marquee.set_class(False, "detail-marquee--empty")
+        target_text = " · TARGET" if target else ""
+        self._set_summary(
+            f"[b $state-idle]NONE[/] · SLOT {slot_index + 1:02d}{target_text}")
+        self._body.update(
+            f"[dim]Slot {slot_index + 1:02d} is empty. "
+            "Choose a local tone or pack to load a supported .nam/.wav file.[/dim]")
+        self._rerender = None
+        set_border_hint_layout(
+            self, "", [token for token, _action in self._border_hint_actions()])
 
     def show_pack(self, tone: dict, models: list[dict], chain: dict,
                   kind: str, *, focus_table: bool = False) -> None:
@@ -2578,6 +2830,7 @@ class DetailPane(Vertical):
         first = next(iter(self._pack_rows.values()), None)
         self._set_marquee(self._marquee_content(
             self._current_tone or {}, first.get("id") if first else None))
+        self.refresh_pack_active(live.read_chain())
         self._pack_table.focus()
         self._update_pack_hint()
 
@@ -2720,12 +2973,23 @@ class DetailPane(Vertical):
             return
         chain = chain or {}
         self._pack_chain = chain
-        model_path = chain.get("model")
-        ir_path = chain.get("ir")
-        active_path = model_path if self._pack_kind == "amp" else ir_path
-        backup_attr = "_amp_model_backup" if self._pack_kind == "amp" else "_ir_backup"
-        candidate_path = (getattr(self.app, backup_attr, None)
-                          if active_path is None else None)
+        if self._pack_slot_index is not None:
+            try:
+                snapshot = self.app.query_one(ChainPanel).state.slot(
+                    self._pack_slot_index)
+            except Exception:
+                return
+            active_path = snapshot.path
+            candidate_path = snapshot.candidate
+            self._pack_slot_status = snapshot.status
+        else:
+            model_path = chain.get("model")
+            ir_path = chain.get("ir")
+            active_path = model_path if self._pack_kind == "amp" else ir_path
+            backup_attr = ("_amp_model_backup" if self._pack_kind == "amp"
+                           else "_ir_backup")
+            candidate_path = (getattr(self.app, backup_attr, None)
+                              if active_path is None else None)
         model_idx = ir_idx = None
         for index, (key, model) in enumerate(self._pack_rows.items()):
             path = model.get("local_path")
@@ -2742,6 +3006,17 @@ class DetailPane(Vertical):
                     self._pack_table.update_cell(key, "sel", mark)
             except Exception:
                 pass
+        if self._pack_slot_index is not None:
+            state = (self._pack_slot_status.value.upper()
+                     if self._pack_slot_status else "SLOT")
+            slot_text = f"SLOT {self._pack_slot_index + 1:02d}"
+            if self._pack_slot_label:
+                slot_text += f" · {str(self._pack_slot_label).upper()}"
+            target = f"TARGET {self._pack_slot_index + 1:02d}"
+            summary = self._tone_summary(
+                self._pack_tone or self._current_tone or {})
+            self._set_summary(" · ".join(
+                [part for part in (summary, slot_text, state, target) if part]))
         # 选择=聚焦统一：链上激活槽位变更时，pack 表光标同步到该行——DataTable
         # 光标移动自带 scroll-into-view，视口以聚焦（光标）行为锚，▶ 行自然
         # 可见；▶ 三角仅作信息标记，不再参与视口铆定。仅当槽位路径真正变化
@@ -2793,9 +3068,14 @@ class DetailPane(Vertical):
                 return
             self.post_message(self.PackInstallRequested(tone))
             return
-        slot = "ir" if model.get("architecture") == "IR" else "model"
-        self.post_message(self.PackFilePicked(
-            slot, model["local_path"], tone.get("gear")))
+        if self._pack_slot_index is not None:
+            self.post_message(self.PackFilePicked(
+                None, model["local_path"], tone.get("gear"),
+                slot_index=self._pack_slot_index))
+        else:
+            slot = "ir" if model.get("architecture") == "IR" else "model"
+            self.post_message(self.PackFilePicked(
+                slot, model["local_path"], tone.get("gear")))
 
     def _border_hint_actions(self) -> list:
         """DetailPane 右下角可点 token → 动作。
@@ -2823,6 +3103,12 @@ class DetailPane(Vertical):
                 ("← description", lambda: self.toggle_view(-1)),
                 ("→ selection", lambda: self.toggle_view(+1)),
             ]
+        if self._view_mode == "empty":
+            return [
+                ("enter browse", self.action_browse_empty_slot),
+                ("d delete", self.action_delete_empty_slot),
+                ("esc back", self._close_slot_detail),
+            ]
         if self._view_mode == "creator" and self._creator_error:
             return [("r retry", self.retry_creator_view)]
         return []
@@ -2831,12 +3117,12 @@ class DetailPane(Vertical):
         """The right-aligned border hint is a real control: switching between
         the Description and Selection views, plus REQ-038 的 i install /
         u uninstall 批量动作 token。"""
-        if self._view_mode not in ("description", "selection"):
+        if self._view_mode not in ("description", "selection", "empty"):
             return
         border_hint_click(self, event, self._border_hint_actions())
 
     def on_mouse_move(self, event: MouseMove) -> None:
-        if self._view_mode not in ("description", "selection"):
+        if self._view_mode not in ("description", "selection", "empty"):
             set_border_hint_hover(self, None)
             return
         set_border_hint_hover(
@@ -2853,7 +3139,21 @@ class DetailPane(Vertical):
         Mouse focus decides the mode: focusing the library shows the tone's
         description; focusing a chain node shows its Selection (pack list).
         """
-        self._enter_description(t)
+        # Library browsing changes the viewed tone, not the load destination.
+        # Preserve the canonical ChainState target so switching to Pack can
+        # still load this tone into the already selected Slot.
+        target_index = None
+        target_status = None
+        try:
+            panel = self.app.query_one(ChainPanel)
+            if not panel._legacy_mode:
+                target_index = panel.state.target_index
+                if target_index is not None:
+                    target_status = panel.state.slot(target_index).status
+        except Exception:
+            pass
+        self._enter_description(t, slot_index=target_index,
+                                slot_status=target_status)
 
     def show_model(self, tone: dict | None, model: dict) -> None:
         """Render a chain node's current model: FILE section (name/id/arch/path)

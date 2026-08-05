@@ -86,6 +86,14 @@ class ToneSelected(Message):
         self.tone_id = tone_id
 
 
+class RemoteToneSelected(Message):
+    """A remote row was selected for the canonical DetailPane flow."""
+
+    def __init__(self, tone: dict) -> None:
+        super().__init__()
+        self.tone = tone
+
+
 class ToneHighlighted(Message):
     """A highlighted row changed — update detail without opening an action."""
 
@@ -1883,7 +1891,9 @@ class LibraryPanel(Vertical):
             # 搜索栏填上 @名并触发真实搜索（作者信息聚焦联动保留）。
             self._search_creator(tid)
         else:
-            # Enter on a remote hit → pack install screen (preview files, pick subset)
+            # Legacy remote flow opens the install screen directly. Canonical
+            # v0.2 first opens Remote Description so the Detail view tabs keep
+            # the same source/target contract as LOCAL.
             tone = self._remote_tones.get(int(tid))
             if tone is None:
                 # 查找表与音色表失配（旧版本在 TOP CREATORS/本地刷新时清过
@@ -1892,4 +1902,11 @@ class LibraryPanel(Vertical):
                 self.run_worker(partial(self._reload_tone_table),
                                 name="search", exclusive=True)
                 return
-            self.app.push_screen(PackInstallScreen(tone))
+            try:
+                canonical = not self.app.query_one("ChainPanel")._legacy_mode
+            except Exception:
+                canonical = False
+            if canonical:
+                self.post_message(RemoteToneSelected(tone))
+            else:
+                self.app.push_screen(PackInstallScreen(tone))
