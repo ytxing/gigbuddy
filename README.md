@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your tone, in seconds
 
-*v0.1.0-alpha.7 — 2026-08-06*
+*v0.1.0-alpha.8 — 2026-08-06*
 
 A guitar tone manager that puts TONE3000's community library of **NAM amp models
 and cabinet IRs** right at your fingertips: search, audition, compare, and chain
@@ -52,7 +52,7 @@ the tones you like — then play through them in realtime or render them to wav.
 ## Install (macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.8/scripts/install.sh | bash
 ```
 
 The installer creates an isolated environment under `~/.local/share/gigbuddy`,
@@ -68,7 +68,7 @@ runs once, and retries on the next launch if the network drops mid-way.
 PortAudio):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.8/scripts/uninstall.sh | bash
 ```
 
 For a Python-only CLI install without the realtime engine:
