@@ -15,7 +15,13 @@ die() {
 }
 
 step() {
-  printf '==> %s\n' "$1"
+  printf '==> %s\n' "$1" >> "${INSTALL_LOG:?}"
+  if [[ -t 1 && -n "$BANNER_PID" ]]; then
+    # 动画模式下：步骤只覆盖显示在第 9 行状态行，完整日志进文件
+    printf '\033[9;1H\033[2K==> %s' "$1"
+  else
+    printf '==> %s\n' "$1"
+  fi
 }
 
 BANNER_PID=""
@@ -210,6 +216,8 @@ for command_name in gigbuddy gigbuddy-tui; do
   ln -sfn "$INSTALL_ROOT/.venv/bin/$command_name" "$link"
 done
 
+stop_banner
+printf '\033[9;1H\033[2K'   # 清掉最后的状态行
 printf '\nGigBuddy ready\n'
 printf '  %s/gigbuddy\n' "$BIN_DIR"
 printf '  %s/gigbuddy-tui\n' "$BIN_DIR"
@@ -217,3 +225,5 @@ printf '  install: %s\n' "$INSTALL_ROOT"
 if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
   printf 'Add to PATH if needed: %s\n' "$BIN_DIR"
 fi
+printf 'Steps completed:\n'
+sed -n 's/^==> /  - /p' "$INSTALL_LOG"
