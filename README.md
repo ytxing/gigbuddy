@@ -1,4 +1,13 @@
-# GigBuddy 🎸 — Your tone, in seconds
+<pre>
+<span style="color:#8a5a00">  ________.___  __________________ ____ ___________  ________ _____.___.</span>
+<span style="color:#a06a00"> /  _____/|   |/  _____/\______   \    |   \______ \ \______ \\__  |   |</span>
+<span style="color:#b87a00">/   \  ___|   /   \  ___ |    |  _/    |   /|    |  \ |    |  \/   |   |</span>
+<span style="color:#d08a10">\    \_\  \   \    \_\  \|    |   \    |  / |    `   \|    `   \____   |</span>
+<span style="color:#e8a33d"> \______  /___|\______  /|______  /______/ /_______  /_______  / ______|</span>
+<span style="color:#f5b64d">        \/            \/        \/                 \/        \/\/       </span>
+</pre>
+
+**GigBuddy** 🎸 — *Your tone, in seconds*
 
 *v0.1.0-alpha.7 — 2026-08-06*
 
