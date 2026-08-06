@@ -897,21 +897,16 @@ def preset_load(name: str) -> dict | None:
 # Built-in catalog, resolved from exact local model ids at seed time.
 # (name, note, amp_model_id, ir_model_id|None)
 SEED_CHAINS = [
-    ("band-guitar-rhcp", "Band Gear · Guitar · John Frusciante: Marshall Major 200 Plexi Lead 1968 full rig", 383442, None),
-    ("band-guitar-green-day", "Band Gear · Guitar · Billie Joe Armstrong: Marshall 1959BJA full rig", 684630, None),
-    ("band-guitar-slash", "Band Gear · Guitar · Slash: Marshall JCM800 2203 (EL34 mod) full rig", 567060, None),
-    ("band-guitar-acdc", "Band Gear · Guitar · Angus Young: Marshall Plexi JMP-50 cranked full rig", 418470, None),
-    ("band-guitar-mayer", "Band Gear · Guitar · John Mayer: Dumble ODS #102 clean drive", 418380, None),
-    ("band-bass-rhcp", "Band Gear · Bass · Flea: Gallien-Krueger RB800 direct", 419198, None),
-    ("band-bass-svt", "Band Gear · Bass · Mike Dirnt style: Ampeg SVT Classic pushed (Gain 10)", 379990, None),
-    ("classic-guitar-beano", "Classic Pairing · Guitar · Eric Clapton 'Beano': 1966 Marshall Bluesbreaker full rig", 677999, None),
-    ("classic-guitar-brian-may", "Classic Pairing · Guitar · Brian May: Vox AC30 cranked + Dallas Rangemaster treble booster", 494010, None),
-    ("classic-guitar-hiwatt-dr103", "Classic Pairing · Guitar · David Gilmour: Hiwatt DR103 VOL 8", 418892, None),
-    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 Block Logo + JTM-45 Greenback 2x12", 667990, 74211),
-    ("classic-guitar-fender-super", "Classic Pairing · Guitar · Fender Super Reverb 1977 full rig", 379727, None),
-    ("classic-guitar-fender-deluxe", "Classic Pairing · Guitar · Fender Deluxe Reverb full rig", 385845, None),
-    ("classic-guitar-fender-twin", "Classic Pairing · Guitar · Kurt Cobain: Fender Twin Reverb (1982 Blackface, In Utero session rig)", 418545, None),
-    ("classic-guitar-srv-vibroverb", "Classic Pairing · Guitar · Stevie Ray Vaughan: Fender Vibroverb SRV setting", 421653, None),
+    ("classic-guitar-plexi", "Classic Pairing · Guitar · Marshall JMP-50 Lead 1969 Plexi, crunch full rig", 418470, None),
+    ("classic-guitar-jcm800", "Classic Pairing · Guitar · Marshall JCM800 2203 Modified (EL34), high gain full rig", 567060, None),
+    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 1964 Block Logo + Marshall 1960 Lead 4x12 (SM57)", 667990, 363507),
+    ("classic-guitar-super-reverb", "Classic Pairing · Guitar · Fender Super Reverb 1977, clean (EQ flat, Vol 3)", 379727, None),
+    ("classic-guitar-deluxe-reverb", "Classic Pairing · Guitar · Fender Deluxe Reverb, Vibrato channel clean", 385845, None),
+    ("classic-guitar-twin-reverb", "Classic Pairing · Guitar · Fender Twin Reverb, Vibrato Bright clean", 418200, None),
+    ("classic-guitar-ac30", "Classic Pairing · Guitar · Vox AC30 CH cranked (master max, volume 10, treble booster)", 494010, None),
+    ("classic-guitar-hiwatt-dr103", "Classic Pairing · Guitar · Hiwatt Custom 100 DR103 1974, Volume 8", 418892, None),
+    ("classic-guitar-dumble-ods", "Classic Pairing · Guitar · Dumble ODS #102 (Robben Ford), PAB clear drive", 418380, None),
+    ("classic-guitar-mesa-badlander", "Classic Pairing · Guitar · Mesa Boogie Badlander Rectifier 100W EL34, Murder Tones crush", 564451, None),
 ]
 
 # settings 键：首次运行初始化标记（ensure_default_presets 幂等依据）。

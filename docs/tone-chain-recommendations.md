@@ -86,71 +86,57 @@
 
 ## 推荐组合（直接成套使用）
 
-Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or Bass.
-首次运行 `gigbuddy` 会自动下载模型并建好全部 15 条 preset（见下节
+Built-in presets are the classic guitar amp rigs, grouped as Classic Pairing · Guitar.
+首次运行 `gigbuddy` 会自动下载模型并建好全部 10 条 preset（见下节
 「首次运行自动初始化」）；需要手动重建时：
 
 ```bash
 .venv/bin/gigbuddy preset seed --replace    # delete existing presets and rebuild the catalog
 .venv/bin/gigbuddy preset list              # list presets
-.venv/bin/gigbuddy preset load band-guitar-rhcp  # load with engine hot-swap
+.venv/bin/gigbuddy preset load classic-guitar-plexi  # load with engine hot-swap
 ```
 
 | preset | note | amp model | IR |
 |---|---|---|---|
-| band-guitar-rhcp | Band Gear · Guitar — John Frusciante：Marshall Major 200 Plexi Lead 1968 全 rig | 383442 | — |
-| band-guitar-green-day | Band Gear · Guitar — Billie Joe Armstrong：Marshall 1959BJA 全 rig | 684630 | — |
-| band-guitar-slash | Band Gear · Guitar — Slash：Marshall JCM800 2203（EL34 mod）全 rig | 567060 | — |
-| band-guitar-acdc | Band Gear · Guitar — Angus Young：Marshall Plexi JMP-50 cranked 全 rig | 418470 | — |
-| band-guitar-mayer | Band Gear · Guitar — John Mayer：Dumble ODS #102 clean drive | 418380 | — |
-| band-bass-rhcp | Band Gear · Bass — Flea：Gallien-Krueger RB800 直出 | 419198 | — |
-| band-bass-svt | Band Gear · Bass — Mike Dirnt 风格：Ampeg SVT Classic 推满（Gain 10）直出 | 379990 | — |
-| classic-guitar-beano | Classic Pairing · Guitar — Eric Clapton 'Beano'：1966 Marshall Bluesbreaker 全 rig | 677999 | — |
-| classic-guitar-brian-may | Classic Pairing · Guitar — Brian May：Vox AC30 全开 + Dallas Rangemaster treble booster | 494010 | — |
-| classic-guitar-hiwatt-dr103 | Classic Pairing · Guitar — David Gilmour：Hiwatt DR103 VOL 8 | 418892 | — |
-| classic-guitar-jtm45 | Classic Pairing · Guitar — Marshall JTM45 Block Logo + JTM-45 Greenback 2x12 | 667990 | 74211 |
-| classic-guitar-fender-super | Classic Pairing · Guitar — Fender Super Reverb 1977 全 rig | 379727 | — |
-| classic-guitar-fender-deluxe | Classic Pairing · Guitar — Fender Deluxe Reverb 全 rig | 385845 | — |
-| classic-guitar-fender-twin | Classic Pairing · Guitar — Kurt Cobain：Fender Twin Reverb（1982 Blackface，In Utero 录音 rig） | 418545 | — |
-| classic-guitar-srv-vibroverb | Classic Pairing · Guitar — Stevie Ray Vaughan：Fender Vibroverb SRV 专属设置 | 421653 | — |
+| classic-guitar-plexi | Classic Pairing · Guitar — Marshall JMP-50 Lead 1969 Plexi，crunch 全 rig（@amalgamaudio verified） | 418470 | — |
+| classic-guitar-jcm800 | Classic Pairing · Guitar — Marshall JCM800 2203 Modified（EL34）高增益全 rig（@2dor verified） | 567060 | — |
+| classic-guitar-jtm45 | Classic Pairing · Guitar — Marshall JTM45 1964 Block Logo + Marshall 1960 Lead 4x12（SM57） | 667990 | 363507 |
+| classic-guitar-super-reverb | Classic Pairing · Guitar — Fender Super Reverb 1977 清音（EQ flat, Vol 3，官方 @tone3000） | 379727 | — |
+| classic-guitar-deluxe-reverb | Classic Pairing · Guitar — Fender Deluxe Reverb，Vibrato 通道清音（NAM 作者 @sdatkinson） | 385845 | — |
+| classic-guitar-twin-reverb | Classic Pairing · Guitar — Fender Twin Reverb，Vibrato Bright 清音（@timr） | 418200 | — |
+| classic-guitar-ac30 | Classic Pairing · Guitar — Vox AC30 CH 全开（master 最大，Vol 10，treble booster） | 494010 | — |
+| classic-guitar-hiwatt-dr103 | Classic Pairing · Guitar — Hiwatt Custom 100 DR103 1974，Volume 8 | 418892 | — |
+| classic-guitar-dumble-ods | Classic Pairing · Guitar — Dumble ODS #102（Robben Ford），PAB clear drive | 418380 | — |
+| classic-guitar-mesa-badlander | Classic Pairing · Guitar — Mesa Boogie Badlander Rectifier 100W EL34，Murder Tones crush（@2dor verified） | 564451 | — |
 
 > 注：gear=amp-cab 的音色模型自带箱体（零 IR），表内除 classic-guitar-jtm45
-> 外均无 IR；jtm45 显式挂 JTM-45 Greenback 2x12 箱体 IR（74211）。本地没有
-> 贝斯箱体 IR，两条乐队贝斯 preset（band-bass-rhcp / band-bass-svt）明确采用
-> 直出，不混用吉他箱体 IR。模型文件按旋钮/麦位命名（如
-> `JCM800 2203 - P5 B5 M5 T5 MV6 G5 - AZG - 700.nam`），选哪个由
+> 外均无 IR；jtm45 显式挂官方 Marshall 1960 Lead 4x12 箱体 IR（363507，
+> @tone3000）。选型标准为「经典型号 + 权威音源（官方/verified/顶级 creator）+
+> 社区热度（下载/收藏）」，10 条覆盖清音 → 边缘过载 → crunch → 高 headroom →
+> 高增益完整风格链。模型文件按旋钮/麦位命名，选哪个由
 > `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
 > 库内文件改名/迁移后 `preset load` 依然能解析到当前路径。
 
-### 最终清单调整说明（v0.1.0 重选）
+### 选型说明（v0.1.0 经典音箱重选）
 
-最终版按「代表性 + 设置符合吉他手使用习惯」重选，四条 preset 变化如下
-（其余 11 条不变）：
+目录从「吉他手关联」改为「纯经典音箱」视角：吉他手标志音色依赖效果器链，
+关联不严谨；音箱型号 + capture 设置本身即可代表经典音色。10 条全部为
+Classic Pairing · Guitar 分组；音源优先官方账号（@tone3000 ×2，含 IR）与
+verified 作者（@amalgamaudio ×3、@2dor ×2），其次 NAM 项目作者
+（@sdatkinson）与顶级 creator（@slamminmofo ×2）。
 
-- `classic-guitar-vox-ef86` → `classic-guitar-brian-may`：Brian May 的
-  标志性音色是 Vox AC30 全开 + Dallas Rangemaster treble booster 前置，
-  改用该配置的 capture（494010），替换原来的 Vox AC30/4 EF86（383682）。
-- `classic-guitar-vox-ac15` → `classic-guitar-hiwatt-dr103`：Vox AC15
-  代表性不足，换为 Hiwatt DR103 VOL 8（418892，David Gilmour）。
-- `classic-guitar-dumble-sss` → `classic-guitar-srv-vibroverb`：SRV 更
-  具辨识度的是 Fender Vibroverb 专属设置（421653），替换 Dumble Steel
-  String Singer clean（380306）。
-- `classic-guitar-fender-twin` 名称保留，capture 从 Fender '65 Twin
-  Reverb（381338）换成 In Utero 录音 rig（1982 Blackface，418545，
-  Kurt Cobain 同款）。
-
-旧库中按旧名 seed 的 preset（`classic-guitar-vox-ef86`、
-`classic-guitar-vox-ac15`、`classic-guitar-dumble-sss`）升级后不会自动
-删除——属已知残留。运行
+旧库中按旧名 seed 的 preset（band-* 7 条、classic-guitar-beano、
+classic-guitar-brian-may、classic-guitar-fender-* 等 15 条旧目录）升级后
+不会自动删除——属已知残留。运行
 `gigbuddy preset seed --replace` 会删除全部 preset 并按新清单重建目录；
 被替换 tone 的模型文件保留在 `data/tones/`（不回收，可继续在 TUI 中
 手动选用）。
 
 ## 首次运行自动初始化（default presets）
 
-首次运行 `gigbuddy`（CLI 任意子命令或 TUI 启动）会自动下载上述 15 条内置
-preset 精确引用的 **16 个模型**（15 个 amp 模型 + 1 个箱体 IR，约 4.6MB），
-并 seed 出全部 15 条 preset。这是**一次性**流程：
+首次运行 `gigbuddy`（CLI 任意子命令或 TUI 启动）会自动下载上述 10 条内置
+preset 精确引用的 **11 个模型**（10 个 amp 模型 + 1 个箱体 IR，约 3.3MB），
+并 seed 出全部 10 条 preset。这是**一次性**流程：
 
 - **幂等**：settings 表 `default_presets_initialized` 标记已写则直接跳过；
   CLI 与 TUI 共用同一标记。全部模型就绪并 seed 成功后才写标记。
