@@ -1,6 +1,6 @@
 # GigBuddy notices
 
-GigBuddy v0.1.0-alpha.5 is source-only. The repository does not include model
+GigBuddy v0.1.0-alpha.6 is source-only. The repository does not include model
 files, dry-input audio, the local SQLite cache, compiled binaries, or the C++
 dependency checkout. `scripts/bootstrap_third_party.sh` fetches the pinned
 NeuralAudio source and its submodules at build time; their license files remain

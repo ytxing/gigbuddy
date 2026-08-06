@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.1.0-alpha.5 — 2026-08-06*
+*v0.1.0-alpha.6 — 2026-08-06*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive
@@ -50,7 +50,7 @@ fully MIT core stack.
 ### One-command install (macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.5/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.6/scripts/install.sh | bash
 ```
 
 The installer creates an isolated environment under `~/.local/share/gigbuddy`,
@@ -85,14 +85,14 @@ The script asks separately whether to remove downloaded tones and local data. It
 leaves Homebrew PortAudio installed.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.5/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.6/scripts/uninstall.sh | bash
 ```
 
 For a non-interactive uninstall:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.5/scripts/uninstall.sh | bash -s -- --yes
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.5/scripts/uninstall.sh | bash -s -- --yes --keep-data
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.6/scripts/uninstall.sh | bash -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.6/scripts/uninstall.sh | bash -s -- --yes --keep-data
 ```
 
 ```bash
