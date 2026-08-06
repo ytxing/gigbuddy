@@ -12,23 +12,57 @@ fully MIT core stack.
 
 ## Architecture
 
-```
-┌─ Agent (external — Claude Code + gigbuddy skill, pi, anything) ─┐
-│  · query library:  gigbuddy tone list/search/show/import         │
-│  · change chain:   gigbuddy chain set (writes live_chain.json)   │
-└───────────────┬──────────────────────────────────────────────────┘
-                │ CLI + file handoff
-┌─ Tone Library UI (Textual TUI, no agent inside) ─────┬──────────┐
-│  browse/search local library (full metadata)          │          │
-│  import from TONE3000 (download + metadata → DB)      │          │
-│  chain control: pick tone → live_chain.json           │  SQLite  │
-│  level meter                                         │ data/     │
-└───────────────┬───────────────────────────────────────┴ gigbuddy │
-                │ live_chain.json / level.json               .db    │
-┌─ Engine (realtime_cli, PortAudio + NeuralAudio) ─────────────────┐
-│  --live hot-swap (atomic model/IR swap, no audio dropout)        │
-│  --level-file telemetry                                          │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    accTitle: GigBuddy runtime architecture
+    accDescr: External agents and the Textual tone library UI use the CLI, TONE3000 API, SQLite library, and JSON file handoff to control a PortAudio and NeuralAudio realtime engine.
+
+    subgraph clients ["🧭 Clients"]
+        claude_code["🤖 Claude Code + gigbuddy skill"]
+        pi_clients["🛠️ pi / other agents"]
+        gigbuddy_cli[["⚙️ gigbuddy CLI"]]
+        claude_code -->|commands| gigbuddy_cli
+        pi_clients -->|commands| gigbuddy_cli
+    end
+
+    subgraph library_ui ["🎛️ Tone library UI"]
+        browser["🔎 Browse / search / import"]
+        chain_control["🎚️ Chain control"]
+        level_meter["📈 Level meter"]
+    end
+
+    subgraph local_state ["💾 Local state"]
+        tone_db[("SQLite<br/>gigbuddy.db")]
+        live_chain[("live_chain.json")]
+        level_file[("level.json")]
+    end
+
+    subgraph realtime_engine ["⚡ Realtime engine"]
+        realtime_cli["🎚️ realtime_cli<br/>PortAudio + NeuralAudio"]
+    end
+
+    tone_api["🌐 TONE3000 API"]
+
+    tone_api -->|search / download| gigbuddy_cli
+    tone_api -->|remote search| browser
+    gigbuddy_cli -->|query / import| tone_db
+    tone_db -->|local rows| browser
+    browser -->|save imported tone| tone_db
+    gigbuddy_cli -->|write chain| live_chain
+    chain_control -->|select tone| live_chain
+    live_chain -->|hot-swap config| realtime_cli
+    realtime_cli -->|telemetry| level_file
+    level_file -->|refresh| level_meter
+
+    classDef actor fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    classDef process fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef data fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#1f2937
+    classDef external fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#7c2d12
+
+    class claude_code,pi_clients actor
+    class gigbuddy_cli,browser,chain_control,level_meter,realtime_cli process
+    class tone_db,live_chain,level_file data
+    class tone_api external
 ```
 
 - **Library DB** (`data/gigbuddy.db`): full TONE3000 metadata mirror — every search
