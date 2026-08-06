@@ -2732,17 +2732,46 @@ class DetailPane(Vertical):
 
     # ---- REQ-038 pack 表多选安装/卸载（i install / u uninstall）----
 
-    def _pack_view_hint(self) -> str:
+    def _pack_view_hint(self, *, reserved_state_width: int = 0) -> str:
         """Selection 视图右下角常驻动作 token（REQ-024/025：状态靠左、
         动作靠右）。i install / u uninstall 是 pack 视图的核心动作，必须
-        常驻；空间不足时优先省略 ←/→ 视图切换 token（Esc 仍可返回）。"""
-        return " · ".join(token for token, _action in self._border_hint_actions())
+        常驻；空间不足时按优先级缩短或省略低优先级动作（Esc 仍可返回）。"""
+        actions = [token for token, _action in self._border_hint_actions()]
+        if not actions:
+            return ""
+        width = int(getattr(getattr(self, "region", None), "width", 0) or 0)
+        if not width:
+            width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
+        if width <= 0:
+            return " · ".join(actions)
+
+        # Keep the batch actions descriptive on the normal detail-pane width.
+        # The generic hint fitter compacts every token as a group, which would
+        # hide the meaning of i/u even though those are the primary Pack actions.
+        inner = max(width - 6, 1)
+        available = max(
+            inner - reserved_state_width - (cell_len(" · ") if reserved_state_width else 0),
+            1,
+        )
+        if cell_len(" · ".join(actions)) <= available:
+            return " · ".join(actions)
+        core = {"i install", "u uninstall"}
+        compacted = [
+            action if action in core else action.split(None, 1)[0]
+            for action in actions
+        ]
+        if cell_len(" · ".join(compacted)) <= available:
+            return " · ".join(compacted)
+        core_actions = [action for action in actions if action in core]
+        if cell_len(" · ".join(core_actions)) <= available:
+            return " · ".join(core_actions)
+        return " · ".join(actions)
 
     def _update_pack_hint(self) -> None:
         """提示条更新（REQ-024/025：状态变化靠左、常驻动作靠右）。
 
         左段状态 = 勾选计数 + 安装进度（有则显示），右段常驻 =
-        i install · u uninstall（宽面板保留 ←/→ 切换 token）。
+        i install · u uninstall；同级视图由顶部 [/] tab 控制。
         """
         if self._view_mode != "selection":
             return
@@ -2753,8 +2782,9 @@ class DetailPane(Vertical):
         progress = getattr(self, "_pack_progress_status", "") or ""
         if progress:
             left.append(progress)
-        hint = self._pack_view_hint()
-        set_border_hint_layout(self, " · ".join(left), hint.split(" · "))
+        state = " · ".join(left)
+        hint = self._pack_view_hint(reserved_state_width=cell_len(state))
+        set_border_hint_layout(self, state, hint.split(" · "))
 
     def _selected_pack_keys(self) -> list[str]:
         """勾选行 key；未勾选任何行时回退光标行（单行语义与多选共存）。"""
@@ -3891,9 +3921,8 @@ class DetailPane(Vertical):
         return []
 
     def on_click(self, event: MouseEvent) -> None:
-        """The right-aligned border hint is a real control: switching between
-        the Description and Selection views, plus REQ-038 的 i install /
-        u uninstall 批量动作 token。"""
+        """The right-aligned border hint exposes the current mode's actions,
+        including REQ-038 的 i install / u uninstall 批量动作 token。"""
         if self._view_mode not in ("description", "selection", "empty", "creator"):
             return
         border_hint_click(self, event, self._border_hint_actions())

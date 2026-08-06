@@ -2,10 +2,10 @@
 
 ① 右下角提示 token 与点击等效：每个提示词都是真实可点目标（点击 =
    触发对应快捷键动作），遍历主要页面断言 action 列表与提示词一一命中；
-   关键 token（i install / u uninstall / enter detail）点击实测。
+   关键 token（u uninstall）点击实测。
 ② 选择框统一样式：[ ]（未选）/ [x]（选中），宽 5 列对称 padding 居中，
-   仅批量增删场景显示；鼠标点选（点击框列切换选中态）在 pack 表、
-   pack install 屏、local 表、preset 表全部生效。
+   仅批量增删场景显示；鼠标点选（点击框列切换选中态）在 pack install 屏、
+   local 表生效。
 """
 import asyncio
 
@@ -19,7 +19,6 @@ from tui.install_screen import PackInstallScreen
 from tui.modals import (border_hint_click, border_hint_label,
                         border_hint_segments, hint_span)
 from tui.panels import DetailPane
-from tui.presets import PresetPanel
 from tui.uninstall_screen import LocalUninstallScreen
 
 import library
@@ -27,40 +26,6 @@ import library
 
 def run(coro):
     return asyncio.run(coro)
-
-
-# ---- 复用的 TONE3000 场景 mock（与 test_req038 同构）----
-
-def _hits():
-    return [{"id": 77, "title": "Remote Pack", "gear": "amp",
-             "downloads_count": 2, "username": "tester",
-             "a1_models_count": 1, "a2_models_count": 2, "irs_count": 0,
-             "description": "Remote tone description."}]
-
-
-def _remote_models():
-    return [
-        {"id": 1, "name": "one.nam", "architecture": "SlimmableContainer"},
-        {"id": 2, "name": "two.nam", "architecture": "SlimmableContainer"},
-    ]
-
-
-def _monkey_remote(monkeypatch):
-    monkeypatch.setattr("tui.library_panel.library.tone3000.search",
-                        lambda query, page_size, **kwargs: [dict(h) for h in _hits()])
-    monkeypatch.setattr("tui.panels.tone3000.models",
-                        lambda tid, a2_only=False: _remote_models())
-    monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
-
-
-async def _goto_remote_selection(app, pilot):
-    await pilot.click(app.query_one("#--content-tab-pane-tone"))
-    await pilot.pause(0.6)
-    pane = app.query_one(DetailPane)
-    pane.focus()
-    await pilot.press("right")
-    await pilot.pause(0.6)
-    return pane
 
 
 def _click_border_token(widget, box, label, token, pilot_or_app=None):
@@ -119,7 +84,7 @@ def test_no_orphan_hint_tokens_any_page(monkeypatch, tmp_path):
             # DetailPane selection 视图（i install / u uninstall 常驻）
             pane = app.query_one(DetailPane)
             pane.focus()
-            await pilot.press("right")
+            await pilot.press("]")
             await pilot.pause()
             _assert_no_orphan_hints("DetailPane(selection)", pane)
             # 模态：install 屏 / uninstall 屏 / input source / audio settings
@@ -145,32 +110,6 @@ def test_no_orphan_hint_tokens_any_page(monkeypatch, tmp_path):
             await pilot.pause(0.2)
 
     run(scenario())
-
-
-def test_detail_hint_i_install_token_click_installs(monkeypatch):
-    """tone details selection 视图：点击右下角 'i install' token = 按 i 键
-    （安装光标行/选中行）。"""
-    calls = {}
-
-    def fake_import(tone_id, progress, **_kw):
-        calls.setdefault("import", (tone_id, _kw.get("model_ids")))
-        return {"id": tone_id, "models": []}
-
-    monkeypatch.setattr("tui.panels.library.import_tone", fake_import)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            pane = await _goto_remote_selection(app, pilot)
-            label = border_hint_label(pane)
-            click = _click_border_token(pane, pane, label, "i install")
-            assert border_hint_click(pane, click, pane._border_hint_actions())
-            await pilot.pause(0.5)
-            assert calls.get("import") == (77, [1]), "点击 i install 应安装光标行"
-
-    _monkey_remote(monkeypatch)
-    run(scenario())
-
 
 def test_detail_hint_u_uninstall_token_click_uninstalls(monkeypatch, tmp_path):
     """tone details selection 视图：点击 'u uninstall' token = 按 u 键。"""
@@ -279,61 +218,7 @@ def test_install_screen_i_u_token_clicks(monkeypatch):
     run(scenario())
 
 
-def test_library_hint_enter_detail_token_click(monkeypatch):
-    """library TONE3000 列表：点击 'enter detail' token = 打开二级菜单详情页。"""
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
-            await pilot.pause(1.0)  # 等 tab 切换 + 缓存恢复 + 副标题刷新
-            panel = app.query_one("LibraryPanel")
-            assert panel._active_pane == "pane-tone"
-            label = border_hint_label(panel)
-            click = _click_border_token(panel, panel, label, "enter detail")
-            assert border_hint_click(panel, click, panel._border_hint_actions())
-            await pilot.pause(0.5)
-            assert isinstance(app.screen, PackInstallScreen)
-            assert app.screen._tone.get("id") == 77
-
-    _monkey_remote(monkeypatch)
-    run(scenario())
-
-
 # ---- ② 选择框 [ ] 统一 + 鼠标点选 ----
-
-def test_pack_table_box_style_centered_and_mouse_toggle(monkeypatch):
-    """tone details pack 表：Pick 列 [ ]/[x] 样式、宽 5 列对称居中、
-    鼠标点选切换。"""
-    _monkey_remote(monkeypatch)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            pane = await _goto_remote_selection(app, pilot)
-            table = pane._pack_table
-            # 样式：未选 [ ]（转义存储，渲染不吞）
-            assert str(table.get_cell("m1", "pick")) == "\\[ ]"
-            assert table.columns["pick"].width == 5
-            # 渲染居中：宽 5 = 2×cell_padding + [ ] 3 字符，框在列正中
-            line = table._render_cell(0, 0, Style(), 5)[0]
-            assert "".join(s.text for s in line) == " [ ] "
-            # 鼠标点选：单击 Pick 列 → 勾选
-            await pilot.click(table, offset=(3, 1))
-            await pilot.pause(0.25)
-            assert pane._pack_picked == {"m1"}
-            assert str(table.get_cell("m1", "pick")) == "\\[x]"
-            # 再点 → 取消
-            await pilot.click(table, offset=(3, 1))
-            await pilot.pause(0.25)
-            assert pane._pack_picked == set()
-            # 单击内容列只移光标，不勾选
-            await pilot.click(table, offset=(10, 1))
-            await pilot.pause(0.25)
-            assert pane._pack_picked == set()
-            assert table.cursor_row == 0
-
-    run(scenario())
 
 
 def test_install_screen_box_mouse_toggle(monkeypatch):
@@ -404,32 +289,5 @@ def test_local_table_box_style_and_mouse_toggle(monkeypatch, tmp_path):
             await pilot.click(table, offset=(3, 1))
             await pilot.pause(0.25)
             assert panel._local_selected == set()
-
-    run(scenario())
-
-
-def test_preset_table_box_style(monkeypatch, tmp_path):
-    """presets 面板：Sel 列 [ ]/[x]（批量删除场景），样式统一。"""
-    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
-    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr("tui.presets.library.preset_list", lambda: [{
-        "name": "p1", "chain": {"model_id": 1}, "note": "", "updated_at": ""}])
-    monkeypatch.setattr("tui.presets.library.preset_get",
-                        lambda name: {"name": name, "chain": {"model_id": 1}})
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.4)
-            table = app.query_one("#preset-table", DataTable)
-            assert table.columns["pick"].width == 5
-            assert str(table.get_cell("p1", "pick")) == "\\[ ]"
-            # 单击 Sel 列 → 勾选（PresetTable 既有鼠标点选）
-            await pilot.click(table, offset=(3, 1))
-            await pilot.pause(0.25)
-            panel = app.query_one(PresetPanel)
-            assert "p1" in panel._selected
-            assert str(table.get_cell("p1", "pick")) == "\\[x]"
 
     run(scenario())

@@ -174,7 +174,8 @@ class TonePickerScreen(GigBuddyModal):
             tone_id = model["tone_id"]
             if tone_id not in folders:
                 title = _escape(model.get("title") or "Untitled")
-                label = f"{title}  {self._author_label(model.get('username'))}"
+                label = f"{title}  {self._author_label(
+                    model.get('username'), self.app.theme_variables)}"
                 folders[tone_id] = tree.root.add(
                     label, {"type": "tone", "tone_id": tone_id, "model": model},
                     expand=tone_id == expand_tone_id)
@@ -221,6 +222,7 @@ class TonePickerScreen(GigBuddyModal):
         tree = self.query_one("#pick-tree", Tree)
         tree.reset("TONE3000 results")
         tree.root.expand()
+        variables = self.app.theme_variables
         for t in rows:
             state = t.get("download_state")
             mark_style = {"all": "bold $success",
@@ -233,7 +235,7 @@ class TonePickerScreen(GigBuddyModal):
             tree.root.add_leaf(
                 f"{mark}{title}  [dim]dl={t.get('downloads_count', 0)} "
                 f"gear={_escape(t.get('gear', '?'))}[/dim] "
-                f"{self._author_label(t.get('username'))}"
+                f"{self._author_label(t.get('username'), variables)}"
                 + (f" [dim]downloaded {t.get('downloaded')}/"
                    f"{t.get('models_count', '?')}[/dim]"
                    if state in {"all", "partial"} else ""),
@@ -244,11 +246,12 @@ class TonePickerScreen(GigBuddyModal):
             tree.move_cursor(tree.root.children[0])
 
     @staticmethod
-    def _author_label(username: str | None) -> str:
+    def _author_label(username: str | None, variables: dict | None = None) -> str:
         """Render picker authors from the shared positive verification cache."""
         name = str(username or "?")
         safe_name = _escape(name)
-        badge = (" [b $success]✓[/]"
+        badge_style = resolve_rich_style("b $success", variables)
+        badge = (f" [{badge_style}]✓[/]"
                  if library.tone3000.is_verified(name) else "")
         return f"[dim]@{safe_name}[/dim]{badge}"
 
