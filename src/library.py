@@ -29,7 +29,7 @@ from uuid import uuid4
 
 import tone3000
 
-__version__ = "0.1.0"
+__version__ = "0.1.0a2"
 
 ROOT = Path(__file__).resolve().parent.parent
 

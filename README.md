@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.1.0-alpha.1 — 2026-08-05*
+*v0.1.0-alpha.2 — 2026-08-06*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive
@@ -38,6 +38,20 @@ fully MIT core stack.
 - Offline rendering (`src/render.py` + `bin/nam_cli`) remains for wav output.
 
 ## Quick start
+
+### One-command install (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.2/scripts/install.sh | bash
+```
+
+The installer creates an isolated environment under `~/.local/share/gigbuddy`,
+builds the audio engines, and exposes `gigbuddy` and `gigbuddy-tui` through
+`~/.local/bin`. Set `GIGBUDDY_HOME` or `GIGBUDDY_BIN_DIR` to use different paths.
+
+For a Python-only CLI install, `uv tool install git+https://github.com/ytxing/gigbuddy.git`
+is also possible, but it does not build the realtime engine and is not the full
+GigBuddy installation.
 
 ```bash
 # 1. Create the local Python environment (Python 3.11+)
