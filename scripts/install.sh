@@ -19,7 +19,7 @@ step() {
 
 banner() {
   if [[ -t 1 ]] && command -v python3 >/dev/null 2>&1; then
-    # 跑马灯：金色基调不变，亮金光带自左向右循环扫过字符画
+    # 呼吸灯：字符不动，整体颜色在金色系里平滑循环（暗金→亮金→暗金）
     python3 - <<'PY'
 import sys, time
 
@@ -35,36 +35,21 @@ LINES = (
 )
 W = max(len(l) for l in LINES)
 R = len(LINES)
-BASE = (184, 134, 11)      # #b8860b 暗金（整体基调）
-GOLD = ((120, 78, 0), (140, 92, 10), (170, 112, 12), (200, 132, 14),
-        (225, 150, 20), (245, 182, 77), (250, 195, 90),
-        (245, 182, 77), (225, 150, 20), (200, 132, 14))  # 金→亮金渐变窗口
-LW = len(GOLD)
-STEP = 4
-FRAMES = (W + LW) * 3 // (2 * STEP)   # 扫约一圈半
+CYCLE = ((120, 78, 0), (140, 92, 10), (160, 105, 12), (185, 120, 14),
+         (210, 140, 16), (230, 158, 24), (245, 180, 60), (250, 195, 90),
+         (245, 180, 60), (230, 158, 24), (210, 140, 16), (185, 120, 14),
+         (160, 105, 12), (140, 92, 10))   # 暗金→亮金→暗金 呼吸曲线
+FRAMES = 2 * len(CYCLE)                    # 两轮呼吸
 
 def esc(c):
     return '\033[38;2;%d;%d;%dm' % c
 
-def render(start):
-    out = []
-    for row in LINES:
-        row = row.ljust(W)
-        s, e = max(0, start), min(W, start + LW)
-        if s >= W or e <= 0:
-            out.append(esc(BASE) + row + '\033[0m')
-            continue
-        parts = [esc(BASE) + row[:s]]
-        for i in range(s, e):
-            parts.append(esc(GOLD[i - start]) + row[i])
-        parts.append(esc(BASE) + row[e:] + '\033[0m')
-        out.append(''.join(parts))
-    return '\n'.join(out)
-
 for f in range(FRAMES):
-    sys.stdout.write(('\033[%dA\r' % R) * (1 if f else 0) + render(-LW + f * STEP))
+    c = CYCLE[f % len(CYCLE)]
+    frame = '\n'.join(esc(c) + row.ljust(W) + '\033[0m' for row in LINES)
+    sys.stdout.write(('\033[%dA\r' % R) * (1 if f else 0) + frame)
     sys.stdout.flush()
-    time.sleep(0.1)
+    time.sleep(0.12)
 sys.stdout.write('\n\n\n')
 sys.stdout.flush()
 PY
