@@ -23,6 +23,8 @@ BANNER_PID=""
 stop_banner() {
   if [[ -n "$BANNER_PID" ]]; then
     kill "$BANNER_PID" 2>/dev/null || true
+    sleep 0.05
+    kill -9 "$BANNER_PID" 2>/dev/null || true
     BANNER_PID=""
   fi
   printf '\033[r'   # 恢复全屏滚动区域
@@ -73,14 +75,18 @@ def render(phase):
         out.append(''.join(seg) + '\033[0m')
     return '\n'.join(out)
 
+import os, signal
+_parent = os.getppid()
+signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
 f = 0
 try:
-    while True:
+    # 父进程退出（ppid 变 1）或 stdout 断开时自行结束，避免动画停不下来
+    while os.getppid() == _parent:
         sys.stdout.write('\033[s\033[1;1H' + render(2 * math.pi * f / 32) + '\033[u')
         sys.stdout.flush()
         f += 1
         time.sleep(0.1)
-except (KeyboardInterrupt, SystemExit):
+except (BrokenPipeError, OSError, KeyboardInterrupt, SystemExit):
     pass
 PY
     BANNER_PID=$!
