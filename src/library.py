@@ -897,17 +897,25 @@ def preset_load(name: str) -> dict | None:
 # Built-in catalog, resolved from exact local model ids at seed time.
 # (name, note, amp_model_id, ir_model_id|None)
 SEED_CHAINS = [
-    ("band-guitar-rhcp", "Band Gear · Guitar · John Frusciante: Marshall Major 200 full rig", 383442, None),
-    ("band-guitar-green-day", "Band Gear · Guitar · Billie Joe: Marshall 1959BJA full rig", 684630, None),
+    ("band-guitar-rhcp", "Band Gear · Guitar · John Frusciante: Marshall Major 200 Plexi Lead 1968 full rig", 383442, None),
+    ("band-guitar-green-day", "Band Gear · Guitar · Billie Joe Armstrong: Marshall 1959BJA full rig", 684630, None),
+    ("band-guitar-slash", "Band Gear · Guitar · Slash: Marshall JCM800 2203 (EL34 mod) full rig", 567060, None),
+    ("band-guitar-acdc", "Band Gear · Guitar · Angus Young: Marshall JMP-50 Plexi 1969 full rig", 418470, None),
+    ("band-guitar-mayer", "Band Gear · Guitar · John Mayer: Dumble ODS #102 clean drive", 418380, None),
     ("band-bass-rhcp", "Band Gear · Bass · Flea: Gallien-Krueger RB800 direct", 419198, None),
-    ("band-bass-green-day", "Band Gear · Bass · Green Day style: Ampeg SVT-CL pushed direct (approximation)", 382795, None),
-    ("classic-guitar-beano", "Classic Pairing · Guitar · 1966 Marshall Bluesbreaker + G12 Alnico full rig", 677999, None),
-    ("classic-guitar-vox-ef86", "Classic Pairing · Guitar · Vox AC30/4 EF86 + 2x12 Alnico full rig", 383682, None),
-    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 + Marshall Greenback 4x12", 494341, 239163),
-    ("classic-guitar-fender-super", "Classic Pairing · Guitar · Fender Super Reverb 1977 full rig", 379720, None),
-    ("classic-bass-gk-rb800", "Classic Pairing · Bass · Gallien-Krueger RB800 direct", 419198, None),
-    ("classic-bass-ampeg-svt", "Classic Pairing · Bass · Ampeg SVT-CL clean direct", 382790, None),
+    ("band-bass-svt", "Band Gear · Bass · Mike Dirnt style: Ampeg SVT Classic pushed (Gain 10)", 379990, None),
+    ("classic-guitar-beano", "Classic Pairing · Guitar · Eric Clapton 'Beano': 1966 Marshall Bluesbreaker full rig", 677999, None),
+    ("classic-guitar-vox-ef86", "Classic Pairing · Guitar · Brian May: Vox AC30/4 EF86 full rig", 383682, None),
+    ("classic-guitar-vox-ac15", "Classic Pairing · Guitar · Vox AC15 edge of breakup direct", 413321, None),
+    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 Block Logo + JTM-45 Greenback 2x12", 667990, 74211),
+    ("classic-guitar-fender-super", "Classic Pairing · Guitar · Fender Super Reverb 1977 full rig", 379727, None),
+    ("classic-guitar-fender-deluxe", "Classic Pairing · Guitar · Fender Deluxe Reverb full rig", 385845, None),
+    ("classic-guitar-fender-twin", "Classic Pairing · Guitar · Kurt Cobain: Fender '65 Twin Reverb full rig", 381338, None),
+    ("classic-guitar-dumble-sss", "Classic Pairing · Guitar · Stevie Ray Vaughan: Dumble Steel String Singer clean", 380306, None),
 ]
+
+# settings 键：首次运行初始化标记（ensure_default_presets 幂等依据）。
+DEFAULT_PRESETS_MARKER = "default_presets_initialized"
 
 
 def preset_group(name: str) -> tuple[str, str]:
@@ -1008,7 +1016,7 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
     return hits
 
 
-def preset_seed(*, replace: bool = False) -> int:
+def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
     """Create the built-in recommendation presets from the local library.
 
     Chains whose amp/IR are not in the library are skipped with a warning
@@ -1022,7 +1030,8 @@ def preset_seed(*, replace: bool = False) -> int:
     made = 0
     for name, note, amp_id, ir_id in SEED_CHAINS:
         if not _model_path(amp_id):
-            print(f"[preset seed] skipped {name}: model {amp_id} is not available locally")
+            if not quiet:
+                print(f"[preset seed] skipped {name}: model {amp_id} is not available locally")
             continue
         chain = {
             "model_id": amp_id,
@@ -1033,7 +1042,8 @@ def preset_seed(*, replace: bool = False) -> int:
         }
         if ir_id is not None:
             if not _model_path(ir_id):
-                print(f"[preset seed] skipped {name}: IR model {ir_id} is not available locally")
+                if not quiet:
+                    print(f"[preset seed] skipped {name}: IR model {ir_id} is not available locally")
                 continue
             chain["ir_model_id"] = ir_id
             chain["ir_path"] = _model_path(ir_id)
@@ -1047,8 +1057,103 @@ def preset_seed(*, replace: bool = False) -> int:
                 (name, note, json.dumps(chain, ensure_ascii=False), now, now))
             conn.commit()
         made += 1
-        print(f"[preset seed] {name}: amp model {amp_id}"
-              + (f" + ir model {ir_id}" if ir_id is not None else " (IR bypass)"))
+        if not quiet:
+            print(f"[preset seed] {name}: amp model {amp_id}"
+                  + (f" + ir model {ir_id}" if ir_id is not None else " (IR bypass)"))
+    return made
+
+
+def ensure_default_presets(progress_cb=None, *, quiet: bool = False) -> int:
+    """First-run bootstrap: download the built-in presets' models, then seed.
+
+    Idempotent via the ``default_presets_initialized`` settings marker: once
+    every seed model is downloaded and the marker written, later calls return
+    0 without touching the network. Partial failure keeps the marker unset so
+    the next launch retries — already-downloaded files are skipped by
+    download()'s idempotence, and preset_seed() skips whatever is still
+    missing. Network/API errors are reported (when not quiet) and never raise.
+
+    Only the exact model ids referenced by SEED_CHAINS are downloaded (subset
+    download per tone — never the tone's whole pack). Each tone's metadata and
+    model rows are persisted the same way as import_tone(), so the downloaded
+    files show up in the LOCAL library and pickers.
+
+    progress_cb(done, total, fname) is optional overall progress across all
+    seed models. Returns the number of presets written (0 on early failure).
+    """
+    if _setting_get(DEFAULT_PRESETS_MARKER):
+        return 0
+    # 1) Reverse-lookup the seed model ids → parent tone ids. Retry-safe: only
+    #    model ids without a local file are looked up (a crash between download
+    #    and marker leaves everything local, so the next launch skips straight
+    #    to seeding instead of re-doing the slow per-tone API pass).
+    wanted = list(dict.fromkeys(
+        [amp_id for _, _, amp_id, _ in SEED_CHAINS]
+        + [ir_id for _, _, _, ir_id in SEED_CHAINS if ir_id is not None]))
+    local_ids = {mid for ids in downloaded_model_ids_by_tone().values()
+                 for mid in ids}
+    missing = [mid for mid in wanted if mid not in local_ids]
+    tone_by_model: dict[int, int] = {}
+    tones = []
+    if missing:
+        if not quiet:
+            print(f"[default presets] resolving {len(missing)} model id(s) "
+                  "on TONE3000…", flush=True)
+        try:
+            tones = tone3000.tones_for_model_ids(missing)
+        except Exception as e:
+            if not quiet:
+                print(f"[default presets] TONE3000 lookup failed: {e} — "
+                      "retry on next launch", flush=True)
+            return 0
+        for t in tones:
+            for mid in t.get("matched_model_ids") or []:
+                tone_by_model[int(mid)] = int(t["id"])
+    # 2) Per tone, download only the needed subset and persist rows.
+    grand_total = len(missing)
+    completed = 0
+    failed: list[int] = [mid for mid in missing if mid not in tone_by_model]
+    for tone in sorted(tones, key=lambda t: int(t["id"])):
+        tone_id = int(tone["id"])
+        need = sorted(mid for mid, tid in tone_by_model.items() if tid == tone_id)
+        is_ir = tone.get("gear") == "cab"
+        slug = tone3000.slugify(tone.get("title"), 40)
+        dest = TONES_DIR / f"{tone_id}-{slug}"
+        offset = completed
+
+        def _cb(done: int, total: int, fname: str) -> None:
+            if progress_cb:
+                progress_cb(offset + done, grand_total, fname)
+
+        try:
+            records = tone3000.download(tone_id, dest, tag=slug,
+                                        a2_only=not is_ir,
+                                        ext="wav" if is_ir else None,
+                                        return_paths=True, progress=_cb,
+                                        quiet=True, model_ids=need)
+            got = {int(r["id"]) for r in records}
+            failed.extend(mid for mid in need if mid not in got)
+            tone["local_dir"] = _to_rel_path(str(dest))
+            with connect() as conn:
+                upsert_tone(conn, tone, commit=False)
+                for m in records:
+                    upsert_model(conn, {
+                        "id": m["id"], "tone_id": tone_id,
+                        "model_url": m["model_url"], "name": m.get("name"),
+                        "architecture": (m["model_json"] or {}).get("architecture") or "IR",
+                        "local_path": m["local_path"],
+                    }, commit=False)
+                conn.commit()
+        except Exception as e:
+            failed.extend(need)
+            if not quiet:
+                print(f"[default presets] tone {tone_id} download failed: {e} — "
+                      "retry on next launch", flush=True)
+        completed += len(need)
+    # 3) Seed what became available; the marker only lands when nothing failed.
+    made = preset_seed(quiet=quiet)
+    if not failed:
+        _setting_set(DEFAULT_PRESETS_MARKER, "1")
     return made
 
 
@@ -1092,6 +1197,11 @@ def _fmt_show(t: dict) -> str:
             arch = m.get("architecture") or "?"
             lines.append(f"  {m['id']} [{arch}] {m.get('local_path') or m.get('model_url')}")
     return "\n".join(lines)
+
+
+def _cli_preset_progress(done: int, total: int, fname: str) -> None:
+    """ensure_default_presets 的 CLI 进度打印（一行一文件）。"""
+    print(f"[default presets] {done}/{total}  {fname}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1168,6 +1278,14 @@ def main(argv: list[str] | None = None) -> int:
                        help="delete every existing preset before creating the catalog")
 
     args = p.parse_args(argv)
+
+    # 首次运行初始化（此处只到达有子命令的分支；无参数/TUI 分支在上方
+    # 提前返回，由 TUI 自己处理）：下载内置 preset 缺失的本地模型并 seed。
+    # 幂等——settings 标记已写则直接跳过；失败只报错不中断本条命令。
+    try:
+        ensure_default_presets(progress_cb=_cli_preset_progress)
+    except Exception as e:
+        print(f"[default presets] initialization failed: {e}", flush=True)
 
     if args.cmd == "tone":
         if args.tone_cmd == "list":

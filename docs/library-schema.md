@@ -78,6 +78,17 @@ the two categories and instrument. They reference exact local model IDs.
 `gigbuddy preset seed --replace` deletes
 all existing presets and replaces them with the built-in catalog.
 
+First-run bootstrap is `ensure_default_presets()` (fires synchronously before any
+CLI subcommand, and asynchronously in a daemon thread on TUI mount): it
+reverse-looks-up the 16 model ids referenced by the built-in catalog (15 amp
+models + 1 cabinet IR), downloads only those exact models (subset per tone,
+~4.6MB total), persists them like `tone import`, then calls `preset_seed()`.
+Idempotence: the `default_presets_initialized` settings marker is written only
+when every seed model landed; a partial failure leaves it unset so the next
+launch retries — already-downloaded files are skipped by `download()` and
+`preset_seed()` skips whatever is still missing. Network/API errors are reported
+(never raised) and do not abort the invoking command.
+
 ## settings
 
 Shared toolchain state as key/value rows. `active_preset` stores the preset most

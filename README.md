@@ -60,6 +60,21 @@ builds the audio engines, and exposes `gigbuddy` and `gigbuddy-tui` through
 After installation, run `gigbuddy` to open the TUI and start the realtime engine. Use
 `gigbuddy tui --no-engine` when an engine is already running in another terminal.
 
+#### First-run default presets
+
+The first time you run any `gigbuddy` subcommand (or open the TUI), the built-in
+default presets are set up automatically: it downloads the 16 models the presets
+reference (15 amp models + 1 cabinet IR, ~4.6MB, one-time) and seeds all 15
+presets. The flow is idempotent (settings marker `default_presets_initialized`)
+and failure-safe — network/API errors print a notice, seed whatever already
+became available, and retry on the next launch. Inspect and load them with:
+
+```bash
+gigbuddy preset list                          # 15 built-in presets (band-*/classic-*)
+gigbuddy preset load band-guitar-rhcp         # apply + engine hot-swap
+gigbuddy preset seed --replace                # manually rebuild the built-in catalog
+```
+
 For a Python-only CLI install, `uv tool install git+https://github.com/ytxing/gigbuddy.git`
 is also possible, but it does not build the realtime engine and is not the full
 GigBuddy installation.

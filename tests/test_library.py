@@ -24,6 +24,13 @@ def isolated(tmp_path, monkeypatch):
     yield
 
 
+def _mark_first_run_done():
+    """Set the first-run marker so CLI subcommand tests never trigger the
+    ensure_default_presets network download (marker semantics are covered by
+    the dedicated ensure_default_presets tests)."""
+    library._setting_set(library.DEFAULT_PRESETS_MARKER, "1")
+
+
 SAMPLE = {
     "id": 19, "title": "Fender Super Reverb 1977", "gear": "amp-cab", "platform": "nam",
     "username": "tone3000", "avatar_url": "http://a", "user_id": "u1",
@@ -441,6 +448,7 @@ def test_import_ir_downloads_wav(monkeypatch):
 
 
 def test_cli_roundtrip(capsys, monkeypatch):
+    _mark_first_run_done()
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
     monkeypatch.setattr(tone3000, "download", lambda *a, **kw: [])
     assert library.main(["tone", "list"]) == 0
@@ -486,6 +494,7 @@ def test_cli_direct_tui_flag_forwards_arguments(monkeypatch):
 
 
 def test_cli_search_json(capsys, monkeypatch):
+    _mark_first_run_done()
     monkeypatch.setattr(tone3000, "search", lambda q, **kw: [dict(SAMPLE)])
     library.main(["tone", "search", "fender", "--json"])
     out = capsys.readouterr().out
@@ -620,7 +629,7 @@ def test_preset_list_and_delete(tmp_path):
 
 def test_preset_group_is_derived_from_name_only():
     assert library.preset_group("band-guitar-rhcp") == ("Band Gear", "Guitar")
-    assert library.preset_group("classic-bass-ampeg-svt") == ("Classic Pairing", "Bass")
+    assert library.preset_group("band-bass-svt") == ("Band Gear", "Bass")
     assert library.preset_group("my-tone") == ("Custom", "Other")
 
 
@@ -659,7 +668,112 @@ def test_preset_seed_replace_deletes_existing_presets(tmp_path, monkeypatch):
     assert [p["name"] for p in library.preset_list()] == ["new"]
 
 
+def _seed_env(monkeypatch):
+    """Two-chain seed env: amp tone 11 (amp-cab) and cab tone 12 (2 models).
+
+    Returns (tones_by_id, download calls) for assertions.
+    """
+    library._setting_set(library.DEFAULT_PRESETS_MARKER, None)
+    monkeypatch.setattr(library, "SEED_CHAINS", [
+        ("seed-amp", "note", 1001, None),
+        ("seed-jtm45", "note", 2001, 3001)])
+    tone_a = dict(SAMPLE)
+    tone_a.update(id=11, title="Fender Super Reverb 1977", gear="amp-cab")
+    tone_b = dict(SAMPLE)
+    tone_b.update(id=12, title="JTM45 Greenback", gear="cab")
+    calls = []
+
+    def fake_tones_for_model_ids(ids):
+        return [
+            {**tone_a, "matched_model_ids": [1001]},
+            {**tone_b, "matched_model_ids": [2001, 3001]},
+        ]
+
+    def fake_download(tone_id, dest, tag=None, a2_only=True, ext=None,
+                      return_paths=False, progress=None, quiet=False,
+                      model_ids=None):
+        calls.append({"tone_id": tone_id, "model_ids": model_ids,
+                      "a2_only": a2_only, "ext": ext})
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        out = []
+        for mid in model_ids:
+            p = Path(dest) / f"m{mid}.nam"
+            p.write_bytes(b"x")
+            out.append({"id": mid, "tone_id": tone_id, "model_url": "u",
+                        "name": f"m{mid}",
+                        "model_json": {"architecture": "SlimmableContainer"},
+                        "local_path": str(p)})
+        return out
+
+    monkeypatch.setattr(tone3000, "tones_for_model_ids", fake_tones_for_model_ids)
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    return calls
+
+
+def test_ensure_default_presets_seeds_and_marks(tmp_path, monkeypatch):
+    calls = _seed_env(monkeypatch)
+    assert library.ensure_default_presets() == 2
+    assert library._setting_get(library.DEFAULT_PRESETS_MARKER) == "1"
+    # subset download per tone + IR tone fetched non-A2 with wav ext
+    assert calls == [
+        {"tone_id": 11, "model_ids": [1001], "a2_only": True, "ext": None},
+        {"tone_id": 12, "model_ids": [2001, 3001], "a2_only": False, "ext": "wav"},
+    ]
+    amp = library.preset_get("seed-amp")
+    assert amp["chain"]["model_id"] == 1001
+    assert amp["chain"]["ir_model_id"] is None
+    jtm = library.preset_get("seed-jtm45")
+    assert jtm["chain"]["ir_model_id"] == 3001
+    # models + tones persisted (LOCAL library rows for the pickers)
+    tone = library.get_tone(11)
+    assert tone["local_dir"] and tone["models"][0]["local_path"].endswith("m1001.nam")
+    # idempotent: marker already set → no network, no re-seed
+    assert library.ensure_default_presets() == 0
+    assert len(calls) == 2
+    # crash-retry fast path: marker cleared but everything local → re-seed
+    # without any network reverse-lookup or download
+    library._setting_set(library.DEFAULT_PRESETS_MARKER, None)
+    assert library.ensure_default_presets() == 2
+    assert library._setting_get(library.DEFAULT_PRESETS_MARKER) == "1"
+    assert len(calls) == 2
+
+
+def test_ensure_default_presets_partial_failure_no_marker(tmp_path, monkeypatch,
+                                                          capsys):
+    _seed_env(monkeypatch)
+    # tone 11 (first download call) fails entirely; tone 12 succeeds
+    orig = tone3000.download
+    count = [0]
+
+    def flaky(*a, **kw):
+        count[0] += 1
+        if count[0] == 1:
+            raise ConnectionError("network down")
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(tone3000, "download", flaky)
+    made = library.ensure_default_presets()
+    assert made == 1  # the reachable chain seeded
+    assert library.preset_get("seed-amp") is None
+    assert library.preset_get("seed-jtm45") is not None
+    # marker NOT written → next launch retries the failed tone
+    assert library._setting_get(library.DEFAULT_PRESETS_MARKER) is None
+    assert "download failed" in capsys.readouterr().out
+
+
+def test_ensure_default_presets_lookup_failure_no_marker(tmp_path, monkeypatch,
+                                                         capsys):
+    library._setting_set(library.DEFAULT_PRESETS_MARKER, None)
+    monkeypatch.setattr(tone3000, "tones_for_model_ids",
+                        lambda ids: (_ for _ in ()).throw(
+                            ConnectionError("API down")))
+    assert library.ensure_default_presets() == 0
+    assert library._setting_get(library.DEFAULT_PRESETS_MARKER) is None
+    assert "lookup failed" in capsys.readouterr().out
+
+
 def test_cli_preset_roundtrip(tmp_path, capsys):
+    _mark_first_run_done()
     _put_models(tmp_path)
     library.chain_set({"model": str(tmp_path / "SR AKG 414.nam")})
     assert library.main(["preset", "save", "cli-rig", "--note", "n"]) == 0

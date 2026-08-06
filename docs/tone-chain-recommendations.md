@@ -86,7 +86,9 @@
 
 ## 推荐组合（直接成套使用）
 
-Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or Bass:
+Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or Bass.
+首次运行 `gigbuddy` 会自动下载模型并建好全部 15 条 preset（见下节
+「首次运行自动初始化」）；需要手动重建时：
 
 ```bash
 .venv/bin/gigbuddy preset seed --replace    # delete existing presets and rebuild the catalog
@@ -94,21 +96,46 @@ Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or
 .venv/bin/gigbuddy preset load band-guitar-rhcp  # load with engine hot-swap
 ```
 
-| preset | amp model | IR model | description |
+| preset | note | amp model | IR |
 |---|---|---|---|
-| band-guitar-rhcp | 383442 | — | Frusciante / Marshall Major 200 full rig |
-| band-guitar-green-day | 684630 | — | Billie Joe / Marshall 1959BJA full rig |
-| band-bass-rhcp | 419198 | — | Flea style / GK RB800 direct |
-| band-bass-green-day | 382795 | — | Green Day style / approximate Ampeg SVT-CL pairing, direct |
-| classic-guitar-beano | 677999 | — | Bluesbreaker + G12 Alnico full rig |
-| classic-guitar-vox-ef86 | 383682 | — | Vox AC30/4 EF86 + 2x12 Alnico full rig |
-| classic-guitar-jtm45 | 494341 | 239163 | JTM45 + Marshall 1960TV Greenback |
-| classic-guitar-fender-super | 379720 | — | Fender Super Reverb full rig |
-| classic-bass-gk-rb800 | 419198 | — | GK RB800 direct |
-| classic-bass-ampeg-svt | 382790 | — | Ampeg SVT-CL clean direct |
+| band-guitar-rhcp | Band Gear · Guitar — John Frusciante：Marshall Major 200 Plexi Lead 1968 全 rig | 383442 | — |
+| band-guitar-green-day | Band Gear · Guitar — Billie Joe Armstrong：Marshall 1959BJA 全 rig | 684630 | — |
+| band-guitar-slash | Band Gear · Guitar — Slash：Marshall JCM800 2203（EL34 mod）全 rig | 567060 | — |
+| band-guitar-acdc | Band Gear · Guitar — Angus Young：Marshall JMP-50 Plexi 1969 全 rig | 418470 | — |
+| band-guitar-mayer | Band Gear · Guitar — John Mayer：Dumble ODS #102 clean drive | 418380 | — |
+| band-bass-rhcp | Band Gear · Bass — Flea：Gallien-Krueger RB800 直出 | 419198 | — |
+| band-bass-svt | Band Gear · Bass — Mike Dirnt 风格：Ampeg SVT Classic 推满（Gain 10）直出 | 379990 | — |
+| classic-guitar-beano | Classic Pairing · Guitar — Eric Clapton 'Beano'：1966 Marshall Bluesbreaker 全 rig | 677999 | — |
+| classic-guitar-vox-ef86 | Classic Pairing · Guitar — Brian May：Vox AC30/4 EF86 全 rig | 383682 | — |
+| classic-guitar-vox-ac15 | Classic Pairing · Guitar — Vox AC15 edge of breakup 直出 | 413321 | — |
+| classic-guitar-jtm45 | Classic Pairing · Guitar — Marshall JTM45 Block Logo + JTM-45 Greenback 2x12 | 667990 | 74211 |
+| classic-guitar-fender-super | Classic Pairing · Guitar — Fender Super Reverb 1977 全 rig | 379727 | — |
+| classic-guitar-fender-deluxe | Classic Pairing · Guitar — Fender Deluxe Reverb 全 rig | 385845 | — |
+| classic-guitar-fender-twin | Classic Pairing · Guitar — Kurt Cobain：Fender '65 Twin Reverb 全 rig | 381338 | — |
+| classic-guitar-dumble-sss | Classic Pairing · Guitar — Stevie Ray Vaughan：Dumble Steel String Singer clean | 380306 | — |
 
-> 注：gear=amp-cab 的音色模型自带箱体（零 IR）。本地没有贝斯箱体 IR，
-> 两条经典贝斯 preset 和两条乐队贝斯 preset 都明确采用直出，不混用吉他箱体 IR。
-> 模型文件按旋钮/麦位命名（如 `JCM800 2203 - P5 B5 M5 T5 MV6 G5 - AZG - 700.nam`），
-> 选哪个由 `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
+> 注：gear=amp-cab 的音色模型自带箱体（零 IR），表内除 classic-guitar-jtm45
+> 外均无 IR；jtm45 显式挂 JTM-45 Greenback 2x12 箱体 IR（74211）。本地没有
+> 贝斯箱体 IR，两条乐队贝斯 preset（band-bass-rhcp / band-bass-svt）明确采用
+> 直出，不混用吉他箱体 IR。模型文件按旋钮/麦位命名（如
+> `JCM800 2203 - P5 B5 M5 T5 MV6 G5 - AZG - 700.nam`），选哪个由
+> `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
 > 库内文件改名/迁移后 `preset load` 依然能解析到当前路径。
+
+## 首次运行自动初始化（default presets）
+
+首次运行 `gigbuddy`（CLI 任意子命令或 TUI 启动）会自动下载上述 15 条内置
+preset 精确引用的 **16 个模型**（15 个 amp 模型 + 1 个箱体 IR，约 4.6MB），
+并 seed 出全部 15 条 preset。这是**一次性**流程：
+
+- **幂等**：settings 表 `default_presets_initialized` 标记已写则直接跳过；
+  CLI 与 TUI 共用同一标记。全部模型就绪并 seed 成功后才写标记。
+- **触发点**：CLI 子命令执行前同步触发；TUI 启动时由守护线程异步触发，
+  不阻塞渲染。模型只按 SEED_CHAINS 引用的模型 id 做子集下载，不会拉整个 pack。
+- **失败语义**：网络/API 错误只打印提示、不写标记、不中断当前命令；
+  下次启动自动重试，已下载的文件由 download() 幂等跳过，仍缺失的模型由
+  preset_seed() 跳过（其余照常 seed）。
+- **CLI 进度输出**：逐文件一行，格式
+  `[default presets] <done>/<total>  <文件名>`。手动 `gigbuddy preset seed`
+  完成时另有 `Seeded <n>/<len(SEED_CHAINS)> presets.` 汇总行；
+  TUI 初始化完成时在右上角通知 `Seeded <n> default preset(s)`。

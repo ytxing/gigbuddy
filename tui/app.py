@@ -14,6 +14,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -720,6 +721,12 @@ class GigBuddyApp(App):
         self._device_request_generation += 1
         self.run_worker(partial(self._load_devices,
                                 self._device_request_generation), name="devices")
+        # 首次运行：后台守护线程下载内置 preset 的模型并 seed（幂等，不阻塞
+        # 渲染）。守护线程不进事件循环 executor——TUI 退出时不会像
+        # asyncio.to_thread 那样在 loop 收尾处 join 挂住（TONE3000 反查
+        # 可能耗时数分钟）。
+        threading.Thread(target=self._ensure_default_presets,
+                         name="default-presets", daemon=True).start()
         self._update_unsupported_size()
 
     def on_resize(self, _event) -> None:
@@ -733,6 +740,43 @@ class GigBuddyApp(App):
             return
         unsupported = self.size.width < 80 or self.size.height < 32
         overlay.set_class(unsupported, "unsupported-size--visible")
+
+    def _ensure_default_presets(self) -> None:
+        """首次运行初始化（守护线程内执行）：下载 15 个内置 preset 的模型并 seed。
+
+        幂等——settings 标记已写则直接返回；失败静默（标记不写，下次启动
+        重试），绝不影响 UI 渲染与使用。完成且有 seed 时把结果交还事件循环
+        线程刷新 preset 面板。
+        """
+
+        def progress(done: int, total: int, fname: str) -> None:
+            try:
+                self.call_from_thread(
+                    self.notify, f"Default presets {done}/{total}  {fname}",
+                    timeout=1.5)
+            except Exception:
+                pass
+
+        try:
+            made = library.ensure_default_presets(progress, quiet=True)
+        except Exception:
+            return
+        if not getattr(self, "is_mounted", False) or not made:
+            return
+        try:
+            self.call_from_thread(self._default_presets_finished, made)
+        except Exception:
+            pass
+
+    def _default_presets_finished(self, made: int) -> None:
+        """事件循环线程：seed 完成后刷新 preset 面板并提示。"""
+        try:
+            panel = self.query_one(PresetPanel)
+            panel._fingerprint = None
+            panel.refresh_presets()
+        except Exception:
+            pass
+        self.notify(f"Seeded {made} default preset(s)")
 
     def _ensure_engine(self) -> None:
         """Spawn (or restart) the engine when the chain has a signal source and
