@@ -156,7 +156,7 @@ class InputSourceScreen(GigBuddyModal):
 
     # ---- playback control (space/s/l): write the chain, engine responds ≤0.1s ----
 
-    def _commit_input(self, cfg: dict, *, publish: bool) -> dict | None:
+    def _commit_input(self, cfg: dict) -> dict | None:
         """Use the App's chain boundary when the modal edits live input."""
         try:
             writer = getattr(self.app, "_commit_external_chain", None)
@@ -167,16 +167,12 @@ class InputSourceScreen(GigBuddyModal):
         except Exception as exc:
             self.app.notify(f"Input unchanged: {exc}", severity="error")
             return None
-        if publish:
-            publisher = getattr(self.app, "_publish_mutation", None)
-            if callable(publisher):
-                publisher("playback", ("input",), persisted.get("revision"))
         return persisted
 
     def _set_input(self, inp: dict, *, note: str) -> dict | None:
         cfg = live.read_chain()
         cfg["input"] = inp
-        persisted = self._commit_input(cfg, publish=False)
+        persisted = self._commit_input(cfg)
         if persisted is None:
             return None
         self._update_status()
@@ -193,7 +189,7 @@ class InputSourceScreen(GigBuddyModal):
         inp["state"] = live.PLAY_PAUSED if inp.get("state") == live.PLAY_PLAYING \
             else live.PLAY_PLAYING
         cfg["input"] = inp
-        self._commit_input(cfg, publish=True)
+        self._commit_input(cfg)
         self._update_status()
 
     def action_playback_stop(self) -> None:
@@ -203,7 +199,7 @@ class InputSourceScreen(GigBuddyModal):
             return
         inp["state"] = live.PLAY_STOPPED
         cfg["input"] = inp
-        self._commit_input(cfg, publish=True)
+        self._commit_input(cfg)
         self._update_status()
 
     def action_playback_loop(self) -> None:
@@ -213,7 +209,7 @@ class InputSourceScreen(GigBuddyModal):
             return
         inp["loop"] = not inp.get("loop", False)
         cfg["input"] = inp
-        self._commit_input(cfg, publish=True)
+        self._commit_input(cfg)
         self._update_status()
 
     def action_download_dry(self) -> None:

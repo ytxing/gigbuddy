@@ -407,6 +407,20 @@ def test_import_tone_mocked(monkeypatch, capsys):
     assert len(library.list_tones()) == 1
 
 
+def test_import_staging_copy_does_not_share_destination_inode(tmp_path):
+    source_dir = library.TONES_DIR / "existing"
+    source_dir.mkdir()
+    source = source_dir / "model.nam"
+    source.write_bytes(b"original")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    library._seed_import_directory(source_dir, staging)
+    (staging / "model.nam").write_bytes(b"redownloaded")
+
+    assert source.read_bytes() == b"original"
+
+
 def test_import_persists_tone_and_models_as_one_transaction(monkeypatch):
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
     monkeypatch.setattr(tone3000, "download", lambda *a, **kw: [

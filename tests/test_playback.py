@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/ -q
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import library  # noqa: E402
 import tone3000  # noqa: E402
 from tui import live  # noqa: E402
+from tui.input_screen import InputSourceScreen  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +49,24 @@ def test_write_playback_toggles_state_preserving_file_and_loop():
     cfg = live.write_playback(live.PLAY_PLAYING, loop=False)
     assert cfg["input"]["state"] == "playing"
     assert cfg["input"]["loop"] is False
+
+
+def test_input_source_playback_commit_does_not_publish_mutation():
+    events = []
+
+    class App:
+        @staticmethod
+        def _commit_external_chain(cfg):
+            return {**cfg, "revision": 3}
+
+        def _publish_mutation(self, *args):
+            events.append(args)
+
+    screen = SimpleNamespace(app=App())
+    result = InputSourceScreen._commit_input(screen, {"input": {"source": "file"}})
+
+    assert result["revision"] == 3
+    assert events == []
 
 
 def test_write_playback_no_chain_returns_none():

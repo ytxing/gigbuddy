@@ -176,6 +176,10 @@ struct PreparedChain {
     bool mute = false;
     float quality = 1.0f;
     uint64_t revision = 0;
+    bool inputIsFile = false;
+    std::string inputPath;
+    int inputState = 0;
+    bool inputLoop = false;
 };
 
 struct Ctx {
@@ -585,6 +589,30 @@ static std::vector<std::string> slot_signature(const std::vector<SlotSpec>& slot
     return signature;
 }
 
+static void stamp_prepared_runtime_fields(const std::shared_ptr<PreparedChain>& chain,
+                                          float gain, float master, bool mute,
+                                          const InputSpec& input) {
+    chain->gain = gain;
+    chain->master = master;
+    chain->mute = mute;
+    chain->inputIsFile = input.isFile;
+    chain->inputPath = input.path;
+    chain->inputState = input.state;
+    chain->inputLoop = input.loop;
+}
+
+static bool prepared_matches_runtime_fields(const PreparedChain& prepared,
+                                            float gain, float master, bool mute,
+                                            const InputSpec& input) {
+    return (prepared.gain == gain
+            && prepared.master == master
+            && prepared.mute == mute
+            && prepared.inputIsFile == input.isFile
+            && prepared.inputPath == input.path
+            && prepared.inputState == input.state
+            && prepared.inputLoop == input.loop);
+}
+
 static std::shared_ptr<NeuralAudio::NeuralModel>
 make_nam(const std::string& path, NeuralAudio::NeuralModelLoader& loader,
          std::string& error) {
@@ -671,6 +699,12 @@ static bool preflight_chain(const nlohmann::json& j,
         return false;
     }
     if (j.contains("mute")) mute = j.at("mute").get<bool>();
+    else if (master == 0.0f) {
+        // Match apply_chain's v0.1 compatibility rule before binding the
+        // complete candidate identity to the prepared runtime.
+        master = 1.0f;
+        mute = true;
+    }
     uint64_t revision = 0;
     if (!read_chain_revision(j, revision, error)) return false;
     InputSpec input;
@@ -696,11 +730,8 @@ static bool preflight_chain(const nlohmann::json& j,
     if (!build_prepared_chain(slots, quality, revision, loader, sr,
                               prepared, error))
         return false;
+    stamp_prepared_runtime_fields(prepared, gain, master, mute, input);
     if (preparedResult != nullptr) *preparedResult = prepared;
-    (void)gain;
-    (void)master;
-    (void)mute;
-    (void)input;
     return true;
 }
 
@@ -759,8 +790,25 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
         && ctx.managedPreparedChain
         && ctx.managedPreparedChain->revision == revision
         && ctx.managedPreparedChain->quality == quality
-        && ctx.managedPreparedChain->signature == signature);
+        && ctx.managedPreparedChain->signature == signature
+        && prepared_matches_runtime_fields(
+            *ctx.managedPreparedChain, gain, master, mute, input));
     if (requireManagedPrepare && !matchesPreflight) {
+        const bool alreadyApplied = (
+            current
+            && current->revision == revision
+            && current->quality == quality
+            && current->signature == signature
+            && prepared_matches_runtime_fields(
+                *current, gain, master, mute, input));
+        if (alreadyApplied) {
+            // Rollback restores the caller-visible original bytes after the
+            // rollback candidate has been acknowledged. The watcher sees
+            // those bytes as a second live-file event, but the runtime is
+            // already on the same semantic chain; do not report a false
+            // "not prepared" rejection for this no-op replay.
+            return true;
+        }
         fprintf(stderr,
                 "[live] managed chain rejected: candidate does not match prepared transaction\n");
         return false;
@@ -789,9 +837,7 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
         next->quality = quality;
         next->revision = revision;
     }
-    next->gain = gain;
-    next->master = master;
-    next->mute = mute;
+    stamp_prepared_runtime_fields(next, gain, master, mute, input);
 
     auto nextWav = std::atomic_load(&ctx.wavIn);
     const bool inputPathChanged = input.isFile && input.path != ctx.liveInputPath;

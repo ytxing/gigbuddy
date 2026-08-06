@@ -578,7 +578,7 @@ def _import_lock(directory: Path) -> threading.Lock:
 
 
 def _seed_import_directory(source: Path, staging: Path) -> None:
-    """Reuse existing files without making the staging directory shared."""
+    """Copy existing files so staging writes cannot mutate the destination."""
     if not source.exists():
         return
     for path in source.rglob("*"):
@@ -586,12 +586,10 @@ def _seed_import_directory(source: Path, staging: Path) -> None:
             continue
         target = staging / path.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(path, target)
-        except OSError:
-            # Some filesystems do not allow hard links; a private copy keeps
-            # the staging contract while retaining idempotent imports.
-            shutil.copy2(path, target)
+        # The downloader may overwrite a zero-byte or stale staged file. A
+        # hard link would make that write visible through the destination too,
+        # defeating the import rollback boundary.
+        shutil.copy2(path, target)
 
 
 def _publish_import_files(paths: list[dict], staging: Path,
