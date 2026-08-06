@@ -9,6 +9,7 @@ BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
 PYTHON_BIN="${GIGBUDDY_PYTHON:-python3}"
 
 die() {
+  stop_banner
   printf 'GigBuddy install failed: %s\n' "$*" >&2
   exit 1
 }
@@ -17,10 +18,27 @@ step() {
   printf '==> %s\n' "$1"
 }
 
-banner() {
+BANNER_PID=""
+
+stop_banner() {
+  if [[ -n "$BANNER_PID" ]]; then
+    kill "$BANNER_PID" 2>/dev/null || true
+    BANNER_PID=""
+  fi
+  printf '\033[r'   # 恢复全屏滚动区域
+}
+
+start_banner() {
   if [[ -t 1 ]] && command -v python3 >/dev/null 2>&1; then
-    # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动
-    python3 - <<'PY'
+    # 滚动区域隔离：动画固定占顶部 8 行，安装日志只在第 9 行以下滚动
+    local lines
+    lines=$(tput lines 2>/dev/null || printf '24')
+    if (( lines >= 12 )); then
+      printf '\033[9;%sr\033[9;1H' "$lines"
+    fi
+    # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动，
+    # 后台循环直到安装结束（stop_banner 停止）
+    python3 - <<'PY' &
 import math, sys, time
 
 LINES = (
@@ -38,13 +56,11 @@ R = len(LINES)
 WAVES = 3                       # 均匀分布的明暗浪数量
 DARK = (110, 72, 8)             # 浪谷：暗金
 BRIGHT = (250, 195, 90)         # 浪峰：亮金
-FRAMES = 32                     # 3 个浪流动约 1.3 圈
 
 def esc(c):
     return '\033[38;2;%d;%d;%dm' % c
 
-for f in range(FRAMES):
-    phase = 2 * math.pi * WAVES * f / FRAMES
+def render(phase):
     out = []
     for row in LINES:
         row = row.ljust(W)
@@ -54,12 +70,20 @@ for f in range(FRAMES):
             c = tuple(int(DARK[i] + (BRIGHT[i] - DARK[i]) * b) for i in range(3))
             seg.append(esc(c) + ch)
         out.append(''.join(seg) + '\033[0m')
-    sys.stdout.write(('\033[%dA\r' % R) * (1 if f else 0) + '\n'.join(out))
-    sys.stdout.flush()
-    time.sleep(0.1)
-sys.stdout.write('\n\n\n')
-sys.stdout.flush()
+    return '\n'.join(out)
+
+f = 0
+try:
+    while True:
+        sys.stdout.write('\033[s\033[1;1H' + render(2 * math.pi * f / 32) + '\033[u')
+        sys.stdout.flush()
+        f += 1
+        time.sleep(0.1)
+except (KeyboardInterrupt, SystemExit):
+    pass
 PY
+    BANNER_PID=$!
+    trap 'stop_banner' EXIT
   else
     # 非交互终端或没有 python3：静态双色版
     printf '\033[38;2;184;134;11m%s\033[38;2;232;163;61m%s\033[0m\n' \
@@ -81,7 +105,7 @@ PY
     printf '\n\n\n'
   fi
 }
-banner
+start_banner
 
 INSTALL_LOG="$(mktemp -t gigbuddy-install.XXXXXX)"
 trap 'rm -f "$INSTALL_LOG"' EXIT
