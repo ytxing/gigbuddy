@@ -124,6 +124,8 @@ python3 src/render.py chain.json data/dry.wav out.wav
 
 ## TUI (realtime tone-chain console)
 
+![GigBuddy TUI main screen](docs/images/tui-main.png)
+
 The TUI starts the realtime engine by default. Use `--no-engine` when the engine
 is already running in another terminal.
 
