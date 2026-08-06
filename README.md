@@ -14,12 +14,18 @@ the tones you like — then play through them in realtime or render them to wav.
   The realtime engine (PortAudio + NeuralAudio) processes your instrument input
   live with low latency — tones you audition aren't demos, they're your actual
   sound. USB interfaces verified; buffer/sample-rate/latency are tunable.
-- **Authentic amp modeling** — Built on Neural Amp Modeler (NAM), the
+- **Authentic amp modeling** — Built on [Neural Amp Modeler
+  (NAM)](https://www.tone3000.com/guides/neural-amp-modeler#what-is-nam), the
   community's most faithful amp-capture technology: every tone is a real amp
   through real mics, captured — not a modeled approximation.
+- **First-class NAM A2 support** — GigBuddy is built around TONE3000's **A2
+  architecture**, the next-generation NAM model format. A2's slimmable models
+  dial precision up or down on demand (quality 0–1), so the same capture runs
+  full-fidelity or lean enough for realtime play on modest hardware.
 - **Huge library, zero setup** — Browse TONE3000's community tone library live
-  from the TUI: thousands of NAM amp captures and cabinet IRs, searchable on
-  demand. No local database to build, nothing to manage.
+  from the TUI: thousands of NAM amp captures and [cabinet
+  IRs](https://www.tone3000.com/guides/neural-amp-modeler#what-s-the-difference-between-nam-and-ir-s),
+  searchable on demand. No local database to build, nothing to manage.
 - **Instant audition** — The realtime engine hot-swaps any amp or IR in ~0.3s.
   Select a tone and it's playing before you finish the thought — with your dry
   input or a reference file behind it.
