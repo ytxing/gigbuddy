@@ -10,6 +10,13 @@ the tones you like — then play through them in realtime or render them to wav.
 
 ## Features
 
+- **Play it like a real amp** — Plug your guitar or bass straight in and play.
+  The realtime engine (PortAudio + NeuralAudio) processes your instrument input
+  live with low latency — tones you audition aren't demos, they're your actual
+  sound. USB interfaces verified; buffer/sample-rate/latency are tunable.
+- **Authentic amp modeling** — Built on Neural Amp Modeler (NAM), the
+  community's most faithful amp-capture technology: every tone is a real amp
+  through real mics, captured — not a modeled approximation.
 - **Huge library, zero setup** — Browse TONE3000's community tone library live
   from the TUI: thousands of NAM amp captures and cabinet IRs, searchable on
   demand. No local database to build, nothing to manage.
@@ -25,11 +32,14 @@ the tones you like — then play through them in realtime or render them to wav.
   your guitar straight, and inspect full capture metadata in the detail pane.
 - **14 classic rigs out of the box** — Plexi, JCM800, Twin Reverb, AC30, Hiwatt,
   Dumble, Mesa… plus 4 bass presets (SVT, B-15, Bassman, GK). Auto-downloaded
-  and ready on first launch.
+  and ready on first launch — bare-amp captures come with brand-matched cabinet
+  IRs already wired in, so every rig sounds complete immediately.
 - **A real signal chain** — AMP + CAB nodes with gain / master / quality
   controls, live level meter, and a realtime engine you can also run headless.
 - **Offline render** — When you want a recording, not a rehearsal: export your
   chain to a wav file in one command.
+- **Free & open source** — MIT-licensed core stack, pure-API data source: no
+  subscriptions, no paid tone packs, no multi-gigabyte library to download.
 
 ## Install (macOS)
 
