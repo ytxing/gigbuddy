@@ -459,6 +459,32 @@ def test_cli_roundtrip(capsys, monkeypatch):
     assert library.main(["tone", "show", "99999"]) == 1
 
 
+def test_cli_without_command_opens_tui(monkeypatch):
+    calls = []
+    monkeypatch.setattr("tui.app.main", lambda argv=None: calls.append(argv))
+
+    assert library.main([]) == 0
+    assert calls == [[]]
+
+
+def test_cli_tui_forwards_arguments(monkeypatch):
+    calls = []
+    monkeypatch.setattr("tui.app.main", lambda argv=None: calls.append(argv))
+
+    tui_args = ["--in", "Input Mic", "--out", "Headphones", "--ch", "2",
+                "--theme", "dark", "--no-engine"]
+    assert library.main(["tui", *tui_args]) == 0
+    assert calls == [tui_args]
+
+
+def test_cli_direct_tui_flag_forwards_arguments(monkeypatch):
+    calls = []
+    monkeypatch.setattr("tui.app.main", lambda argv=None: calls.append(argv))
+
+    assert library.main(["--theme=dark", "--no-engine"]) == 0
+    assert calls == [["--theme=dark", "--no-engine"]]
+
+
 def test_cli_search_json(capsys, monkeypatch):
     monkeypatch.setattr(tone3000, "search", lambda q, **kw: [dict(SAMPLE)])
     library.main(["tone", "search", "fender", "--json"])

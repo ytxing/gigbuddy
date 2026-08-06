@@ -716,7 +716,7 @@ MUTED 作用于 master 输出，AMP/CAB bypass 作用于单个处理节点；两
 - v0.1.3 修订：红、绿、灰状态色固定；其他颜色跟随主题，并允许使用主题系统的语义派生色。
 - v0.1.2 修订：颜色规范改为语义 token 并补充对比度验收；其中“全部颜色由主题解析”已由 v0.1.3 修正。
 - v0.1.1 修订：Local/AMP/CAB Pack 中重复选择当前 tone 改为切换 bypass/恢复；Remote Pack 行为不变。
-- CLI 版本：`gigbuddy --version` 输出 `gigbuddy 0.1.0`。
+- CLI 版本：`gigbuddy --version` 输出 `gigbuddy 0.1.0a3`。
 - 交互目标发生变化时，先更新本文和对应验收，再修改实现。
 
 ## 13. 实现迁移清单

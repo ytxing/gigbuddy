@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.1.0-alpha.2 — 2026-08-06*
+*v0.1.0-alpha.3 — 2026-08-06*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive
@@ -12,57 +12,31 @@ fully MIT core stack.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    accTitle: GigBuddy runtime architecture
-    accDescr: External agents and the Textual tone library UI use the CLI, TONE3000 API, SQLite library, and JSON file handoff to control a PortAudio and NeuralAudio realtime engine.
-
-    subgraph clients ["🧭 Clients"]
-        claude_code["🤖 Claude Code + gigbuddy skill"]
-        pi_clients["🛠️ pi / other agents"]
-        gigbuddy_cli[["⚙️ gigbuddy CLI"]]
-        claude_code -->|commands| gigbuddy_cli
-        pi_clients -->|commands| gigbuddy_cli
-    end
-
-    subgraph library_ui ["🎛️ Tone library UI"]
-        browser["🔎 Browse / search / import"]
-        chain_control["🎚️ Chain control"]
-        level_meter["📈 Level meter"]
-    end
-
-    subgraph local_state ["💾 Local state"]
-        tone_db[("SQLite<br/>gigbuddy.db")]
-        live_chain[("live_chain.json")]
-        level_file[("level.json")]
-    end
-
-    subgraph realtime_engine ["⚡ Realtime engine"]
-        realtime_cli["🎚️ realtime_cli<br/>PortAudio + NeuralAudio"]
-    end
-
-    tone_api["🌐 TONE3000 API"]
-
-    tone_api -->|search / download| gigbuddy_cli
-    tone_api -->|remote search| browser
-    gigbuddy_cli -->|query / import| tone_db
-    tone_db -->|local rows| browser
-    browser -->|save imported tone| tone_db
-    gigbuddy_cli -->|write chain| live_chain
-    chain_control -->|select tone| live_chain
-    live_chain -->|hot-swap config| realtime_cli
-    realtime_cli -->|telemetry| level_file
-    level_file -->|refresh| level_meter
-
-    classDef actor fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
-    classDef process fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
-    classDef data fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#1f2937
-    classDef external fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#7c2d12
-
-    class claude_code,pi_clients actor
-    class gigbuddy_cli,browser,chain_control,level_meter,realtime_cli process
-    class tone_db,live_chain,level_file data
-    class tone_api external
+```
+                                          ┌────────────────────────────────┐
+                                          │ External clients                │
+                                          │ Claude Code + skill · pi · ...  │
+                                          └───────────────┬────────────────┘
+                                                          │ CLI commands
+                                                          ▼
+┌─────────────────────────────┐     ┌──────────────────────────────────────┐
+│ TONE3000 public API         │────▶│ gigbuddy CLI                        │
+│ search · metadata · models  │     │ tone · chain · preset                │
+└──────────────┬──────────────┘     └───────────────┬──────────────────────┘
+               │ remote search / import             │ query / write
+               ▼                                    ▼
+┌─────────────────────────────┐     ┌──────────────────────────────────────┐
+│ Textual tone library UI     │◄───▶│ Local state                          │
+│ browse · search · import    │     │ SQLite  data/gigbuddy.db             │
+│ chain control · level meter │     │ Files   live_chain.json · level.json │
+└─────────────────────────────┘     └──────────────────┬───────────────────┘
+                                                       │ --live / --level-file
+                                                       ▼
+                                      ┌──────────────────────────────────────┐
+                                      │ realtime_cli                         │
+                                      │ PortAudio + NeuralAudio              │
+                                      │ hot-swap model/IR · level telemetry  │
+                                      └──────────────────────────────────────┘
 ```
 
 - **Library DB** (`data/gigbuddy.db`): full TONE3000 metadata mirror — every search
@@ -76,18 +50,22 @@ flowchart LR
 ### One-command install (macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.2/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.3/scripts/install.sh | bash
 ```
 
 The installer creates an isolated environment under `~/.local/share/gigbuddy`,
 builds the audio engines, and exposes `gigbuddy` and `gigbuddy-tui` through
 `~/.local/bin`. Set `GIGBUDDY_HOME` or `GIGBUDDY_BIN_DIR` to use different paths.
 
+After installation, run `gigbuddy` to open the TUI and start the realtime engine. Use
+`gigbuddy tui --no-engine` when an engine is already running in another terminal.
+
 For a Python-only CLI install, `uv tool install git+https://github.com/ytxing/gigbuddy.git`
 is also possible, but it does not build the realtime engine and is not the full
 GigBuddy installation.
 
 ```bash
+# Manual/developer setup (the installer above already does this)
 # 1. Create the local Python environment (Python 3.11+)
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
@@ -99,7 +77,7 @@ python3 -m venv .venv
 # 3. Build the engine (needs clang++ and Homebrew PortAudio)
 ./cpp/build.sh
 
-# 4. Build the tone library from TONE3000
+# 4. Build the tone library from TONE3000 (the TUI also does this interactively)
 .venv/bin/gigbuddy tone search "fender super reverb"     # search TONE3000
 .venv/bin/gigbuddy tone import 19                        # download + persist metadata to DB
 .venv/bin/gigbuddy tone list                             # browse the local library

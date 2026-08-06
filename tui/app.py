@@ -1597,7 +1597,7 @@ class GigBuddyApp(App):
         self.notify(note)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="gigbuddy", description="GigBuddy tone-chain TUI")
     parser.add_argument("--in", dest="dev_in", default="",
                         help="input device name fragment (default: system default)")
@@ -1608,7 +1608,7 @@ def main() -> None:
                         help="engine already running externally (skip spawn)")
     parser.add_argument("--theme", default=None,
                         help="startup color theme (t cycles themes; default: built-in)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     GigBuddyApp(dev_in=args.dev_in, dev_out=args.dev_out, in_ch=args.ch,
                 spawn_engine=not args.no_engine, theme=args.theme).run()
 

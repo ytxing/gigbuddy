@@ -29,7 +29,7 @@ from uuid import uuid4
 
 import tone3000
 
-__version__ = "0.1.0a2"
+__version__ = "0.1.0a3"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1095,6 +1095,22 @@ def _fmt_show(t: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `gigbuddy` is the primary interactive entrypoint. Keep the import lazy so
+    # agent-facing CLI commands do not pay the Textual startup cost.
+    if not argv:
+        from tui.app import main as tui_main
+        tui_main([])
+        return 0
+    if argv[0] == "tui":
+        from tui.app import main as tui_main
+        tui_main(argv[1:])
+        return 0
+    if argv[0].split("=", 1)[0] in {"--in", "--out", "--ch", "--no-engine", "--theme"}:
+        from tui.app import main as tui_main
+        tui_main(argv)
+        return 0
+
     p = argparse.ArgumentParser(prog="gigbuddy", description="GigBuddy tone library CLI")
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
