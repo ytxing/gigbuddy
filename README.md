@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.1.0-alpha.3 — 2026-08-06*
+*v0.1.0-alpha.4 — 2026-08-06*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive
@@ -50,7 +50,7 @@ fully MIT core stack.
 ### One-command install (macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.4/scripts/install.sh | bash
 ```
 
 The installer creates an isolated environment under `~/.local/share/gigbuddy`,
@@ -63,6 +63,22 @@ After installation, run `gigbuddy` to open the TUI and start the realtime engine
 For a Python-only CLI install, `uv tool install git+https://github.com/ytxing/gigbuddy.git`
 is also possible, but it does not build the realtime engine and is not the full
 GigBuddy installation.
+
+### Uninstall
+
+The script asks separately whether to remove downloaded tones and local data. It
+leaves Homebrew PortAudio installed.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.4/scripts/uninstall.sh | bash
+```
+
+For a non-interactive uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.4/scripts/uninstall.sh | bash -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.4/scripts/uninstall.sh | bash -s -- --yes --keep-data
+```
 
 ```bash
 # Manual/developer setup (the installer above already does this)

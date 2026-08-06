@@ -12,6 +12,7 @@ third_party/*
 
 # macOS
 .DS_Store
+.gigbuddy-install
 
 # 本地临时
 /tmp/
