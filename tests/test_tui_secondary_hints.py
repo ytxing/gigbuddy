@@ -169,9 +169,8 @@ def test_chain_panel_does_not_leave_growth_gap_before_parameters():
     run(scenario())
 
 
-def test_chain_hint_has_no_model_switch_token():
-    """↑/↓ model switching is a keyboard action with no click target — the
-    hint must not carry a dead "model ↑↓" token (REQ-006)."""
+def test_chain_hint_exposes_both_model_switch_directions():
+    """Each displayed model direction must be its own clickable action."""
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -179,7 +178,9 @@ def test_chain_hint_has_no_model_switch_token():
             await pilot.pause()
             chain = app.query_one(ChainPanel)
             label = border_hint_label(chain)
-            assert "↑↓" not in label and "model" not in label
+            assert "↑/↓ model" not in label
+            assert "↑ model" in label
+            assert "↓ model" in label
             # 键名全部小写（d/space/s/l 才是真实绑定，D/Space 会误导）
             assert not any(c.isupper() for c in label)
 

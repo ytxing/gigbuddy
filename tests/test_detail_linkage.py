@@ -53,7 +53,7 @@ def _detail_empty(app) -> bool:
 
 
 def test_tone3000_highlight_drives_detail_and_enter(monkeypatch):
-    """TONE3000 行高亮 → detail 显示该行 tone；Enter 开安装二级页。"""
+    """TONE3000 行高亮 → detail 显示该行 tone；Enter 开远程详情。"""
     hits = _hits()
     monkeypatch.setattr("tui.library_panel.library.tone3000.search",
                         lambda query, page_size, **kwargs: [dict(h) for h in hits])
@@ -72,11 +72,14 @@ def test_tone3000_highlight_drives_detail_and_enter(monkeypatch):
             await pilot.press("down")
             await pilot.pause()
             assert "Remote 1" in _detail_text(app)
-            # Enter → 安装二级页
+            # v0.2.14: Enter first opens Remote Description; an uninstalled
+            # model row in Remote Pack is the Pack Install entry point.
             await pilot.press("enter")
             await pilot.pause(0.5)
-            from tui.install_screen import PackInstallScreen
-            assert isinstance(app.screen, PackInstallScreen)
+            pane = app.query_one(DetailPane)
+            assert app.screen.id == "_default"
+            assert pane._view_mode == "description"
+            assert pane._description_remote
 
     run(scenario())
 
@@ -109,8 +112,10 @@ def test_sort_roundtrip_keeps_detail_and_enter(monkeypatch):
             assert "Remote 0" in _detail_text(app)
             await pilot.press("enter")
             await pilot.pause(0.5)
-            from tui.install_screen import PackInstallScreen
-            assert isinstance(app.screen, PackInstallScreen)
+            pane = app.query_one(DetailPane)
+            assert app.screen.id == "_default"
+            assert pane._view_mode == "description"
+            assert pane._description_remote
 
     run(scenario())
 
@@ -152,9 +157,10 @@ def test_status_row_enter_retries_failed_search(monkeypatch):
 
     def failing_search(query, page_size, **kwargs):
         calls["n"] += 1
-        # 1/2 = 启动双预取（tone + creators，silent 失败无害），
-        # 3 = tab 首次进入重载 → 失败 → 表格显示提示行
-        if calls["n"] <= 3:
+        # 1 = 启动 TONE3000 预取，2 = tab 首次进入重载 → 失败，
+        # 3 = 提示行 Enter 重试成功。TOP CREATORS 使用独立 leaderboard
+        # endpoint，不会额外调用 tone search。
+        if calls["n"] <= 2:
             raise TimeoutError("simulated timeout")
         return [dict(_hits()[0])]
 
@@ -177,7 +183,7 @@ def test_status_row_enter_retries_failed_search(monkeypatch):
             # Enter 在提示行上 → 重试成功 → 行数据出现
             await pilot.press("enter")
             await pilot.pause(1.0)
-            assert calls["n"] == 4, "Enter 在提示行上应触发一次重试搜索"
+            assert calls["n"] == 3, "Enter 在提示行上应触发一次重试搜索"
             assert table.ordered_rows[0].key.value.startswith("remote:")
             assert not _detail_empty(app)
 
@@ -246,7 +252,7 @@ def test_creators_sort_select_reorders(monkeypatch):
             await pilot.click(app.query_one("#--content-tab-pane-creators"))
             await pilot.pause(1.5)
             # SORT 条在 creators tab 显示，默认 Most Tones
-            bar = app.query_one("#creator-filter-row")
+            bar = app.query_one("#creators-search-bar")
             assert bar.display
             sort_select = app.query_one("#sort-filter-creators")
             assert sort_select.value == "tones"
@@ -344,9 +350,9 @@ def test_creator_values_do_not_change_after_render(monkeypatch):
     run(scenario())
 
 
-def test_creator_filter_bar_docks_properly(monkeypatch):
-    """REQ-031 补充：creator-filter-row 有 dock 样式（高度 3，不占空白、
-    标签不下移）；SORT Select 正常显示。"""
+def test_creator_search_bar_docks_properly(monkeypatch):
+    """REQ-031 补充：creators SearchBar 保持固定一行，不占空白；
+    SORT Select 正常显示。"""
     page = [{"id": 100, "title": "A0", "gear": "amp", "downloads_count": 50,
              "username": "alice", "favorites_count": 5, "models_count": 3,
              "a1_models_count": 1, "a2_models_count": 1, "irs_count": 0}]
@@ -370,9 +376,9 @@ def test_creator_filter_bar_docks_properly(monkeypatch):
             await pilot.pause(0.5)
             await pilot.click(app.query_one("#--content-tab-pane-creators"))
             await pilot.pause(1.0)
-            bar = app.query_one("#creator-filter-row")
-            # dock 条高度 3（不占大块空白、不挤压标签栏）
-            assert bar.region.height == 3, f"filter bar height {bar.region.height}"
+            bar = app.query_one("#creators-search-bar")
+            # SearchBar 是固定一行，不占大块空白、不挤压标签栏。
+            assert bar.region.height == 1, f"search bar height {bar.region.height}"
             assert bar.display
             select = app.query_one("#sort-filter-creators")
             assert select.display
@@ -553,11 +559,12 @@ def test_creators_row_focus_and_profile_page(monkeypatch):
             await pilot.press("enter")
             await pilot.pause(1.5)
             assert app.query_one("#tone-search").value == "@bob"
-            # tone3000 往返后回 creators：光标行 0（alice）→ detail 跟随
+            # v0.2.14：view tab 独立保存 anchor，往返后恢复原 cursor
+            # （bob），而不是重置到第 0 行。
             await pilot.click(app.query_one("#--content-tab-pane-creators"))
             await pilot.pause(1.0)
-            assert app.query_one("#lib-table-creators").cursor_row == 0
-            assert "alice" in str(pane._marquee.content)
+            assert app.query_one("#lib-table-creators").cursor_row == 1
+            assert "bob" in str(pane._marquee.content)
             assert not _detail_empty(app)
 
     run(scenario())

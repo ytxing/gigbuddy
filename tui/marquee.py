@@ -34,6 +34,38 @@ _RICH_ANSI_COLORS = {
 MARQUEE_ENDPOINT_PAUSE_TICKS = 6
 
 
+def resolve_rich_style(style: str, variables: dict | None = None) -> str:
+    """Resolve Textual theme names into styles accepted by Rich.
+
+    Textual's built-in themes may expose a semantic color as ``ansi_green``;
+    Rich accepts ``green`` but rejects the Textual-prefixed spelling. This
+    helper is also used by widgets that build ``Text.from_markup`` directly,
+    bypassing MarqueeBar's normal markup resolver.
+    """
+    variables = variables or {}
+
+    def resolve(match: re.Match[str]) -> str:
+        value = variables.get(match.group(1))
+        if value is None:
+            return match.group(0)
+        value = str(value)
+        if value.startswith("auto"):
+            value = str(variables.get("foreground", "#ffffff"))
+        folded = value.casefold()
+        return _RICH_ANSI_COLORS.get(
+            folded,
+            "#ffffff" if folded == "ansi_default" else value,
+        )
+
+    resolved = re.sub(r"\$([A-Za-z0-9_-]+)", resolve, style)
+    return re.sub(
+        r"(?<![A-Za-z0-9_-])(ansi_(?:bright_)?(?:black|red|green|yellow|blue|magenta|cyan|white)|ansi_default)(?![A-Za-z0-9_-])",
+        lambda match: _RICH_ANSI_COLORS.get(
+            match.group(1).casefold(), "#ffffff"),
+        resolved,
+    )
+
+
 def _marquee_target(total: int, width: int, offset: int) -> int:
     """Return the cell offset for a ping-pong marquee phase."""
     travel = total - width
@@ -192,26 +224,7 @@ class MarqueeBar(Static):
         except Exception:
             variables = {}
 
-        def resolve(match: re.Match[str]) -> str:
-            value = variables.get(match.group(1))
-            if value is None:
-                return match.group(0)
-            # Textual's relative `auto 60%` / `auto 87%` colors are valid CSS
-            # but not valid Rich style definitions. The surrounding `dim`
-            # marker still supplies a useful muted treatment after resolving
-            # these to the current theme foreground.
-            if value.startswith("auto"):
-                value = variables.get("foreground", "#ffffff")
-            value = str(value)
-            # Textual's ANSI themes expose names such as ``ansi_green``.
-            # Rich markup uses ``green``/``bright_green`` instead, and raises
-            # MissingStyle when given the Textual spelling.
-            return _RICH_ANSI_COLORS.get(
-                value.casefold(),
-                "#ffffff" if value.casefold() == "ansi_default" else value,
-            )
-
-        return re.sub(r"\$([A-Za-z0-9_-]+)", resolve, style)
+        return resolve_rich_style(style, variables)
 
     def update(self, content: str | None = None, *args, **kwargs):
         """Keep Static.update callers compatible with the reactive content."""

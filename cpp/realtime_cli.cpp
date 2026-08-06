@@ -8,6 +8,8 @@
 //        --master X        输出音量（模型后，默认 1.0；高增益模型压到 0.3 防削波）
 //        --live FILE       热切换模式：监听 FILE（JSON: slots/gain/master/quality/input），
 //                          文件变化时运行时切换，音频不中断；
+//        --managed --control-file FILE
+//                          managed TUI 的候选链 preflight 控制通道；
 //                          input 键 = {source:"instrument"|"file", file:<wav>, state:"playing"|"paused"|"stopped", loop:bool}
 //                          干声文件输入源（替代乐器输入，试听用）：播放/暂停/停止/循环
 //        --level-file FILE 电平输出：0.1s 写 {"in":x,"out":y} 到 FILE（TUI 电平表用）
@@ -31,6 +33,7 @@
 #include <unistd.h>
 #endif
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -179,6 +182,15 @@ struct Ctx {
     // shared_ptr + atomic_load/atomic_store gives a complete chain swap.
     std::shared_ptr<PreparedChain> chain;
     std::atomic<uint64_t> runtimeRevision{0};
+    // Main-thread-only status consumed by the level telemetry writer.
+    std::string runtimeStatus = "unknown";
+    std::string runtimeSessionId;
+    std::string runtimeTransactionId;
+    uint64_t runtimeAckSequence = 0;
+    // Main-thread-only candidate retained from managed preflight. The live
+    // watcher consumes it when the matching transaction reaches the file.
+    std::shared_ptr<PreparedChain> managedPreparedChain;
+    std::string managedPreparedTransactionId;
     // 去咔哒状态机（fadeState/fadeReady 主线程与回调协作；fadePos 仅回调私有）：
     //   fadeState: 0=无 1=淡出(1→0) 2=淡入(0→1)；主线程只发 1，回调推进
     //   fadeReady: 1=已到静音点（回调置位）——主线程据此等待后再交换，
@@ -367,6 +379,9 @@ static bool resolve_asset_path(const std::string& raw, const char* allowedDir,
 static bool parse_slot_specs(const nlohmann::json& j, std::vector<SlotSpec>& slots,
                              std::string& error) {
     if (j.contains("slots")) {
+        if (j.contains("model") || j.contains("ir")) {
+            fprintf(stderr, "[live] warning: slots take precedence over legacy model/ir\n");
+        }
         if (!j.at("slots").is_array()) {
             error = "slots must be an array";
             return false;
@@ -381,7 +396,11 @@ static bool parse_slot_specs(const nlohmann::json& j, std::vector<SlotSpec>& slo
                 error = "slot must be an object";
                 return false;
             }
-            if (!item.contains("path") || item.at("path").is_null()) {
+            if (!item.contains("path")) {
+                error = "slot.path is required";
+                return false;
+            }
+            if (item.at("path").is_null()) {
                 slots.push_back(std::move(spec));
                 continue;
             }
@@ -549,6 +568,13 @@ static bool read_chain_revision(const nlohmann::json& j, uint64_t& revision,
     return false;
 }
 
+static std::string chain_transaction_id(const nlohmann::json& j) {
+    if (!j.is_object() || !j.contains("_transaction_id")
+        || !j.at("_transaction_id").is_string())
+        return {};
+    return j.at("_transaction_id").get<std::string>();
+}
+
 static std::vector<std::string> slot_signature(const std::vector<SlotSpec>& slots) {
     std::vector<std::string> signature;
     signature.reserve(slots.size());
@@ -617,8 +643,70 @@ static bool build_prepared_chain(const std::vector<SlotSpec>& slots, float quali
     return true;
 }
 
+// Managed TUI commits use this path before touching live_chain.json. It
+// validates the complete candidate and constructs every NAM/IR node, but does
+// not publish audio state or mutate the current chain.
+static bool preflight_chain(const nlohmann::json& j,
+                            NeuralAudio::NeuralModelLoader& loader,
+                            int sr, std::string& error,
+                            std::shared_ptr<PreparedChain>* preparedResult = nullptr,
+                            bool allowExternalPaths = false) {
+    if (!j.is_object()) {
+        error = "chain must be an object";
+        return false;
+    }
+    std::vector<SlotSpec> slots;
+    if (!parse_slot_specs(j, slots, error)
+        || !resolve_slot_specs(slots, allowExternalPaths, error))
+        return false;
+
+    float gain = 1.0f, master = 1.0f, quality = 1.0f;
+    if (!read_chain_number(j, "gain", 1.0f, 0.0f, 10.0f, gain, error)
+        || !read_chain_number(j, "master", 1.0f, 0.0f, 10.0f, master, error)
+        || !read_chain_number(j, "quality", 1.0f, 0.0f, 1.0f, quality, error))
+        return false;
+    bool mute = false;
+    if (j.contains("mute") && !j.at("mute").is_boolean()) {
+        error = "mute must be boolean";
+        return false;
+    }
+    if (j.contains("mute")) mute = j.at("mute").get<bool>();
+    uint64_t revision = 0;
+    if (!read_chain_revision(j, revision, error)) return false;
+    InputSpec input;
+    if (!parse_input_spec(j, allowExternalPaths, input, error)) return false;
+
+    if (input.isFile) {
+        std::error_code inputError;
+        const bool exists = std::filesystem::exists(input.path, inputError);
+        if (inputError) {
+            error = "dry input cannot be inspected: " + input.path;
+            return false;
+        }
+        if (exists) {
+            WavInput dryInput;
+            if (!dryInput.load(input.path, sr)) {
+                error = "dry input could not be loaded: " + input.path;
+                return false;
+            }
+        }
+    }
+
+    std::shared_ptr<PreparedChain> prepared;
+    if (!build_prepared_chain(slots, quality, revision, loader, sr,
+                              prepared, error))
+        return false;
+    if (preparedResult != nullptr) *preparedResult = prepared;
+    (void)gain;
+    (void)master;
+    (void)mute;
+    (void)input;
+    return true;
+}
+
 static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader& loader,
-                        Ctx& ctx, int sr, bool allowExternalPaths = false) {
+                        Ctx& ctx, int sr, bool allowExternalPaths = false,
+                        bool requireManagedPrepare = false) {
     if (!j.is_object()) {
         fprintf(stderr, "[live] chain must be an object\n");
         return false;
@@ -643,6 +731,11 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
             return false;
         }
         mute = j.at("mute").get<bool>();
+    } else if (master == 0.0f) {
+        // v0.1 represented MUTE by master=0. A v0.2 writer must include an
+        // explicit mute=false when it intentionally sets the parameter to 0.
+        master = 1.0f;
+        mute = true;
     }
     uint64_t revision = 0;
     if (!read_chain_revision(j, revision, error)) {
@@ -659,12 +752,36 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
     const auto signature = slot_signature(slots);
     const bool chainChanged = !current || current->signature != signature;
     std::shared_ptr<PreparedChain> next;
-    if (chainChanged) {
-        if (!build_prepared_chain(slots, quality, revision, loader, sr, next, error)) {
+    const auto transactionId = chain_transaction_id(j);
+    const bool matchesPreflight = (
+        !transactionId.empty()
+        && transactionId == ctx.managedPreparedTransactionId
+        && ctx.managedPreparedChain
+        && ctx.managedPreparedChain->revision == revision
+        && ctx.managedPreparedChain->quality == quality
+        && ctx.managedPreparedChain->signature == signature);
+    if (requireManagedPrepare && !matchesPreflight) {
+        fprintf(stderr,
+                "[live] managed chain rejected: candidate does not match prepared transaction\n");
+        return false;
+    }
+    if (matchesPreflight) {
+        next = std::move(ctx.managedPreparedChain);
+        ctx.managedPreparedTransactionId.clear();
+    } else if (chainChanged) {
+        if (!build_prepared_chain(slots, quality, revision, loader,
+                                  sr, next, error)) {
             fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
             return false;
+        } else {
+            ctx.managedPreparedChain.reset();
+            ctx.managedPreparedTransactionId.clear();
         }
     } else {
+        if (chain_transaction_id(j) == ctx.managedPreparedTransactionId) {
+            ctx.managedPreparedChain.reset();
+            ctx.managedPreparedTransactionId.clear();
+        }
         // Parameter/revision-only updates reuse the prepared nodes. Quality is
         // applied by the callback at the next block boundary, so the main
         // thread never mutates a model while it is being processed.
@@ -678,13 +795,28 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
 
     auto nextWav = std::atomic_load(&ctx.wavIn);
     const bool inputPathChanged = input.isFile && input.path != ctx.liveInputPath;
-    if (input.isFile && (inputPathChanged || !nextWav)) {
-        auto candidate = std::make_shared<WavInput>();
-        if (candidate->load(input.path, sr)) {
-            nextWav = std::move(candidate);
-        } else {
+    if (input.isFile) {
+        std::error_code inputError;
+        const bool exists = std::filesystem::exists(input.path, inputError);
+        if (inputError) {
+            fprintf(stderr, "[live] chain rejected: dry input cannot be inspected: %s\n",
+                    input.path.c_str());
+            return false;
+        }
+        if (!exists) {
+            // A legal but not-yet-downloaded dry input remains part of the
+            // chain. Keep the runtime stopped until the file becomes usable.
             nextWav.reset();
             fprintf(stderr, "[live] dry input unavailable: %s\n", input.path.c_str());
+        } else if (inputPathChanged || !nextWav) {
+            auto candidate = std::make_shared<WavInput>();
+            if (candidate->load(input.path, sr)) {
+                nextWav = std::move(candidate);
+            } else {
+                fprintf(stderr, "[live] chain rejected: dry input could not be loaded: %s\n",
+                        input.path.c_str());
+                return false;
+            }
         }
     }
     const bool sourceChanged = input.isFile != ctx.inIsFile.load(std::memory_order_relaxed);
@@ -695,6 +827,9 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
     // been prepared, so readers see either the old complete state or this one.
     std::atomic_store(&ctx.chain, next);
     ctx.runtimeRevision.store(revision, std::memory_order_release);
+    ctx.runtimeTransactionId = chain_transaction_id(j);
+    ++ctx.runtimeAckSequence;
+    ctx.runtimeStatus = "applied";
     std::atomic_store(&ctx.wavIn, nextWav);
     ctx.liveInputPath = input.isFile ? input.path : "";
     ctx.inIsFile.store(input.isFile, std::memory_order_release);
@@ -706,6 +841,33 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
     ctx.playState.store(effectiveState, std::memory_order_release);
     fprintf(stderr, "[live] chain revision %llu: %zu slot(s), %zu node(s)\n",
             (unsigned long long)revision, slots.size(), next->nodes.size());
+    return true;
+}
+
+static bool write_control_reply(const std::filesystem::path& path,
+                                const nlohmann::json& payload) {
+    const auto temporary = path.string() + ".engine.tmp";
+    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+    if (!stream) return false;
+    stream << payload.dump(2) << "\n";
+    stream.flush();
+    if (!stream) return false;
+    stream.close();
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::remove(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static bool read_text_file(const std::filesystem::path& path,
+                           std::string& content) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return false;
+    content.assign(std::istreambuf_iterator<char>(stream),
+                   std::istreambuf_iterator<char>());
     return true;
 }
 
@@ -979,29 +1141,93 @@ int main(int argc, char** argv) {
     const char* livePath = nullptr;
     const char* levelFile = nullptr;
     const char* recordOut = nullptr;
+    const char* controlPath = nullptr;
+    bool managedLive = false;
     if (argc >= 2 && !strcmp(argv[1], "--list")) listOnly = true;
     const char* modelPath = argv[1][0] == '-' ? nullptr : argv[1];
     // argv[2] 是 IR 路径；以 '-' 开头则视为 flag（无 IR 时 --in 等不会误判）
     const char* irPath = (modelPath && argc > 2 && argv[2][0] != '-') ? argv[2] : nullptr;
     int block = 256, sr = 48000;
     // 从 1 开始：model 可能是位置参数（argv[1]）也可能是 flag（--live 模式）；位置参数非 flag 自然跳过
+    auto next_arg = [&](int& index, const char* option) -> const char* {
+        if (index + 1 >= argc) {
+            fprintf(stderr, "%s requires a value\n", option);
+            return nullptr;
+        }
+        return argv[++index];
+    };
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--in")) { inName = argv[++i]; }
-        else if (!strcmp(argv[i], "--out")) { outName = argv[++i]; }
-        else if (!strcmp(argv[i], "--ch")) { inCh = atoi(argv[++i]); }
-        else if (!strcmp(argv[i], "--gain")) { gainArg = (float)atof(argv[++i]); }
-        else if (!strcmp(argv[i], "--master")) { masterArg = (float)atof(argv[++i]); }
-        else if (!strcmp(argv[i], "--live")) { livePath = argv[++i]; }
-        else if (!strcmp(argv[i], "--root")) { g_root = argv[++i]; g_rootExplicit = true; }
-        else if (!strcmp(argv[i], "--level-file")) { levelFile = argv[++i]; }
-        else if (!strcmp(argv[i], "--record-out")) { recordOut = argv[++i]; }
+        if (!strcmp(argv[i], "--in")) {
+            const char* value = next_arg(i, "--in");
+            if (!value) return 1;
+            inName = value;
+        }
+        else if (!strcmp(argv[i], "--out")) {
+            const char* value = next_arg(i, "--out");
+            if (!value) return 1;
+            outName = value;
+        }
+        else if (!strcmp(argv[i], "--ch")) {
+            const char* value = next_arg(i, "--ch");
+            if (!value) return 1;
+            inCh = atoi(value);
+        }
+        else if (!strcmp(argv[i], "--gain")) {
+            const char* value = next_arg(i, "--gain");
+            if (!value) return 1;
+            gainArg = (float)atof(value);
+        }
+        else if (!strcmp(argv[i], "--master")) {
+            const char* value = next_arg(i, "--master");
+            if (!value) return 1;
+            masterArg = (float)atof(value);
+        }
+        else if (!strcmp(argv[i], "--live")) {
+            const char* value = next_arg(i, "--live");
+            if (!value) return 1;
+            livePath = value;
+        }
+        else if (!strcmp(argv[i], "--managed")) { managedLive = true; }
+        else if (!strcmp(argv[i], "--control-file")) {
+            const char* value = next_arg(i, "--control-file");
+            if (!value) return 1;
+            controlPath = value;
+        }
+        else if (!strcmp(argv[i], "--root")) {
+            const char* value = next_arg(i, "--root");
+            if (!value) return 1;
+            g_root = value;
+            g_rootExplicit = true;
+        }
+        else if (!strcmp(argv[i], "--level-file")) {
+            const char* value = next_arg(i, "--level-file");
+            if (!value) return 1;
+            levelFile = value;
+        }
+        else if (!strcmp(argv[i], "--record-out")) {
+            const char* value = next_arg(i, "--record-out");
+            if (!value) return 1;
+            recordOut = value;
+        }
         else if (!strcmp(argv[i], "--list")) { listOnly = true; }
-        else if (!strcmp(argv[i], "--block")) { block = atoi(argv[++i]); }
-        else if (!strcmp(argv[i], "--sr")) { sr = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--block")) {
+            const char* value = next_arg(i, "--block");
+            if (!value) return 1;
+            block = atoi(value);
+        }
+        else if (!strcmp(argv[i], "--sr")) {
+            const char* value = next_arg(i, "--sr");
+            if (!value) return 1;
+            sr = atoi(value);
+        }
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') {
             if (block == 256) block = atoi(argv[i]);
             else sr = atoi(argv[i]);
         }
+    }
+    if (managedLive && !controlPath) {
+        fprintf(stderr, "--managed requires --control-file\n");
+        return 1;
     }
     if (!g_rootExplicit) {
         const auto executable = std::filesystem::path(executable_dir());
@@ -1029,6 +1255,9 @@ int main(int argc, char** argv) {
 
     Ctx ctx;
     ctx.scratch.assign(block, 0.0f);
+    ctx.runtimeSessionId = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()) + "-"
+        + std::to_string(reinterpret_cast<uintptr_t>(&ctx));
 
     // 统一错误退出：任何失败路径都 finalize 录制文件、关 stream、Terminate
     auto fail = [&](const char* msg, const char* detail = "") -> int {
@@ -1049,11 +1278,35 @@ int main(int argc, char** argv) {
 
     // 初始模型/IR：live 模式以配置文件为准，否则用命令行参数
     if (livePath) {
+        nlohmann::json initial;
         try {
-            if (!apply_chain(nlohmann::json::parse(std::ifstream(resolve_path(livePath))),
-                             loader, ctx, sr)) {
+            const auto initialPath = resolve_path(livePath);
+            std::ifstream initialFile(initialPath);
+            if (!initialFile) {
+                std::error_code fileError;
+                if (std::filesystem::exists(initialPath, fileError)
+                    || fileError) {
+                    return fail("live 配置无法打开", initialPath.c_str());
+                }
+                // A missing managed file means a valid direct-through chain,
+                // not a startup error. The next managed file update still
+                // has to pass the normal prepare handshake.
+                initial = nlohmann::json::object();
+                initial["slots"] = nlohmann::json::array();
+                initial["gain"] = 1.0f;
+                initial["master"] = 1.0f;
+                initial["quality"] = 1.0f;
+                initial["mute"] = false;
+                initial["revision"] = 0;
+            } else {
+                initial = nlohmann::json::parse(initialFile);
+            }
+            // Startup is always non-managed; managed updates begin only after
+            // a later candidate passes the prepare handshake.
+            if (!apply_chain(initial, loader, ctx, sr, false, false)) {
                 return fail("live 配置被拒绝");
             }
+            ctx.runtimeStatus = "applied";
         } catch (const std::exception& e) {
             return fail("live 配置解析失败", e.what());
         }
@@ -1122,21 +1375,132 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "提示: 弹奏时注意输入电平；监听建议走声卡耳机口（非蓝牙）\n");
     if (livePath) fprintf(stderr, "live 热切换模式: 监听 %s（改文件即时生效）\n", livePath);
+    if (livePath && managedLive)
+        fprintf(stderr, "managed live transaction acknowledgements enabled\n");
     fprintf(stderr, "电平监控（0.1 秒刷新，Ctrl+C 退出）:\n");
     signal(SIGINT, on_sigint);
-    std::filesystem::file_time_type lastWrite{};
+    std::string lastLivePayload;
+    std::string lastControlPayload;
+    std::filesystem::path controlReplyPath;
+    if (livePath) {
+        read_text_file(resolve_path(livePath), lastLivePayload);
+    }
+    if (controlPath) {
+        controlReplyPath = std::filesystem::path(resolve_path(controlPath));
+        // Python's sidecar is live_control.reply.json for a
+        // live_control.json request. Replace the request suffix instead of
+        // appending to it, so both ends use one deterministic channel name.
+        if (controlReplyPath.extension() == ".json") {
+            controlReplyPath.replace_filename(
+                controlReplyPath.stem().string() + ".reply.json");
+        } else {
+            controlReplyPath += ".reply.json";
+        }
+        read_text_file(resolve_path(controlPath), lastControlPayload);
+        if (managedLive) {
+            write_control_reply(controlReplyPath, {
+                {"status", "ready"},
+                {"session_id", ctx.runtimeSessionId},
+            });
+        }
+    }
     for (;;) {
         if (g_stop.load(std::memory_order_relaxed)) break;
         Pa_Sleep(100);
-        if (livePath) {
-            std::error_code ec;
-            auto t = std::filesystem::last_write_time(resolve_path(livePath), ec);
-            if (!ec && t != lastWrite) {
-                lastWrite = t;
+        if (controlPath && managedLive) {
+            std::string controlPayload;
+            if (read_text_file(resolve_path(controlPath), controlPayload)
+                && controlPayload != lastControlPayload) {
+                lastControlPayload = controlPayload;
+                ctx.managedPreparedChain.reset();
+                ctx.managedPreparedTransactionId.clear();
+                nlohmann::json response = {
+                    {"status", "rejected"},
+                    {"session_id", ctx.runtimeSessionId},
+                    {"transaction_id", ""},
+                    {"revision", 0},
+                    {"error", "invalid prepare request"},
+                };
+                std::string requestTransactionId;
                 try {
-                    apply_chain(nlohmann::json::parse(std::ifstream(resolve_path(livePath))),
-                                loader, ctx, sr);
-                } catch (...) { fprintf(stderr, "[live] 配置解析失败\n"); }
+                    const auto request = nlohmann::json::parse(controlPayload);
+                    std::string transactionId;
+                    if (request.contains("transaction_id")
+                        && request.at("transaction_id").is_string())
+                        transactionId = request.at("transaction_id").get<std::string>();
+                    requestTransactionId = transactionId;
+                    response["transaction_id"] = transactionId;
+                    const auto candidate = request.contains("candidate")
+                        ? request.at("candidate") : nlohmann::json::object();
+                    std::string operation;
+                    if (request.contains("operation")
+                        && request.at("operation").is_string())
+                        operation = request.at("operation").get<std::string>();
+                    uint64_t revision = 0;
+                    std::string revisionError;
+                    if (!candidate.is_object()
+                        || operation != "prepare"
+                        || transactionId.empty()) {
+                        response["error"] = "invalid prepare request";
+                    } else if (!read_chain_revision(candidate, revision,
+                                                     revisionError)) {
+                        response["transaction_id"] = transactionId;
+                        response["error"] = revisionError;
+                    } else {
+                        std::string error;
+                        std::shared_ptr<PreparedChain> preparedChain;
+                        const bool prepared = preflight_chain(
+                            candidate, loader, sr, error, &preparedChain);
+                        response["transaction_id"] = transactionId;
+                        response["revision"] = revision;
+                        response["status"] = prepared ? "prepared" : "rejected";
+                        if (prepared) {
+                            ctx.managedPreparedChain = std::move(preparedChain);
+                            ctx.managedPreparedTransactionId = transactionId;
+                            response.erase("error");
+                        } else {
+                            ctx.managedPreparedChain.reset();
+                            ctx.managedPreparedTransactionId.clear();
+                            response["error"] = error;
+                        }
+                    }
+                } catch (const std::exception& exception) {
+                    response["transaction_id"] = requestTransactionId;
+                    response["error"] = exception.what();
+                }
+                if (!write_control_reply(controlReplyPath, response))
+                    fprintf(stderr, "[live] cannot write managed prepare reply\n");
+            }
+        }
+        if (livePath) {
+            std::string livePayload;
+            if (read_text_file(resolve_path(livePath), livePayload)
+                && livePayload != lastLivePayload) {
+                lastLivePayload = livePayload;
+                bool applied = false;
+                nlohmann::json candidate;
+                try {
+                    candidate = nlohmann::json::parse(livePayload);
+                    applied = apply_chain(candidate, loader, ctx, sr,
+                                          false, managedLive);
+                } catch (...) {
+                    fprintf(stderr, "[live] 配置解析失败\n");
+                }
+                if (applied) {
+                    // apply_chain published the complete runtime candidate and
+                    // recorded its transaction identity/ack sequence.
+                } else {
+                    uint64_t attemptedRevision = 0;
+                    std::string revisionError;
+                    if (!candidate.is_null())
+                        read_chain_revision(candidate, attemptedRevision,
+                                            revisionError);
+                    ctx.runtimeRevision.store(attemptedRevision,
+                                              std::memory_order_release);
+                    ctx.runtimeTransactionId = chain_transaction_id(candidate);
+                    ctx.runtimeStatus = "rejected";
+                    ++ctx.runtimeAckSequence;
+                }
             }
         }
         const float inL = ctx.inPeak.load(std::memory_order_relaxed);
@@ -1163,8 +1527,20 @@ int main(int argc, char** argv) {
             if (lf) {
                 const char* ps = ctx.playState.load() == 1 ? "playing"
                                : ctx.playState.load() == 2 ? "paused" : "stopped";
-                fprintf(lf, "{\"in\":%.6f,\"out\":%.6f,\"play_state\":\"%s\",\"play_pos\":%.3f}\n",
-                        inL, outL, ps, ctx.playPosSec.load());
+                nlohmann::json telemetry = {
+                    {"in", inL},
+                    {"out", outL},
+                    {"play_state", ps},
+                    {"play_pos", ctx.playPosSec.load()},
+                    {"runtime_session_id", ctx.runtimeSessionId},
+                    {"runtime_revision", ctx.runtimeRevision.load(
+                        std::memory_order_acquire)},
+                    {"runtime_status", ctx.runtimeStatus},
+                    {"runtime_transaction_id", ctx.runtimeTransactionId},
+                    {"runtime_ack_seq", ctx.runtimeAckSequence},
+                };
+                const auto serialized = telemetry.dump();
+                fprintf(lf, "%s\n", serialized.c_str());
                 fclose(lf);
                 rename(tmp, levelFile);
             }

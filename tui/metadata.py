@@ -3,15 +3,19 @@ from io import StringIO
 import re
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 from rich import box
 from rich.console import Console, Group
+from rich.markup import escape as rich_escape
 from rich.table import Table
 from rich.text import Text
 from textual.content import Content
 from textual.selection import Selection
 from textual.visual import RenderOptions, RichVisual, Visual
 from textual.widgets import Static
+
+from .marquee import resolve_rich_style
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
@@ -132,12 +136,21 @@ def theme_colors(app) -> dict[str, str]:
     (not hex), which Rich cannot use — so field falls back to the foreground.
     """
     v = app.theme_variables or app.get_css_variables()
+
+    def rich_color(value, fallback: str) -> str:
+        resolved = resolve_rich_style(str(value or fallback), v)
+        if resolved.casefold().startswith("auto"):
+            resolved = resolve_rich_style(
+                str(v.get("foreground") or fallback), v)
+        return resolved
+
     return {
-        "header": v.get("primary") or DEFAULT_COLORS["header"],
-        "section": v.get("accent") or DEFAULT_COLORS["section"],
-        "field": v.get("field") or v.get("foreground") or DEFAULT_COLORS["field"],
-        "value": v.get("success") or DEFAULT_COLORS["value"],
-        "warn": v.get("warning") or DEFAULT_COLORS["warn"],
+        "header": rich_color(v.get("primary"), DEFAULT_COLORS["header"]),
+        "section": rich_color(v.get("accent"), DEFAULT_COLORS["section"]),
+        "field": rich_color(
+            v.get("field") or v.get("foreground"), DEFAULT_COLORS["field"]),
+        "value": rich_color(v.get("success"), DEFAULT_COLORS["value"]),
+        "warn": rich_color(v.get("warning"), DEFAULT_COLORS["warn"]),
     }
 
 
@@ -147,6 +160,12 @@ def _value(value, fallback: str = "-") -> str:
     if isinstance(value, (list, tuple)):
         return ", ".join(str(item) for item in value) or fallback
     return str(value)
+
+
+def _link_markup(href: str, label: str) -> str:
+    """Build a link while keeping external text out of Rich tag syntax."""
+    encoded_href = quote(str(href), safe=":/?&=#-_.@%")
+    return f"[link={encoded_href}]{rich_escape(str(label))}[/]"
 
 
 def _compact_path(value: str | None, limit: int = 76) -> str:
@@ -237,17 +256,18 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
 
     last_section = None
 
-    def row(section: str, field: str, value, *, style: str | None = None) -> None:
+    def row(section: str, field: str, value, *, style: str | None = None,
+            markup: bool = False) -> None:
         nonlocal last_section
         if section != last_section:
             if last_section is not None:
                 table.add_section()
             table.add_row(Text(section, style=f"bold {colors['section']}"), "")
             last_section = section
-        # from_markup (not Text()) so [link=search:...] cells render as links
-        # instead of showing the literal markup
+        rendered = (Text.from_markup(_value(value), style=style)
+                    if markup else Text(_value(value), style=style))
         table.add_row(Text(field, style=f"bold {colors['field']}"),
-                      Text.from_markup(_value(value), style=style))
+                      rendered)
 
     def model_rows() -> None:
         local_path = model.get("local_path")
@@ -257,7 +277,8 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
         row("FILE", "Architecture", model.get("architecture"))
         if model.get("model_url"):
             row("SOURCE", "Model source",
-                f"[link={model['model_url']}]Open model source[/]")
+                _link_markup(model["model_url"], "Open model source"),
+                markup=True)
         row("FILE", "Local path", _compact_path(local_path))
 
     # The picker is about the focused file, so put its fields first.
@@ -272,10 +293,11 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
         if not condensed:
             author = tone.get("username")
             if author:
-                badge = (" [b $success]✓[/]"
+                badge = (f" [b {colors['value']}]✓[/]"
                          if tone3000.is_verified(author) else "")
                 row("IDENTITY", "Author",
-                    f"[link=search:author:{author}]@{author}[/]{badge}")
+                    _link_markup(f"search:author:{author}", f"@{author}") + badge,
+                    markup=True)
             else:
                 row("IDENTITY", "Author", "?")
             row("IDENTITY", "Type", tone.get("gear"))
@@ -283,13 +305,13 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
         url = tone3000_url(tone)
         if url:
             row("SOURCE", "TONE3000",
-                f"[link={url}]Open tone page[/]")
+                _link_markup(url, "Open tone page"), markup=True)
 
         if tone.get("tags") or tone.get("makes"):
             tags = tone.get("tags") or []
             tag_links = ", ".join(
-                f"[link=search:tag:{t}]{t}[/]" for t in tags)
-            row("CLASSIFICATION", "Tags", tag_links or "")
+                _link_markup(f"search:tag:{t}", str(t)) for t in tags)
+            row("CLASSIFICATION", "Tags", tag_links or "", markup=True)
             row("CLASSIFICATION", "Makes", tone.get("makes"))
 
         if not condensed and any(
@@ -321,7 +343,7 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
         return Group(table, Text(""),
                      Text("DESCRIPTION", style=f"bold {colors['section']}"),
                      Text(""),
-                     Text.from_markup(_value(tone["description"])))
+                     Text(_value(tone["description"])))
     return table
 
 
@@ -335,7 +357,7 @@ def description_only(tone: dict | None = None, model: dict | None = None,
     return Group(
         Text("DESCRIPTION", style=f"bold {colors['section']}"),
         Text(""),
-        Text.from_markup(_value(description, "No description available.")),
+        Text(_value(description, "No description available.")),
     )
 
 
@@ -345,7 +367,7 @@ def preset_metadata_table(preset: dict, resolved: dict, *, active: bool = False,
     """Render a preset with the same visual grammar as tone metadata.
 
     Presets are chain snapshots rather than tones, so the sections emphasize
-    identity, signal route, and the three live controls. Resolved paths are
+    identity, ordered Slots, and the three live controls. Resolved paths are
     reduced to filenames here; the full path remains available through the
     CLI and the copied metadata view.
     colors: palette resolved from the active theme (theme_colors).
@@ -375,14 +397,7 @@ def preset_metadata_table(preset: dict, resolved: dict, *, active: bool = False,
             table.add_row(Text(section, style=f"bold {colors['section']}"), "")
             last_section = section
         table.add_row(Text(field, style=f"bold {colors['field']}"),
-                      Text.from_markup(_value(value), style=style))
-
-    def component(key: str, fallback: str) -> str:
-        id_key = "model_id" if key == "model" else f"{key}_model_id"
-        model_id = chain.get(id_key)
-        if model_id is not None:
-            return f"#{model_id}"
-        return fallback
+                      Text(_value(value), style=style))
 
     def control(key: str) -> str:
         value = resolved.get(key, chain.get(key, 1.0))
@@ -400,10 +415,26 @@ def preset_metadata_table(preset: dict, resolved: dict, *, active: bool = False,
     if updated:
         row("PRESET", "Updated", updated)
 
-    row("ROUTE", "AMP", component("model", "external"),
-        style=f"bold {colors['value']}")
-    row("ROUTE", "IR", component("ir", "bypass"),
-        style=f"bold {colors['value']}")
+    slots = chain.get("slots") if isinstance(chain.get("slots"), list) else []
+    resolved_slots = (resolved.get("slots")
+                      if isinstance(resolved.get("slots"), list) else [])
+    if not slots:
+        row("SLOTS", "01–06", "NONE", style=f"bold {colors['value']}")
+    else:
+        for index, slot in enumerate(slots):
+            slot = slot if isinstance(slot, dict) else {}
+            resolved_slot = (resolved_slots[index]
+                             if index < len(resolved_slots)
+                             and isinstance(resolved_slots[index], dict) else {})
+            path = resolved_slot.get("path") or slot.get("path")
+            model_id = slot.get("model_id")
+            if path:
+                value = f"#{model_id} {Path(str(path)).name}" \
+                    if model_id is not None else Path(str(path)).name
+            else:
+                value = "NONE"
+            row("SLOTS", f"{index + 1:02d}", value,
+                style=f"bold {colors['value']}")
 
     row("CONTROLS", "gain", control("gain"), style=f"bold {colors['section']}")
     row("CONTROLS", "master", control("master"), style=f"bold {colors['section']}")

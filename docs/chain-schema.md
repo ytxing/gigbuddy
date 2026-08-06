@@ -1,4 +1,9 @@
-# GigBuddy 音色链 DSL v0.1
+# GigBuddy 音色链 DSL v0.1（Legacy）
+
+> 本文只描述离线渲染和旧版扁平链格式。当前 TUI、CLI live chain 和实时引擎
+> 使用 `slots[]` 的 v0.2.14 协议；以
+> `docs/ui-interaction-spec-v0.2.md` 和 `docs/adr/0001-slots-chain-protocol.md`
+> 为准。旧 `model`/`ir` 只保留读取兼容。
 
 对齐 LLM2Fx-Tools 的"效果类型+顺序+参数"可执行链表示；MVP 先支持 amp + cab_ir 两个节点类型，效果器节点（comp/od/delay/reverb/mod）为二期预留（接 pedalboard 后启用）。
 

@@ -20,9 +20,11 @@ CLI:
 import argparse
 import json
 import math
+import os
 import shutil
 import sqlite3
 import sys
+import threading
 import warnings
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -40,9 +42,9 @@ ROOT = Path(__file__).resolve().parent.parent
 def _to_rel_path(path: str) -> str:
     """存储用（REQ-035 portable）：项目根内的路径 → 相对根（data/...）；
     根外路径（自定义外部文件）保持绝对。"""
-    p = Path(path)
+    p = Path(_to_abs_path(path)).resolve(strict=False)
     try:
-        return str(p.resolve().relative_to(ROOT.resolve()))
+        return p.relative_to(ROOT.resolve(strict=False)).as_posix()
     except ValueError:
         return str(p)
 
@@ -74,19 +76,25 @@ def _to_abs_path(path: str) -> str:
     """
     p = Path(path)
     if not p.is_absolute():
-        return str(ROOT / p)
+        return str((ROOT / p).resolve(strict=False))
     try:
-        if not p.resolve().is_relative_to(ROOT.resolve()):
-            idx = str(p).index("data/tones/")
-            rebased = ROOT / str(p)[idx:]
+        resolved = p.resolve(strict=False)
+        if not resolved.is_relative_to(ROOT.resolve(strict=False)):
+            idx = str(resolved).find("data/tones/")
+            if idx < 0:
+                return str(resolved)
+            rebased = (ROOT / str(resolved)[idx:]).resolve(strict=False)
             if rebased.exists():
                 return str(rebased)
-    except ValueError:
-        pass
-    return str(p)
+        return str(resolved)
+    except OSError:
+        return str(p)
 DB_FILE = ROOT / "data" / "gigbuddy.db"
 CHAIN_FILE = ROOT / "data" / "live_chain.json"  # same path as tui/live.py (engine protocol)
 TONES_DIR = ROOT / "data" / "tones"             # same as tui/live.py
+
+_IMPORT_LOCKS: dict[str, threading.Lock] = {}
+_IMPORT_LOCKS_GUARD = threading.Lock()
 
 # All 23 TONE3000 search fields (minus search-level `total_count`) + 2 local columns.
 TONE_COLUMNS = [
@@ -207,6 +215,8 @@ def upsert_tone(conn: sqlite3.Connection, row: dict, *, commit: bool = True) -> 
     """
     row = {k: row.get(k) for k in TONE_COLUMNS}
     row["imported_at"] = datetime.now(timezone.utc).isoformat()
+    if row.get("local_dir"):
+        row["local_dir"] = _to_rel_path(row["local_dir"])
     for c in JSON_COLUMNS:
         if isinstance(row.get(c), (list, dict)):
             row[c] = json.dumps(row[c], ensure_ascii=False)
@@ -371,8 +381,17 @@ def _uninstall_plan_for_models(models: list[dict]) -> dict:
         ch = preset.get("chain")
         if not isinstance(ch, dict):
             continue
-        if any(slot.get("model_id") in model_ids
-               for slot in ch.get("slots", []) if isinstance(slot, dict)):
+        if any(
+            isinstance(slot, dict)
+            and (
+                slot.get("model_id") in model_ids
+                or (
+                    slot.get("path")
+                    and _to_abs_path(slot["path"]) in paths
+                )
+            )
+            for slot in ch.get("slots", [])
+        ):
             preset_names.append(preset["name"])
     root = TONES_DIR.resolve()
     outside_paths = []
@@ -509,9 +528,13 @@ def _uninstall_files(plan: dict, *, allow_preset_references: bool,
                 shutil.move(str(target), str(source))
         shutil.rmtree(trash_dir, ignore_errors=True)
         raise
+    removed_model_ids = [int(item["model_id"]) for item in manifest["files"]]
+    removed_tone_ids = sorted({int(item["tone_id"]) for item in manifest["files"]})
     return {
         **plan,
         "removed": len(moved),
+        "removed_model_ids": removed_model_ids,
+        "removed_tone_ids": removed_tone_ids,
         "missing": len(manifest["missing"]),
         "trash_dir": str(trash_dir),
     }
@@ -546,6 +569,69 @@ def local_uninstall_models(model_ids: list[int], *,
 
 
 # ---- import ---------------------------------------------------------------
+
+def _import_lock(directory: Path) -> threading.Lock:
+    """Serialize imports targeting one tone directory within this process."""
+    key = str(directory.resolve(strict=False))
+    with _IMPORT_LOCKS_GUARD:
+        return _IMPORT_LOCKS.setdefault(key, threading.Lock())
+
+
+def _seed_import_directory(source: Path, staging: Path) -> None:
+    """Reuse existing files without making the staging directory shared."""
+    if not source.exists():
+        return
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        target = staging / path.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(path, target)
+        except OSError:
+            # Some filesystems do not allow hard links; a private copy keeps
+            # the staging contract while retaining idempotent imports.
+            shutil.copy2(path, target)
+
+
+def _publish_import_files(paths: list[dict], staging: Path,
+                          destination: Path) -> tuple[list[dict], list[Path]]:
+    """Publish only this import's staged artifacts and return owned files."""
+    published: list[Path] = []
+    records: list[dict] = []
+    try:
+        for source_record in paths:
+            record = dict(source_record)
+            source = Path(_to_abs_path(record["local_path"]))
+            try:
+                relative = source.relative_to(staging)
+            except ValueError:
+                # Keep compatibility with lightweight download test doubles
+                # that return a path without actually writing the artifact.
+                relative = Path(source.name)
+            staged = staging / relative
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if staged.is_file():
+                if target.exists():
+                    staged.unlink()
+                else:
+                    os.replace(staged, target)
+                    published.append(target)
+            record["local_path"] = str(target)
+            records.append(record)
+    except Exception:
+        _remove_owned_files(published)
+        raise
+    return records, published
+
+
+def _remove_owned_files(paths: list[Path]) -> None:
+    for path in reversed(paths):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 def backfill_tone_usernames(*, quiet: bool = True) -> int:
     """历史数据回填：username 为占位（'tone3000'）或空的 tone 重新联查补真名。
@@ -593,21 +679,35 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
     is_ir = (row.get("gear") == "cab")
     slug = tone3000.slugify(row.get("title"), 40)
     dest = TONES_DIR / f"{tone_id}-{slug}"
-    paths = tone3000.download(tone_id, dest, tag=slug,
-                              a2_only=not is_ir, ext="wav" if is_ir else None,
-                              return_paths=True, progress=progress, quiet=quiet,
-                              model_ids=model_ids)
-    row["local_dir"] = _to_rel_path(str(dest))   # REQ-035 portable
-    with connect() as conn:
-        upsert_tone(conn, row, commit=False)
-        for m in paths:
-            upsert_model(conn, {
-                "id": m["id"], "tone_id": tone_id, "model_url": m["model_url"],
-                "name": m.get("name"),
-                "architecture": (m["model_json"] or {}).get("architecture") or "IR",
-                "local_path": m["local_path"],
-            }, commit=False)
-        conn.commit()
+    staging = TONES_DIR / f".{dest.name}.import-{uuid4().hex}"
+    with _import_lock(dest):
+        staging.mkdir(parents=True, exist_ok=False)
+        published: list[Path] = []
+        try:
+            _seed_import_directory(dest, staging)
+            paths = tone3000.download(tone_id, staging, tag=slug,
+                                      a2_only=not is_ir, ext="wav" if is_ir else None,
+                                      return_paths=True, progress=progress, quiet=quiet,
+                                      model_ids=model_ids)
+            dest.mkdir(parents=True, exist_ok=True)
+            paths, published = _publish_import_files(paths, staging, dest)
+            row["local_dir"] = _to_rel_path(str(dest))   # REQ-035 portable
+            with connect() as conn:
+                upsert_tone(conn, row, commit=False)
+                for m in paths:
+                    upsert_model(conn, {
+                        "id": m["id"], "tone_id": tone_id, "model_url": m["model_url"],
+                        "name": m.get("name"),
+                        "architecture": (m["model_json"] or {}).get("architecture") or "IR",
+                        "local_path": m["local_path"],
+                    }, commit=False)
+                conn.commit()
+        except Exception:
+            _remove_owned_files(published)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
     if not quiet:
         print(f"Imported tone {tone_id}: {len(paths)} model file(s) -> {TONES_DIR}")
     return get_tone(tone_id)
@@ -616,15 +716,20 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
 # ---- chain file (canonical v0.2 engine protocol) --------------------------
 
 def chain_get() -> dict:
-    """Current chain config ({} if missing/broken).
+    """Return the current chain, treating only a missing file as empty.
 
     Return canonical ``slots[]`` with absolute in-memory paths; legacy
     ``model/ir`` is read-only normalized by the protocol boundary.
+
+    A present but malformed chain must remain an error.  Returning ``{}`` for
+    that case makes callers such as ``preset_save`` and uninstall dependency
+    checks silently operate on a fake zero-Slot chain.
     """
     try:
-        return chain_protocol.read_chain_file(CHAIN_FILE, root=ROOT)
-    except (OSError, chain_protocol.ChainProtocolError):
+        CHAIN_FILE.stat()
+    except FileNotFoundError:
         return {}
+    return chain_protocol.read_chain_file(CHAIN_FILE, root=ROOT)
 
 
 def chain_set(cfg: dict) -> None:
@@ -918,6 +1023,28 @@ def preset_get(name: str) -> dict | None:
         return _preset_row(row) if row else None
 
 
+def preset_get_by_id(preset_id: int) -> dict | None:
+    """Return one Preset by its immutable SQLite identity."""
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError("preset id must be an integer")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM presets WHERE id = ?", (preset_id,)
+        ).fetchone()
+        return _preset_row(row) if row else None
+
+
+def _preset_id_for_name(name: str) -> int:
+    """Resolve a compatibility name once, then let mutations use the id."""
+    preset = preset_get(name)
+    if not preset:
+        raise ValueError(f"Preset '{name}' not found.")
+    preset_id = preset.get("id")
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError(f"Preset '{name}' has no stable id.")
+    return preset_id
+
+
 def preset_list() -> list[dict]:
     """All Presets, newest first; invalid rows remain inspectable."""
     with connect() as conn:
@@ -938,43 +1065,118 @@ def preset_delete(name: str) -> bool:
         return cur.rowcount > 0
 
 
+def preset_delete_by_id(preset_id: int) -> dict[str, object]:
+    """Delete one immutable preset row and report stale targets explicitly.
+
+    The TUI captures the SQLite id when opening confirmation.  Rechecking and
+    deleting by that id prevents an external delete/recreate race from
+    deleting a different preset that happens to reuse the old name.
+    """
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError("preset id must be an integer")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM presets WHERE id = ?", (preset_id,)
+        ).fetchone()
+        if row is None:
+            return {"id": preset_id, "name": None, "deleted": False,
+                    "stale": True}
+        name = row["name"]
+        cur = conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
+        active = conn.execute(
+            "SELECT value FROM settings WHERE key='active_preset'"
+        ).fetchone()
+        if cur.rowcount and active and active["value"] == name:
+            conn.execute("DELETE FROM settings WHERE key='active_preset'")
+        conn.commit()
+        return {"id": preset_id, "name": name, "deleted": cur.rowcount > 0,
+                "stale": cur.rowcount == 0}
+
+
 def preset_rename(old_name: str, new_name: str) -> dict:
-    """Rename a preset and keep the active pointer attached to it."""
+    """Compatibility wrapper; the actual mutation is id-scoped."""
+    return preset_rename_by_id(_preset_id_for_name(old_name), new_name)
+
+
+def preset_rename_by_id(preset_id: int, new_name: str) -> dict:
+    """Rename exactly the captured Preset row and keep active state attached."""
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError("preset id must be an integer")
     new_name = new_name.strip()
     if not new_name:
         raise ValueError("Preset name cannot be empty.")
     now = datetime.now(timezone.utc).isoformat()
     with connect() as conn:
-        if not conn.execute("SELECT 1 FROM presets WHERE name = ?", (old_name,)).fetchone():
-            raise ValueError(f"Preset '{old_name}' not found.")
+        row = conn.execute(
+            "SELECT name FROM presets WHERE id = ?", (preset_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Preset id {preset_id} no longer exists.")
+        old_name = row["name"]
         if old_name != new_name and conn.execute(
                 "SELECT 1 FROM presets WHERE name = ?", (new_name,)).fetchone():
             raise ValueError(f"Preset '{new_name}' already exists.")
         conn.execute(
-            "UPDATE presets SET name = ?, updated_at = ? WHERE name = ?",
-            (new_name, now, old_name),
+            "UPDATE presets SET name = ?, updated_at = ? WHERE id = ?",
+            (new_name, now, preset_id),
         )
         conn.execute(
             "UPDATE settings SET value = ? WHERE key = 'active_preset' AND value = ?",
             (new_name, old_name),
         )
         conn.commit()
-    return preset_get(new_name)
+    return preset_get_by_id(preset_id)
 
 
 def preset_update_note(name: str, note: str | None) -> dict:
-    """Replace a preset note without changing its chain snapshot."""
+    """Compatibility wrapper; the actual mutation is id-scoped."""
+    return preset_update_note_by_id(_preset_id_for_name(name), note)
+
+
+def preset_update_note_by_id(preset_id: int, note: str | None) -> dict:
+    """Replace one captured Preset note without changing its chain snapshot."""
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError("preset id must be an integer")
     now = datetime.now(timezone.utc).isoformat()
     note = _preset_note_value(note)
     with connect() as conn:
         cur = conn.execute(
-            "UPDATE presets SET note = ?, updated_at = ? WHERE name = ?",
-            (note, now, name),
+            "UPDATE presets SET note = ?, updated_at = ? WHERE id = ?",
+            (note, now, preset_id),
         )
         if not cur.rowcount:
-            raise ValueError(f"Preset '{name}' not found.")
+            raise ValueError(f"Preset id {preset_id} no longer exists.")
         conn.commit()
-    return preset_get(name)
+    return preset_get_by_id(preset_id)
+
+
+def preset_update_draft(name: str, chain: dict, note: str | None = None) -> dict:
+    """Compatibility wrapper; the actual mutation is id-scoped."""
+    return preset_update_draft_by_id(_preset_id_for_name(name), chain, note)
+
+
+def preset_update_draft_by_id(preset_id: int, chain: dict,
+                              note: str | None = None) -> dict:
+    """Persist a Preset Edit draft for exactly one captured row.
+
+    The draft uses the same canonical ``slots[]`` shape as ``preset_save``;
+    resolving files is intentionally deferred to ``preset_load`` so an edit
+    can retain a visible missing reference for later repair.
+    """
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError("preset id must be an integer")
+    canonical = _canonical_preset_chain(chain)
+    stored_note = _preset_note_value(note)
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE presets SET note = ?, chain_json = ?, updated_at = ? "
+            "WHERE id = ?",
+            (stored_note, json.dumps(canonical, ensure_ascii=False), now, preset_id),
+        )
+        if not cur.rowcount:
+            raise ValueError(f"Preset id {preset_id} no longer exists.")
+        conn.commit()
+    return preset_get_by_id(preset_id)
 
 
 def _validate_preset_file(path: str, index: int) -> str:
@@ -1047,16 +1249,26 @@ def _resolved_preset_chain(preset: dict) -> dict:
 
 def preset_resolved_chain(name: str) -> dict:
     """Return a preset chain with library IDs resolved to current local paths."""
-    p = preset_get(name)
+    return preset_resolved_chain_by_id(_preset_id_for_name(name))
+
+
+def preset_resolved_chain_by_id(preset_id: int) -> dict:
+    """Resolve the captured Preset row without falling back to its name."""
+    p = preset_get_by_id(preset_id)
     if not p:
-        raise ValueError(f"Preset '{name}' not found.")
+        raise ValueError(f"Preset id {preset_id} no longer exists.")
     return _resolved_preset_chain(p)
 
 
-def preset_is_dirty(name: str | None = None, chain: dict | None = None) -> bool:
+def preset_is_dirty(name: str | None = None, chain: dict | None = None,
+                    *, preset_id: int | None = None) -> bool:
     """Whether the live chain differs from a Preset's effective Slot snapshot."""
-    name = name or preset_current()
-    p = preset_get(name) if name else None
+    if preset_id is not None:
+        p = preset_get_by_id(preset_id)
+        name = p.get("name") if p else None
+    else:
+        name = name or preset_current()
+        p = preset_get(name) if name else None
     if not p:
         return True
     current = chain_get() if chain is None else chain
@@ -1074,10 +1286,17 @@ def preset_is_dirty(name: str | None = None, chain: dict | None = None) -> bool:
 
 
 def preset_load(name: str) -> dict | None:
-    """Atomically resolve and apply a whole Preset Slot snapshot."""
-    p = preset_get(name)
+    """Compatibility wrapper; the actual load is id-scoped."""
+    return preset_load_by_id(_preset_id_for_name(name))
+
+
+def preset_load_by_id(preset_id: int) -> dict | None:
+    """Atomically resolve and apply exactly one captured Preset snapshot."""
+    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
+        raise ValueError("preset id must be an integer")
+    p = preset_get_by_id(preset_id)
     if not p:
-        raise ValueError(f"Preset '{name}' not found.")
+        raise ValueError(f"Preset id {preset_id} no longer exists.")
     resolved = _resolved_preset_chain(p)
     # Resolve every Slot before constructing or writing the replacement. A
     # missing later Slot must leave the current live file untouched.
@@ -1092,7 +1311,7 @@ def preset_load(name: str) -> dict | None:
     if isinstance(cur.get("input"), dict):
         cfg["input"] = cur["input"]
     chain_set(cfg)
-    preset_set_active(name)
+    preset_set_active(p["name"])
     return chain_get()
 
 
@@ -1398,7 +1617,13 @@ def main(argv: list[str] | None = None) -> int:
             print(_fmt_show(t))
     elif args.cmd == "chain":
         if args.chain_cmd == "get":
-            print(json.dumps(chain_get(), ensure_ascii=False, indent=2))
+            try:
+                cfg = chain_get()
+            except (OSError, UnicodeError,
+                    chain_protocol.ChainProtocolError) as exc:
+                print(f"Cannot read chain: {exc}", file=sys.stderr)
+                return 1
+            print(json.dumps(cfg, ensure_ascii=False, indent=2))
         elif args.chain_cmd == "set":
             try:
                 cfg = json.loads(args.json)

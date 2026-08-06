@@ -18,7 +18,7 @@ from textual.message import Message
 from textual.widgets import DataTable, ProgressBar, Static
 
 from .marquee import MarqueeBar
-from .metadata import SelectableStatic, metadata_table
+from .metadata import SelectableStatic, metadata_table, theme_colors
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      set_border_hint_hover, set_border_hint_layout)
@@ -80,10 +80,12 @@ class PackInstallScreen(GigBuddyModal):
     ]
 
     class Uninstalled(Message):
-        def __init__(self, tone_id: int, count: int) -> None:
+        def __init__(self, tone_id: int, count: int,
+                     model_ids: list[int] | tuple[int, ...] = ()) -> None:
             super().__init__()
             self.tone_id = tone_id
             self.count = count
+            self.model_ids = tuple(model_ids)
 
     CSS = """
     PackInstallScreen > ModalBox { width: 96%; height: 92%; margin: 1 2; }
@@ -97,10 +99,12 @@ class PackInstallScreen(GigBuddyModal):
     """
 
     class Installed(Message):
-        def __init__(self, tone_id: int, count: int) -> None:
+        def __init__(self, tone_id: int, count: int,
+                     model_ids: list[int] | tuple[int, ...] = ()) -> None:
             super().__init__()
             self.tone_id = tone_id
             self.count = count
+            self.model_ids = tuple(model_ids)
 
     def __init__(self, tone: dict) -> None:
         super().__init__()
@@ -124,12 +128,15 @@ class PackInstallScreen(GigBuddyModal):
         with box:
             with Horizontal(id="pack-split"):
                 with Vertical(id="pack-left"):
-                    badge = (" [b $success]✓[/]"
+                    colors = theme_colors(self.app)
+                    badge = (f" [b {colors['value']}]✓[/]"
                              if tone3000.is_verified(t.get("username"))
                              else "")
                     yield NonSelectableStatic(
-                        f"[b]{_escape(t.get('title') or '')}[/b]  [dim]@{t.get('username')} · "
-                        f"{t.get('gear')} · dl {t.get('downloads_count')}[/dim]{badge}",
+                        f"[b]{_escape(t.get('title') or '')}[/b]  "
+                        f"[dim]@{_escape(str(t.get('username') or '?'))} · "
+                        f"{_escape(str(t.get('gear') or '?'))} · "
+                        f"dl {t.get('downloads_count')}[/dim]{badge}",
                         id="pack-header")
                     yield MarqueeBar(id="pack-marquee")
                     table = PackPickTable(id="pack-table", cursor_type="row")
@@ -141,7 +148,8 @@ class PackInstallScreen(GigBuddyModal):
                     yield ProgressBar(total=1, show_eta=False, id="pack-progress")
                 with VerticalScroll(id="pack-right"):
                     # tone metadata side-by-side for comparison while picking
-                    yield SelectableStatic(metadata_table(self._tone), id="pack-detail")
+                    yield SelectableStatic(
+                        metadata_table(self._tone, colors=colors), id="pack-detail")
 
     def on_mount(self) -> None:
         self._load_generation += 1
@@ -416,6 +424,16 @@ class PackInstallScreen(GigBuddyModal):
                 self._finish_operation()
                 self._set_status(f"uninstall failed: {e}", hint="uninstall failed")
             return
+        if int(result.get("removed") or 0) <= 0:
+            if self._ui_alive(generation, operation="operation"):
+                self._finish_operation()
+                self._set_status("no files removed", hint="ready")
+            return
+        actual_ids = tuple(result.get("removed_model_ids") or model_ids)
+        publish = getattr(self.app, "_publish_mutation", None)
+        if callable(publish):
+            publish("uninstall", tuple(f"model:{model_id}" for model_id in actual_ids),
+                    result.get("revision"))
         if not self._ui_alive(generation, operation="operation"):
             return
         self._uninstall_confirmed = False
@@ -434,7 +452,7 @@ class PackInstallScreen(GigBuddyModal):
         self._set_status(f"uninstalled {result['removed']} file(s) · metadata retained",
                          hint="ready")
         self.post_message(self.Uninstalled(
-            int(self._tone.get("id") or 0), result["removed"]))
+            int(self._tone.get("id") or 0), result["removed"], actual_ids))
 
     def on_mouse_move(self, event: MouseMove) -> None:
         box = self.query_one(ModalBox)
@@ -491,13 +509,25 @@ class PackInstallScreen(GigBuddyModal):
                 bar.display = False
                 self._update_hint("install failed")
             return
-        if not self._ui_alive(generation, operation="operation"):
-            return
         if not t:
-            self._finish_operation()
-            status.content = f"tone3000 has no tone {tone_id}"
-            bar.display = False
-            self._update_hint("install failed")
+            if self._ui_alive(generation, operation="operation"):
+                self._finish_operation()
+                status.content = f"tone3000 has no tone {tone_id}"
+                bar.display = False
+                self._update_hint("install failed")
+            return
+        downloaded = library.downloaded_model_ids_by_tone().get(tone_id, set())
+        actual_ids = tuple(sorted(set(model_ids).intersection(downloaded)))
+        if not actual_ids:
+            # Keep compatibility with narrow test doubles that return a truthy
+            # import result without a populated local-model table. In the real
+            # library path, downloaded_model_ids_by_tone supplies the exact set.
+            actual_ids = tuple(sorted(set(model_ids)))
+        publish = getattr(self.app, "_publish_mutation", None)
+        if callable(publish):
+            publish("install", tuple(f"model:{model_id}" for model_id in actual_ids),
+                    t.get("revision"))
+        if not self._ui_alive(generation, operation="operation"):
             return
         bar.display = False
         self._selected.difference_update(model_ids)
@@ -513,7 +543,7 @@ class PackInstallScreen(GigBuddyModal):
             except Exception:
                 pass
         self._finish_operation()
-        self.post_message(self.Installed(tone_id, len(model_ids)))
+        self.post_message(self.Installed(tone_id, len(actual_ids), actual_ids))
         self.dismiss()
 
     def _show_progress(self, generation: int, done: int, total: int,

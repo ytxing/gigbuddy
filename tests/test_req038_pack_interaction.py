@@ -15,7 +15,7 @@ from textual.widgets import DataTable
 
 from tui.app import GigBuddyApp
 from tui.install_screen import PackInstallScreen
-from tui.panels import DetailPane
+from tui.panels import ChainSlotWidget, DetailPane
 
 
 def run(coro):
@@ -47,12 +47,12 @@ def _monkey_remote(monkeypatch):
 
 
 async def _goto_remote_selection(app, pilot):
-    """TONE3000 tab → 聚焦 detail → → 切 selection（远程 pack 视图）。"""
+    """TONE3000 tab → 聚焦 Detail tabs → ``]`` 切到 Remote Pack。"""
     await pilot.click(app.query_one("#--content-tab-pane-tone"))
     await pilot.pause(0.6)
     pane = app.query_one(DetailPane)
-    pane.focus()
-    await pilot.press("right")
+    pane._view_tabs.focus()
+    await pilot.press("]")
     await pilot.pause(0.6)
     assert pane._view_mode == "selection"
     assert pane._pack_remote
@@ -173,6 +173,63 @@ def test_detail_pack_i_falls_back_to_cursor_row(monkeypatch):
             await pilot.press("i")
             await pilot.pause(0.5)
             assert calls.get("import") == (77, [1]), "未多选 = 光标行"
+
+    _monkey_remote(monkeypatch)
+    run(scenario())
+
+
+def test_install_keeps_remote_pack_and_marks_local_rows(monkeypatch, tmp_path):
+    """成功安装后仍留在 Remote Pack，已下载行可直接加载。"""
+    state = {"installed": False}
+    local_path = str(tmp_path / "one.nam")
+    local_tone = {
+        "id": 77,
+        "title": "Remote Pack",
+        "gear": "amp",
+        "username": "tester",
+        "models": [{
+            "id": 1,
+            "tone_id": 77,
+            "name": "one.nam",
+            "architecture": "SlimmableContainer",
+            "local_path": local_path,
+        }],
+    }
+
+    monkeypatch.setattr(
+        "tui.panels.library.get_tone",
+        lambda tone_id: local_tone if state["installed"] else None)
+    monkeypatch.setattr(
+        "tui.install_screen.library.get_tone",
+        lambda tone_id: local_tone if state["installed"] else None)
+    monkeypatch.setattr(
+        "tui.install_screen.library.downloaded_model_ids_by_tone",
+        lambda: {77: {1}} if state["installed"] else {})
+
+    def fake_import(tone_id, progress, **_kwargs):
+        state["installed"] = True
+        return local_tone
+
+    monkeypatch.setattr("tui.install_screen.library.import_tone", fake_import)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            pane = await _goto_remote_selection(app, pilot)
+            await pilot.press("enter")
+            await pilot.pause(0.4)
+            assert isinstance(app.screen, PackInstallScreen)
+            await pilot.press("i")
+            await pilot.pause(0.7)
+
+            assert not isinstance(app.screen, PackInstallScreen)
+            assert pane._pack_mode
+            assert pane._view_mode == "selection"
+            assert pane._pack_remote
+            assert pane._view_tabs.display
+            assert "(not downloaded)" not in str(
+                pane._pack_table.get_cell("m1", "file"))
+            assert local_path == pane._pack_rows["m1"]["local_path"]
 
     _monkey_remote(monkeypatch)
     run(scenario())
@@ -385,11 +442,15 @@ def test_chain_click_opens_pack_with_old_absolute_db_rows(monkeypatch, tmp_path)
 
     monkeypatch.setattr(lib, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(lib, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr(lib, "ROOT", tmp_path)
+    monkeypatch.setattr(live, "ROOT", tmp_path)
     monkeypatch.setattr(appmod.live, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(panels.live, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(live, "CHAIN_FILE", tmp_path / "live_chain.json")
     # 项目根内路径（相对/绝对两种形式不同，才能覆盖旧格式场景）
     f = lib.ROOT / "data" / "tones" / "10-jcm800" / "MV5 G1.nam"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"fixture")
     with lib.connect() as conn:
         lib.upsert_tone(conn, {"id": 10, "title": "JCM800", "gear": "amp",
                                "username": "a", "downloads_count": 1})
@@ -407,10 +468,8 @@ def test_chain_click_opens_pack_with_old_absolute_db_rows(monkeypatch, tmp_path)
             await pilot.pause(0.4)
             pane = app.query_one(DetailPane)
             assert "Move the library cursor" not in _detail_plain(app)
-            node = next(n for n in app.query(
-                __import__("tui.panels", fromlist=["NodeWidget"]).NodeWidget)
-                if n.kind == "amp")
-            await pilot.click(node)
+            slot = next(n for n in app.query(ChainSlotWidget) if n.index == 0)
+            await pilot.click(slot)
             await pilot.pause()
             # 链点击 → detail 打开该节点的 pack 视图（不是空态占位）
             assert pane._view_mode == "selection"

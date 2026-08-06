@@ -10,6 +10,7 @@ import library
 
 from tui.app import GigBuddyApp
 from tui.panels import DetailPane
+from tui.picker import TonePickerScreen
 
 
 def run(coro):
@@ -101,6 +102,15 @@ def test_creator_verified_badge_is_parsed_as_markup(monkeypatch):
                        for span in rendered.spans)
 
     run(scenario())
+
+
+def test_picker_author_label_uses_verified_cache_and_escapes_markup(monkeypatch):
+    monkeypatch.setattr("library.tone3000.is_verified",
+                        lambda name: name == "verified")
+
+    assert TonePickerScreen._author_label("verified") == (
+        "[dim]@verified[/dim] [b $success]✓[/]")
+    assert TonePickerScreen._author_label("name[raw") == "[dim]@name\\[raw[/dim]"
 
 
 def test_late_probe_answer_does_not_cover_newer_selection(monkeypatch):

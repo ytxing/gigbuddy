@@ -1,6 +1,6 @@
-# GigBuddy UI 交互与视觉规格（v0.2.13）
+# GigBuddy UI 交互与视觉规格（v0.2.14）
 
-> 状态：**FROZEN**（2026-08-05，规格 v0.2.13）。本次修订固定 ChainPanel 的 Bypass 展示：标题保持原生类型名，`BYPASS` 位于第二行文件名之后；其余 v0.2.12 契约不变。
+> 状态：**FROZEN**（2026-08-06，规格 v0.2.14）。本次修订固定 managed transaction 的 session、transaction、revision 和 runtime acknowledgement 身份，并补齐 rollback 语义；ChainPanel 的 Bypass 展示保持 v0.2.13 约定。
 > 本文件是 GigBuddy v0.2 的目标 UI、交互、数据协议与验收基准，可独立于 v0.1 规格使用。
 > v0.2 保留 v0.1 已确认的 Library、DetailPane、Preset、输入和视觉规则，并以动态多 Slot 链替代固定两节点链。
 > 本版本包含音箱灵感主题候选；主题只替换语义 token，不改变状态含义、布局或交互契约。候选主题是否注册为可切换主题，属于第 14 节实现验收，不代表实现已经完成。
@@ -87,6 +87,15 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 - Bypass Slot 的 fieldset 标题仍为红色状态灯加 uppercase 原生 gear，例如 `● AMP`，不得显示 `BYPASS - AMP`。
 - 第一行继续显示 Tone/Model 主标题；第二行先显示文件名，再以空格分隔显示红色 bold `BYPASS`，即 `filename  BYPASS`。不使用三角标记，也不把 `BYPASS` 放到文件名前。
 
+### 1.11 v0.2.14 managed transaction 身份与 rollback 修订
+
+- 每次 managed candidate 都必须生成唯一的 `transaction_id`，并在 prepare、文件提交、runtime apply、runtime rejection 和 rollback acknowledgement 中保持同一身份；不同提交不得复用 transaction id。
+- managed 提交在写 prepare request 前必须等待当前 engine session 的 `ready acknowledgement`；同一存活 session 后续提交可以复用该 ready 身份，不要求 engine 重发 ready。
+- candidate prepare、原子 JSON 写入和 runtime apply 必须使用同一个非负 `revision`。revision 一旦用于候选提交，不得由 runtime 或 rollback 隐式改写。
+- `level.json` 的 runtime telemetry 必须携带 `runtime_session_id`、`runtime_transaction_id`、`runtime_revision`、`runtime_status` 和单调的 `runtime_ack_seq`。TUI 只能接受属于当前 session、当前 transaction 且晚于提交前 acknowledgement 的 applied/rejected 结果。
+- rollback 也是一次新的 runtime transaction：必须生成新的 transaction id，并等待新的 acknowledgement；不能把提交前或候选提交的旧 `applied` 状态当作 rollback 成功。
+- 原始 `live_chain.json` 不存在时，rollback 先通过带 base revision 和新 transaction id 的临时零 Slot chain 让 runtime 回到旧状态，收到 applied acknowledgement 后再删除临时文件，恢复“原文件不存在”。runtime 不活跃、base revision 无效或 rollback acknowledgement 超时都必须显式报告 rollback 失败，不能静默跳过。
+
 ## 2. 领域模型
 
 | 术语 | 规范定义 |
@@ -140,7 +149,7 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 本规范把会改变共享数据源的成功操作定义为 mutation。安装、卸载、导入、删除、移入/移出 trash、preset 保存/重命名/删除以及其他产生持久状态变化的操作，都必须在提交完成后发布一次 `MutationCommitted`。查询、分页、verified 查询、播放控制、参数预览和没有实际状态变化的 no-op 不属于 mutation。
 
 - `MutationCommitted` 只能在持久提交成功后发布；失败、取消、阻塞和未产生变化的操作不得发布。部分成功只发布一个事件，并且只携带实际成功的对象 key、操作类型和提交 revision。
-- App 只提供一个 mutation refresh coordinator。一个提交对应一个刷新周期；同一事件循环内重复到达的同一提交事件合并，所有已注册页面实例（包括当前未激活但仍保留的页面）每周期最多执行一次 `reconcile_after_mutation(event)`。轮询读到相同 fingerprint/revision 不得再触发可见刷新。
+- App 只提供一个 mutation refresh coordinator。一个提交对应一个刷新周期；只有带有相同提交 `revision` 的重复事件才合并。没有 revision 的不同事件必须按到达顺序分别 reconcile；同一事件对象重复投递可以合并。所有已注册页面实例（包括当前未激活但仍保留的页面）在每个刷新周期最多执行一次 `reconcile_after_mutation(event)`。轮询读到相同 fingerprint/revision 不得再触发可见刷新。
 - 刷新前必须为每个页面实例保存 `ViewAnchor`：`screen_id`、active App tab、active `view_tab_id`、focused widget、cursor row key、cursor column、first visible row key、行内偏移、`scroll_x`/`scroll_y`、仍有效的 selection keys、confirmation state 和 Detail context key。row key 必须是稳定业务身份，不得使用 cursor index；例如 `local:<tone_id>`、`tone:<tone_id>`、`creator:<username>`、`m<model_id>`、`slot:<index>` 和 `preset:<preset_id>`。
 - 页面先按 mutation 的影响范围做增量 reconcile，再按稳定 row key 恢复 `ViewAnchor`。不得先清空并重建整个表来“恢复”位置；不得因为刷新切 tab、push screen、自动打开 Picker、把焦点送到隐藏控件或清空 DetailPane。
 - 当前 row 被删除时，优先选择原视觉位置的下一行；没有下一行时选择上一行；两者都不存在才进入明确 Empty。剩余 selection 保留，已删除 key 才清除；受影响且已失效的 confirmation 必须显式取消，不能继续确认陈旧目标。
@@ -608,10 +617,10 @@ InputSource 状态机：
 - 模态内 Tab 循环；`esc` 取消或关闭；确认键和点击结果等价。
 - Pack Install/Uninstall 显示文件数、大小、目标和依赖；活动 Chain 中任一 Slot 使用的文件禁止卸载。
 - Preset 引用文件的卸载需要第二次确认；确认期间重新计算依赖，避免陈旧计划。
-- 异步任务有唯一 operation id 和对象身份守卫；过期结果只写缓存，不覆盖新页面。
+- 异步任务有唯一 operation id 和对象身份守卫；非 silent 结果还必须匹配当前 active pane、query、sort 和 Type filter。切换 view tab 或改变这些查询条件会使未完成请求失效；过期结果只能写缓存，不能更新当前表格、DetailPane、状态带或焦点。silent 预取可以填充缓存，但不能发布隐藏 view 的 highlight 或抢焦点。
 - Slot 变更写入与引擎加载串行化；新请求可以合并未开始请求，但不能让旧完成事件覆盖新 Chain。
 - loading 保留旧有效内容；失败保留旧 Chain、焦点和 target，并提供明确 retry 或替代动作。
-- managed engine 使用单一提交事务：先校验并完整准备候选运行链；准备失败时不写 JSON、不改 TUI、不动当前运行链。候选准备成功后，以同一个 `revision` 原子写入 JSON 并切换运行链；任一步提交失败都恢复旧 JSON、旧运行链和旧 UI 状态。
+- managed engine 使用单一提交事务：先等待当前 session ready acknowledgement，再用唯一 transaction id 校验并完整准备候选运行链；准备失败时不写 JSON、不改 TUI、不动当前运行链。候选准备成功后，以同一个 `revision` 原子写入 JSON 并切换运行链；任一步提交失败都按 1.11 发送新的 rollback transaction 并恢复旧 JSON、旧运行链和旧 UI 状态。
 - external engine 只有 JSON 写入这一可确认提交；写入成功后 UI 只显示 `file committed · runtime unknown`，不得声称外部 DSP 已应用。下一次可观察到的 runtime 状态由外部 engine 自己报告。
 - 应用退出时取消 worker、timer、长按和 pending UI callback；晚到 callback 不访问已卸载 widget。
 - 安装、卸载、导入、删除等成功 mutation 在原子提交完成后发布 `MutationCommitted`；刷新由第 3.5 节的 coordinator 统一调度，失败、取消和阻塞路径不刷新。
@@ -672,6 +681,7 @@ InputSource 状态机：
 | `quality` | number，默认 1.0 | 0–1 |
 | `mute` | boolean，默认 `false` | 只影响实时输出，不进入 Preset；不改变 `master` 参数 |
 | `revision` | 非负整数，默认 0 | 每次规范写入递增；用于 TUI、文件和 managed runtime 对齐，不进入 Preset |
+| `_transaction_id` | managed 内部 string，可缺省 | 仅用于一次 candidate/rollback 的身份关联，不进入 Preset，不作为 UI 状态或排序依据 |
 | `input.source` | `instrument` 或 `file` | 默认 `instrument`；决定 InputSource 模式 |
 | `input.file` | relative path 或 null，默认 null | `source=file` 时必填，必须位于 `data/dry_inputs/`；`source=instrument` 时必须为 null |
 | `input.state` | `playing`、`paused` 或 `stopped` | 默认 `stopped`；instrument 模式必须为 `stopped` |
@@ -686,7 +696,7 @@ InputSource 状态机：
 - Slot 项不保存 id、type、label、tone id、bypass、参数或 UI 状态。
 - 写入采用同目录临时文件 + rename；一次用户动作只产生一个完整 JSON 替换，并递增 `revision`。
 - 超过 6 项、Slot 非 object、path 非 string/null、Slot 文件扩展名或处理格式不受支持、参数非有限数、`mute` 非 boolean、`revision` 不是非负整数、Input 字段类型错误或路径非法时拒绝整个新配置，保留上一份有效 Chain。
-- `revision`、`mute` 和 `input` 是规范顶层字段；其他未知顶层字段读取时保留但 UI 不解释。`model` 和 `ir` 是迁移保留字，不属于可保留未知字段，任何含 `slots[]` 的规范写入必须删除它们。未知 Slot 字段在规范写入时删除。
+- `revision`、`mute`、`input` 和 managed-only 的 `_transaction_id` 是规范顶层字段；其他未知顶层字段读取时保留但 UI 不解释。`model` 和 `ir` 是迁移保留字，不属于可保留未知字段，任何含 `slots[]` 的规范写入必须删除它们。未知 Slot 字段在规范写入时删除。
 - 外部合法写入在下一轮询同步；结构非法时显示 warning，不覆盖坏文件，继续运行上一份有效 Chain。
 - TUI 写入时记录 canonical JSON fingerprint 和 `revision`。轮询读到同一 fingerprint 时保留本进程的 bypass 候选；读到不同 fingerprint、缺少 revision 或 revision 不属于本进程最近提交时，视为外部整体替换并清空全部候选。
 
@@ -711,7 +721,7 @@ InputSource 状态机：
 - 信号顺序固定为 `input → gain → slot₁ → … → slot₆ → master → out`；`mute=true` 时运行时有效 master 为 0，但不覆盖配置中的 `master` 参数。
 - `.nam` 构建 NAM 节点，`.wav` 构建 IR 卷积；null 和未知格式跳过。
 - Slot 增删、重排、换文件和恢复触发链重建；只有内容或顺序变化才重建。
-- 新链必须按 11 节的 managed transaction 完整校验、准备并提交；任一节点加载失败保留整个旧链和旧 JSON。
+- 新链必须按 11 节的 managed transaction 完整校验、准备并提交；任一节点加载失败保留整个旧链和旧 JSON。prepare、写入和 apply 使用同一 revision，candidate 与 rollback 使用可区分的 transaction id。
 - `quality` 应用于所有支持 quality scaling 的 NAM 节点；IR 节点忽略 quality；运行链内部保存当前 `revision`，用于确认 runtime 与文件提交一致。
 - 引擎独立校验 6 Slot 上限，不能只信任 TUI。
 - 零有效 Slot 对 instrument 和 file input 都是合法直通链；引擎不得再以“缺少 model”为由拒绝启动。
@@ -720,7 +730,7 @@ InputSource 状态机：
 
 ### 12.4 `level.json`
 
-`level.json` 继续提供 `in`、`out`、`play_state`、`play_pos`，约每 0.1s 更新。它是只读观测，不承载 Slot 状态；缺失、损坏或过期时显示无活动电平和 stopped，不让 UI 崩溃。
+`level.json` 继续提供 `in`、`out`、`play_state`、`play_pos`，约每 0.1s 更新，并在 managed 模式提供 `runtime_session_id`、`runtime_transaction_id`、`runtime_revision`、`runtime_status` 和单调的 `runtime_ack_seq`。它是只读观测，不承载 Slot 状态；缺失、损坏或过期时显示无活动电平和 stopped，不让 UI 崩溃。runtime acknowledgement 必须按 session、transaction、revision 和 ack sequence 一起判断新鲜度。
 
 ## 13. 提示与窄屏优先级
 
@@ -789,6 +799,9 @@ InputSource 状态机：
 - 每个可搜索列表验证一行 SearchBar 中同时存在 query 和 sort；验证背景焦点态、无边框样式、`/`、`tab`、`enter`、`esc` 和 sort 选择行为。
 - 验证只有 Type/gear 过滤出现在结果表头，Author 和其他列不可过滤；点击 Type 表头打开动态原生类型的单选菜单，uppercase 选中项高亮并按原生 token 即时过滤；菜单不改变 SearchBar、表格起始位置或底部提示高度。
 - 安装、卸载、导入、删除和部分成功分别验证：成功项只发布一次 `MutationCommitted`，所有已注册页面各 reconcile 一次，失败/取消/阻塞不发布事件。
+- mutation coordinator 验证相同 revision 的重复事件合并、无 revision 的不同事件按顺序分别 reconcile，以及同一事件对象重复投递只 reconcile 一次。
+- managed transaction 验证等待当前 session ready、candidate 使用唯一 transaction 和同一 revision、telemetry 身份完整；验证 apply 失败时 rollback 使用新的 transaction acknowledgement，且旧 applied 状态不会被消费。
+- managed transaction 验证原始 chain 文件不存在时先应用临时零 Slot rollback chain，收到 acknowledgement 后删除临时文件；engine 不活跃、无效 revision 和 acknowledgement 超时都显示明确失败。
 - 在 LOCAL、TONE3000、FAVORITES、TOP CREATORS、DetailPane、ChainPanel 和 Presets 中分别验证 `ViewAnchor` 的 screen、App tab、`view_tab_id`、focus、稳定 row key、cursor column、first visible row、行内偏移、scroll、selection、confirmation 和 Detail 恢复；删除当前行覆盖“下一行优先、否则上一行”。
 - 验证成功 mutation 不自动切 tab、push screen、打开 Picker、抢隐藏页面焦点或清空 Detail；关闭操作页面时来源页面的 anchor 仍恢复。
 

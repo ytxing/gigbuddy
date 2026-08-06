@@ -1,4 +1,8 @@
-# 音色链推荐（GigBuddy 本地库版）
+# 音色链推荐（GigBuddy 本地库版，Legacy examples）
+
+> 本文的示例保留旧版 `model`/`ir` DSL，仅用于历史推荐记录。当前 live chain
+> 必须使用 `slots[]`；协议与迁移规则见
+> `docs/ui-interaction-spec-v0.2.md` v0.2.14。
 
 数据快照日期：2026-08-02 ｜ 依据：TONE3000 音色链精选推荐（全站 9281 个 A2 音色筛选，handoff）
 > 注意：此为快照数据，本地库可能已更新（以 `gigbuddy tone list` 实际内容为准）

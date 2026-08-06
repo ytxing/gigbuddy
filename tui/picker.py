@@ -8,6 +8,7 @@ import asyncio
 from functools import partial
 import sys
 from pathlib import Path
+from typing import Callable
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -16,7 +17,7 @@ from textual.events import Leave, MouseEvent, MouseMove
 from textual.message import Message
 from textual.widgets import Input, Static, Tree
 
-from .marquee import MarqueeBar
+from .marquee import MarqueeBar, resolve_rich_style
 from .modals import (ClickSelectTree, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      set_border_hint_hover, set_border_hint_layout)
@@ -28,6 +29,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import library  # noqa: E402
+
+
+def _escape(text: str) -> str:
+    """Escape every left bracket before embedding user text in Rich markup."""
+    return str(text).replace("[", "\\[")
 
 
 class PickerSearchInput(Input):
@@ -100,14 +106,19 @@ class TonePickerScreen(GigBuddyModal):
             self.tone_type = tone_type
 
     def __init__(self, kind: str, tone_id: int | None = None,
-                 tone_type: str | None = None) -> None:
+                 tone_type: str | None = None,
+                 on_pick: Callable[[str | None], None] | None = None) -> None:
         super().__init__()
-        self.kind = kind  # "amp" | "ir"
+        self.kind = kind  # "amp" | "ir" | "slot"
         self.tone_id = tone_id
         self.tone_type = tone_type
+        # Preset Edit uses the same local/remote picker surface but must return
+        # the chosen path to its in-memory draft instead of mutating live Chain.
+        self._on_pick = on_pick
 
     def compose(self) -> ComposeResult:
-        title = "AMP tone" if self.kind == "amp" else "CAB"
+        title = {"amp": "AMP tone", "ir": "CAB", "slot": "SLOT"}.get(
+            self.kind, "SLOT")
         box = ModalBox()
         box.border_title = f"PICK {title.upper()}"
         if self.tone_id is not None:
@@ -150,14 +161,20 @@ class TonePickerScreen(GigBuddyModal):
         tree.root.expand()
         if self.kind == "ir" and self.tone_id is None:
             tree.root.add_leaf("CAB — (none)", {"type": "bypass"})
-        items = library.list_local_models("ir" if self.kind == "ir" else "amp")
+        if self.kind == "slot":
+            items = (library.list_local_models("amp")
+                     + library.list_local_models("ir"))
+        else:
+            items = library.list_local_models(
+                "ir" if self.kind == "ir" else "amp")
         if self.tone_id is not None:
             items = [item for item in items if item["tone_id"] == self.tone_id]
         folders = {}
         for model in items:
             tone_id = model["tone_id"]
             if tone_id not in folders:
-                label = f"{model.get('title') or 'Untitled'}  [dim]@{model.get('username') or '?'}[/dim]"
+                title = _escape(model.get("title") or "Untitled")
+                label = f"{title}  {self._author_label(model.get('username'))}"
                 folders[tone_id] = tree.root.add(
                     label, {"type": "tone", "tone_id": tone_id, "model": model},
                     expand=tone_id == expand_tone_id)
@@ -205,22 +222,35 @@ class TonePickerScreen(GigBuddyModal):
         tree.reset("TONE3000 results")
         tree.root.expand()
         for t in rows:
-            detail = (f"dl={t.get('downloads_count', 0)} gear={t.get('gear', '?')} "
-                      f"@{t.get('username', '')}")
             state = t.get("download_state")
-            mark = {"all": "[bold $success]✓[/] ",
-                    "partial": "[bold $warning]◐[/] ",
-                    "none": "[bold $state-idle]○[/] "}.get(state, "")
-            if state == "all" or state == "partial":
-                detail += f" [dim]downloaded {t.get('downloaded')}/{t.get('models_count', '?')}[/dim]"
-            title = str(t.get("title") or "").replace("[", "\\[")
+            mark_style = {"all": "bold $success",
+                          "partial": "bold $warning",
+                          "none": "bold $state-idle"}.get(state)
+            mark = (f"[{resolve_rich_style(mark_style, self.app.theme_variables)}]"
+                    f"{'✓' if state == 'all' else '◐' if state == 'partial' else '○'}[/] "
+                    if mark_style else "")
+            title = _escape(t.get("title") or "")
             tree.root.add_leaf(
-                f"{mark}{title}  [dim]{detail}[/dim]",
+                f"{mark}{title}  [dim]dl={t.get('downloads_count', 0)} "
+                f"gear={_escape(t.get('gear', '?'))}[/dim] "
+                f"{self._author_label(t.get('username'))}"
+                + (f" [dim]downloaded {t.get('downloaded')}/"
+                   f"{t.get('models_count', '?')}[/dim]"
+                   if state in {"all", "partial"} else ""),
                 {"type": "remote", "tone": t})
         self.query_one("#pick-status", MarqueeBar).content = (
             "no results" if not rows else "")
         if tree.root.children:
             tree.move_cursor(tree.root.children[0])
+
+    @staticmethod
+    def _author_label(username: str | None) -> str:
+        """Render picker authors from the shared positive verification cache."""
+        name = str(username or "?")
+        safe_name = _escape(name)
+        badge = (" [b $success]✓[/]"
+                 if library.tone3000.is_verified(name) else "")
+        return f"[dim]@{safe_name}[/dim]{badge}"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
@@ -283,12 +313,21 @@ class TonePickerScreen(GigBuddyModal):
         if kind == "status":
             return
         if kind == "bypass":
+            if self._on_pick is not None:
+                self._on_pick(None)
+                self.dismiss()
+                return
             self.post_message(self.Picked(self.kind, None, self.tone_type))
             self.dismiss()
             return
         if kind == "model":
+            path = data["model"]["local_path"]
+            if self._on_pick is not None:
+                self._on_pick(path)
+                self.dismiss()
+                return
             self.post_message(self.Picked(
-                self.kind, data["model"]["local_path"], self.tone_type))
+                self.kind, path, self.tone_type))
             self.dismiss()
             return
         if kind == "remote":
@@ -314,11 +353,15 @@ class TonePickerScreen(GigBuddyModal):
                 self.query_one("#pick-status", MarqueeBar).content = (
                     f"Import failed: {e}")
             return
-        if not self._request_alive(generation):
-            return
         if not t:
-            self.query_one("#pick-status", MarqueeBar).content = (
-                f"TONE3000 has no tone {tone_id}")
+            if self._request_alive(generation):
+                self.query_one("#pick-status", MarqueeBar).content = (
+                    f"TONE3000 has no tone {tone_id}")
+            return
+        publish = getattr(self.app, "_publish_mutation", None)
+        if publish is not None:
+            publish("import", (f"tone:{tone_id}",), t.get("revision"))
+        if not self._request_alive(generation):
             return
         self.query_one("#pick-search", Input).value = ""
         self._fill_local(expand_tone_id=tone_id)

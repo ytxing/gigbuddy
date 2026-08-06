@@ -181,7 +181,7 @@ def test_max_two_decimals_and_length_cap(monkeypatch, tmp_path):
 
 def test_invalid_chars_and_double_dot_rejected(monkeypatch, tmp_path):
     """非数字字符与多余小数点拒绝（不进入编辑文本）。"""
-    state, writes = setup_chain(monkeypatch, tmp_path)
+    state, writes = setup_chain(monkeypatch, tmp_path, master=0.7)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)

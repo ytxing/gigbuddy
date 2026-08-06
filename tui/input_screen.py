@@ -156,13 +156,33 @@ class InputSourceScreen(GigBuddyModal):
 
     # ---- playback control (space/s/l): write the chain, engine responds ≤0.1s ----
 
-    def _set_input(self, inp: dict, *, note: str) -> None:
+    def _commit_input(self, cfg: dict, *, publish: bool) -> dict | None:
+        """Use the App's chain boundary when the modal edits live input."""
+        try:
+            writer = getattr(self.app, "_commit_external_chain", None)
+            persisted = (writer(cfg) if callable(writer)
+                         else (live.write_chain(cfg) or live.read_chain()))
+            if persisted is None:
+                persisted = live.read_chain() or cfg
+        except Exception as exc:
+            self.app.notify(f"Input unchanged: {exc}", severity="error")
+            return None
+        if publish:
+            publisher = getattr(self.app, "_publish_mutation", None)
+            if callable(publisher):
+                publisher("playback", ("input",), persisted.get("revision"))
+        return persisted
+
+    def _set_input(self, inp: dict, *, note: str) -> dict | None:
         cfg = live.read_chain()
         cfg["input"] = inp
-        live.write_chain(cfg)
+        persisted = self._commit_input(cfg, publish=False)
+        if persisted is None:
+            return None
         self._update_status()
         self._refresh_tree()
         self.app.notify(note)
+        return persisted
 
     def action_playback_toggle(self) -> None:
         cfg = live.read_chain()
@@ -173,7 +193,7 @@ class InputSourceScreen(GigBuddyModal):
         inp["state"] = live.PLAY_PAUSED if inp.get("state") == live.PLAY_PLAYING \
             else live.PLAY_PLAYING
         cfg["input"] = inp
-        live.write_chain(cfg)
+        self._commit_input(cfg, publish=True)
         self._update_status()
 
     def action_playback_stop(self) -> None:
@@ -183,7 +203,7 @@ class InputSourceScreen(GigBuddyModal):
             return
         inp["state"] = live.PLAY_STOPPED
         cfg["input"] = inp
-        live.write_chain(cfg)
+        self._commit_input(cfg, publish=True)
         self._update_status()
 
     def action_playback_loop(self) -> None:
@@ -193,7 +213,7 @@ class InputSourceScreen(GigBuddyModal):
             return
         inp["loop"] = not inp.get("loop", False)
         cfg["input"] = inp
-        live.write_chain(cfg)
+        self._commit_input(cfg, publish=True)
         self._update_status()
 
     def action_download_dry(self) -> None:
@@ -260,15 +280,21 @@ class InputSourceScreen(GigBuddyModal):
                     else tree.cursor_node.collapse()
             return
         if kind == "instrument":
-            self._set_input({"source": "instrument"}, note="Input source → instrument (live)")
-            self.post_message(self.SourceChanged(live.read_chain()))
+            persisted = self._set_input(
+                {"source": "instrument"}, note="Input source → instrument (live)")
+            if persisted is None:
+                return
+            self.post_message(self.SourceChanged(persisted))
             self.dismiss()
             return
         if kind == "dry":
             inp = {"source": "file", "file": _rel(data["path"]),
                    "state": live.PLAY_PLAYING, "loop": True}
-            self._set_input(inp, note=f"Dry loop preview → {Path(data['path']).name}")
-            self.post_message(self.SourceChanged(live.read_chain()))
+            persisted = self._set_input(
+                inp, note=f"Dry loop preview → {Path(data['path']).name}")
+            if persisted is None:
+                return
+            self.post_message(self.SourceChanged(persisted))
             self.dismiss()
             return
         if kind == "download":

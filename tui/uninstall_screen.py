@@ -204,9 +204,21 @@ class LocalUninstallScreen(GigBuddyModal):
                 self._busy = False
                 self._set_status(f"uninstall failed: {e}", hint="uninstall failed")
             return
+        if int(result.get("removed") or 0) <= 0:
+            if self._ui_alive(generation):
+                self._busy = False
+                self._set_status("no files removed", hint="ready")
+            return
+        actual_tone_ids = result.get("removed_tone_ids") or result.get("tone_ids") or tone_ids
+        publish = getattr(self.app, "_publish_mutation", None)
+        if callable(publish):
+            publish("uninstall",
+                    tuple(f"tone:{tone_id}" for tone_id in actual_tone_ids),
+                    result.get("revision"))
         if not self._ui_alive(generation):
             return
         self._busy = False
         self.post_message(self.Uninstalled(
-            tone_ids, result["removed"], result.get("trash_dir")))
+            actual_tone_ids,
+            result["removed"], result.get("trash_dir")))
         self.dismiss()

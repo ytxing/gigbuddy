@@ -1,4 +1,4 @@
-"""Library browser panel: two tabs — LOCAL (imported tones) / TONE3000 (search).
+"""Library browser panel: LOCAL, remote sources, and creator aggregates.
 
 Row keys encode the source ("local:<id>" / "remote:<id>"). Selecting a local row
 opens the tone action screen; a remote row opens the pack install screen.
@@ -30,13 +30,16 @@ if str(SRC) not in sys.path:
 import library  # noqa: E402
 
 from .install_screen import PackInstallScreen  # noqa: E402
-from .marquee import MarqueeBar, ellipsis_window, marquee_window  # noqa: E402
+from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
+                      resolve_rich_style)  # noqa: E402
 from .modals import (ClickSelectTable, border_hint_action_token,
                      border_hint_hit, hint_span, set_border_hint_hover,
                      refresh_border_hint_layout,
                      set_border_hint_layout)  # noqa: E402
 from .search_query import SearchSpec, SearchSyntaxError, parse_search  # noqa: E402
 from .uninstall_screen import LocalUninstallScreen  # noqa: E402
+from .mutations import (ViewAnchor, focused_widget_key,
+                        view_context)  # noqa: E402
 from .view_controls import SearchBar, TypeFilterMenu, ViewTabStrip  # noqa: E402
 
 
@@ -68,6 +71,7 @@ def _clip(text: str, n: int = 40) -> str:
 _TABLE_PANE = {
     "lib-table-local": "pane-local",
     "lib-table-tone": "pane-tone",
+    "lib-table-favorites": "pane-favorites",
     "lib-table-creators": "pane-creators",
 }
 
@@ -97,9 +101,10 @@ class RemoteToneSelected(Message):
 class ToneHighlighted(Message):
     """A highlighted row changed — update detail without opening an action."""
 
-    def __init__(self, tone: dict | None) -> None:
+    def __init__(self, tone: dict | None, *, remote: bool = False) -> None:
         super().__init__()
         self.tone = tone
+        self.remote = remote
 
 
 class VerifiedAuthor(Message):
@@ -210,6 +215,8 @@ class LibraryTable(ClickSelectTable):
             self._title_content_width() - cell_len(marker), 1)
         window = marquee_window(detail, available, self._marquee_offset)
         if marker_style:
+            marker_style = resolve_rich_style(
+                marker_style, getattr(self.app, "theme_variables", {}))
             cell = Text.from_markup(
                 f"[{marker_style}]{escape(marker)}[/]{escape(window)}",
                 end="",
@@ -359,7 +366,8 @@ class LibraryTable(ClickSelectTable):
 # SQLite query currently has one canonical order.
 LOCAL_SORT_CHOICES = [("Default", "default")]
 # Kept only for callers/tests that still address the pre-v0.2 hidden Select
-# ids. The visible Type menu is generated from the current table rows.
+# ids. The visible Type menu is generated from the pane's accumulated source
+# catalog so filtering one type does not make the other choices disappear.
 LEGACY_TYPE_CHOICES = [("ALL", "all"), ("AMP", "amp"),
                        ("CAB", "cab"), ("AMP-CAB", "amp-cab")]
 # mirror tone3000.com's sort options; favorites comes from tones_counts
@@ -367,6 +375,7 @@ LEGACY_TYPE_CHOICES = [("ALL", "all"), ("AMP", "amp"),
 SORT_CHOICES = [("Trending", "trending"), ("Best match", "best-match"),
                 ("Most downloaded", "downloads"),
                 ("Most favorited", "favorites"), ("Newest", "newest")]
+FAVORITES_SORT_CHOICES = [("Most favorited", "favorites")]
 # TOP CREATORS 排行榜排序（REQ-029，参考 tone3000.com/top-creators 的
 # sort 下拉：Most Tones 默认 + 数字列可排序）。
 CREATOR_SORT_CHOICES = [("Most Tones", "tones"), ("Most Downloads", "downloads"),
@@ -452,6 +461,7 @@ class LibraryPanel(Vertical):
             "LIBRARY",
             [("pane-local", "LOCAL"),
              ("pane-tone", "TONE3000"),
+             ("pane-favorites", "FAVORITES"),
              ("pane-creators", "TOP CREATORS")],
             active="pane-local",
             id="library-view-tabs",
@@ -487,6 +497,16 @@ class LibraryPanel(Vertical):
                 yield self._make_table("lib-table-tone")
                 yield MarqueeBar(id="tone-status")
                 yield ProgressBar(total=1, show_eta=False, id="import-progress")
+            with TabPane("FAVORITES", id="pane-favorites"):
+                yield SearchBar(
+                    input_id="favorites-search",
+                    sort_options=FAVORITES_SORT_CHOICES,
+                    sort_id="sort-filter-favorites",
+                    placeholder="Search favorites",
+                    input_cls=LibrarySearchInput,
+                    id="favorites-search-bar",
+                )
+                yield self._make_table("lib-table-favorites")
             with TabPane("TOP CREATORS", id="pane-creators"):
                 yield SearchBar(
                     input_id=None,
@@ -500,21 +520,38 @@ class LibraryPanel(Vertical):
         self._mode = "local"
         self._active_pane = "pane-local"
         self._sort = "trending"
+        self._favorites_sort = "favorites"
         self._last_active = "pane-local"  # initial state: first tick is a no-op
         self._type_filter = "all"
         self._query = ""
         self._search_spec = SearchSpec()
         self._view_states = {
-            "pane-local": {"query": "", "sort": "default", "type_filter": "all"},
-            "pane-tone": {"query": "", "sort": "trending", "type_filter": "all"},
-            "pane-creators": {"query": "", "sort": "tones", "type_filter": "all"},
+            pane: {
+                "query": "", "sort": sort, "type_filter": "all",
+                "view_tab_id": pane, "cursor_key": None, "cursor_index": 0,
+                "cursor_column": 0, "first_visible_row_key": None,
+                "row_offset": 0, "scroll_x": 0, "scroll_y": 0,
+                "selection_keys": (), "detail_context_key": None,
+            }
+            for pane, sort in (
+                ("pane-local", "default"),
+                ("pane-tone", "trending"),
+                ("pane-favorites", "favorites"),
+                ("pane-creators", "tones"),
+            )
         }
-        self._type_filters = {"pane-local": "all", "pane-tone": "all"}
+        self._type_filters = {
+            "pane-local": "all", "pane-tone": "all", "pane-favorites": "all",
+        }
+        self._type_values_by_pane: dict[str, set[str]] = {
+            "pane-local": set(), "pane-tone": set(), "pane-favorites": set(),
+        }
         self._users: list[str] = []
         self._tags: list[str] = []
         self._makes: list[str] = []
         self._fingerprint: tuple | None = None
         self._remote_tones: dict[int, dict] = {}
+        self._favorites_tones: dict[int, dict] = {}
         self._highlighted_key: str | None = None
         self._tone_page = 0
         self._tone_total: int | None = None
@@ -522,6 +559,9 @@ class LibraryPanel(Vertical):
         self._tone_loading = False
         self._tone_request_id = 0
         self._tone_error = False
+        self._favorites_loading = False
+        self._favorites_request_id = 0
+        self._favorites_error = False
         self._local_page = 0
         self._local_has_more = False
         self._local_loading = False
@@ -534,13 +574,19 @@ class LibraryPanel(Vertical):
         self._creator_request_id = 0
         self._creator_error = False
         self._local_selected: set[int] = set()
+        self._mutation_anchor: ViewAnchor | None = None
         self._screen_generation = 1
         self._import_request_id = 0
+        self._mutation_request_id = 0
+        self._tone_request_view: tuple | None = None
+        self._favorites_request_view: tuple | None = None
+        self._creator_request_view: tuple | None = None
         # REQ-010: 搜索缓存 —— TONE3000 按 (query, TYPE, SORT, author) 组合
         # 缓存（值含 tones/total/page/has_more），TOP CREATORS 单一视图缓存。
         self._tone_cache: dict[tuple, dict] = {}
         self._tone_cache_key: tuple | None = None
         self._creator_cache: dict | None = None
+        self._favorites_cache: dict | None = None
         # 排行榜排序键（REQ-029）：tones / downloads / favorites / models。
         self._creator_sort = "tones"
         self.query_one("#import-progress", ProgressBar).display = False
@@ -564,22 +610,59 @@ class LibraryPanel(Vertical):
 
     def on_unmount(self) -> None:
         """Invalidate every worker before Textual releases this panel."""
+        self._invalidate_async_requests()
+
+    def _invalidate_async_requests(self) -> None:
+        """Make every in-flight result stale before a shared-data reconcile."""
         self._screen_generation += 1
         self._tone_request_id += 1
         self._local_request_id += 1
+        self._favorites_request_id += 1
         self._creator_request_id += 1
         self._import_request_id += 1
+        self._mutation_request_id += 1
+        self._tone_loading = False
+        self._local_loading = False
+        self._favorites_loading = False
+        self._creator_loading = False
+        self._tone_request_view = None
+        self._favorites_request_view = None
+        self._creator_request_view = None
 
     def _screen_alive(self, generation: int) -> bool:
         return (bool(getattr(self, "is_mounted", False))
                 and generation == self._screen_generation)
 
+    def _view_identity(self, pane_id: str) -> tuple:
+        state = self._view_states.get(pane_id, {})
+        return (
+            pane_id,
+            str(state.get("query", "")),
+            str(state.get("sort", "")),
+            str(state.get("type_filter", "all")),
+        )
+
+    def _request_view_alive(self, pane_id: str, expected: tuple | None) -> bool:
+        return (
+            getattr(self, "_active_pane", None) == pane_id
+            and expected is not None
+            and self._view_identity(pane_id) == expected
+        )
+
     def _tone_alive(self, generation: int, request_id: int) -> bool:
-        return self._screen_alive(generation) and request_id == self._tone_request_id
+        if not (self._screen_alive(generation)
+                and request_id == self._tone_request_id):
+            return False
+        return (self._tone_request_view is None
+                or self._request_view_alive("pane-tone", self._tone_request_view))
 
     def _creator_alive(self, generation: int, request_id: int) -> bool:
-        return (self._screen_alive(generation)
-                and request_id == self._creator_request_id)
+        if not (self._screen_alive(generation)
+                and request_id == self._creator_request_id):
+            return False
+        return (self._creator_request_view is None
+                or self._request_view_alive(
+                    "pane-creators", self._creator_request_view))
 
     def _local_alive(self, generation: int, request_id: int) -> bool:
         return (self._screen_alive(generation)
@@ -614,6 +697,9 @@ class LibraryPanel(Vertical):
             elif self._active_pane == "pane-tone":
                 self._update_tone_subtitle(
                     loading=self._tone_loading, error=self._tone_error)
+            elif self._active_pane == "pane-favorites":
+                self._update_favorites_subtitle(
+                    loading=self._favorites_loading, error=self._favorites_error)
             elif self._active_pane == "pane-creators":
                 self._update_creator_subtitle(
                     loading=self._creator_loading, error=self._creator_error)
@@ -621,14 +707,28 @@ class LibraryPanel(Vertical):
                 refresh_border_hint_layout(self)
 
     def _sync_search_bars(self) -> None:
-        """Apply the normal/compact fixed tracks to every SearchBar."""
+        """Apply fixed tracks and expose only the active pane's SearchBar.
+
+        Textual hides an inactive ``TabPane`` through its content switcher, but
+        descendants keep their own ``display`` flag. Keeping that flag in sync
+        makes the view-local contract observable to keyboard routing and tests
+        as well as to layout, without changing the parent tab switcher.
+        """
         compact = ((self.content_region.width
                     or self.app.size.width * 3 // 5)
                    < FILTER_BAR_COMPACT_WIDTH)
-        for bar_id in ("#local-search-bar", "#tone-search-bar",
-                       "#creators-search-bar"):
+        pane_by_bar = {
+            "#local-search-bar": "pane-local",
+            "#tone-search-bar": "pane-tone",
+            "#favorites-search-bar": "pane-favorites",
+            "#creators-search-bar": "pane-creators",
+        }
+        active = getattr(self, "_active_pane", None)
+        for bar_id, pane_id in pane_by_bar.items():
             try:
-                self.query_one(bar_id, SearchBar).set_compact(compact)
+                bar = self.query_one(bar_id, SearchBar)
+                bar.set_compact(compact)
+                bar.display = pane_id == active
             except Exception:
                 pass
 
@@ -636,6 +736,7 @@ class LibraryPanel(Vertical):
         table_id = {
             "pane-local": "lib-table-local",
             "pane-tone": "lib-table-tone",
+            "pane-favorites": "lib-table-favorites",
             "pane-creators": "lib-table-creators",
         }.get(pane_id)
         if table_id is None:
@@ -654,24 +755,60 @@ class LibraryPanel(Vertical):
             search_id = {
                 "pane-local": "local-search",
                 "pane-tone": "tone-search",
+                "pane-favorites": "favorites-search",
             }.get(pane_id)
             if search_id:
                 state["query"] = self.query_one(
                     f"#{search_id}", Input).value
             if pane_id == "pane-tone":
                 state["sort"] = self._sort
+            elif pane_id == "pane-favorites":
+                state["sort"] = self._favorites_sort
             elif pane_id == "pane-creators":
                 state["sort"] = self._creator_sort
             state["type_filter"] = self._type_filters.get(pane_id, "all")
             table = self._table_for_pane(pane_id)
             if table is not None:
                 rows = table.ordered_rows
+                real_rows = [
+                    row for row in rows
+                    if not str(row.key.value).startswith("__")
+                ]
                 state["cursor_key"] = (
                     rows[table.cursor_row].key.value
                     if 0 <= table.cursor_row < len(rows) else None)
+                state["cursor_index"] = table.cursor_row
                 state["cursor_column"] = table.cursor_column
                 state["scroll_y"] = table.scroll_y
                 state["scroll_x"] = table.scroll_x
+                current_key = state["cursor_key"]
+                current_position = next(
+                    (index for index, row in enumerate(real_rows)
+                     if row.key.value == current_key), None)
+                if current_position is None:
+                    state["cursor_successor_key"] = None
+                    state["cursor_predecessor_key"] = None
+                else:
+                    state["cursor_successor_key"] = (
+                        real_rows[current_position + 1].key.value
+                        if current_position + 1 < len(real_rows) else None)
+                    state["cursor_predecessor_key"] = (
+                        real_rows[current_position - 1].key.value
+                        if current_position > 0 else None)
+                if rows:
+                    first_index = min(
+                        max(int(table.scroll_y), 0), len(rows) - 1)
+                    state["first_visible_row_key"] = rows[
+                        first_index].key.value
+                    state["row_offset"] = max(
+                        0.0, float(table.scroll_y) - first_index)
+                else:
+                    state["first_visible_row_key"] = None
+                    state["row_offset"] = 0
+            state["selection_keys"] = tuple(
+                f"local:{tone_id}" for tone_id in sorted(self._local_selected)
+            ) if pane_id == "pane-local" else ()
+            state["detail_context_key"] = self._highlighted_key
         except Exception:
             pass
 
@@ -679,12 +816,25 @@ class LibraryPanel(Vertical):
         state = self._view_states[pane_id]
         self._type_filters[pane_id] = state.get("type_filter", "all")
         self._type_filter = self._type_filters[pane_id]
+        if pane_id == "pane-local":
+            self._local_selected = {
+                int(key.partition(":")[2])
+                for key in state.get("selection_keys", ())
+                if isinstance(key, str) and key.startswith("local:")
+                and key.partition(":")[2].isdigit()
+            }
         if pane_id == "pane-tone":
             self._sort = state.get("sort", "trending")
             self._query = state.get("query", "")
             self._search_spec = self._parse_or_notify(self._query) or SearchSpec()
             self.query_one("#tone-search", Input).value = self._query
             self.query_one("#sort-filter", Select).value = self._sort
+        elif pane_id == "pane-favorites":
+            self._favorites_sort = state.get("sort", "favorites")
+            self._query = state.get("query", "")
+            self._search_spec = self._parse_or_notify(self._query) or SearchSpec()
+            self.query_one("#favorites-search", Input).value = self._query
+            self.query_one("#sort-filter-favorites", Select).value = self._favorites_sort
         elif pane_id == "pane-local":
             self._query = state.get("query", "")
             self._search_spec = self._parse_or_notify(self._query) or SearchSpec()
@@ -707,6 +857,19 @@ class LibraryPanel(Vertical):
             (index for index, row in enumerate(rows) if row.key.value == key),
             None,
         )
+        if row_index is None:
+            for fallback_key in (
+                    state.get("cursor_successor_key"),
+                    state.get("cursor_predecessor_key")):
+                if fallback_key is None:
+                    continue
+                row_index = next(
+                    (index for index, row in enumerate(rows)
+                     if row.key.value == fallback_key),
+                    None,
+                )
+                if row_index is not None:
+                    break
         if row_index is not None:
             table.move_cursor(
                 row=row_index,
@@ -714,11 +877,94 @@ class LibraryPanel(Vertical):
                 animate=False,
                 scroll=False,
             )
+        elif rows:
+            # If the anchored row was deleted, keep its visual position when
+            # possible: the next row takes over, otherwise the previous row.
+            real_rows = [
+                index for index, row in enumerate(rows)
+                if not str(row.key.value).startswith("__")
+            ]
+            if real_rows:
+                position = min(
+                    max(int(state.get("cursor_index", 0)), 0),
+                    len(real_rows) - 1,
+                )
+                table.move_cursor(
+                    row=real_rows[position],
+                    column=state.get("cursor_column", table.cursor_column),
+                    animate=False,
+                    scroll=False,
+                )
+        first_key = state.get("first_visible_row_key")
+        first_index = next(
+            (index for index, row in enumerate(rows)
+             if row.key.value == first_key), None)
+        scroll_y = (
+            first_index + max(float(state.get("row_offset", 0)), 0.0)
+            if first_index is not None
+            else state.get("scroll_y", table.scroll_y)
+        )
         table.scroll_to(
             x=state.get("scroll_x", table.scroll_x),
-            y=state.get("scroll_y", table.scroll_y),
+            y=scroll_y,
             animate=False,
         )
+
+    def capture_view_anchor(self) -> ViewAnchor:
+        """Capture the active library tab using stable row identities."""
+        for pane_id in self._view_states:
+            self._capture_view_state(pane_id)
+        pane_id = getattr(self, "_active_pane", "pane-local")
+        state = self._view_states.get(pane_id, {})
+        screen_id, app_tab = view_context(self)
+        return ViewAnchor(
+            screen_id=screen_id,
+            app_tab=app_tab,
+            view_tab_id=pane_id,
+            focused_widget=focused_widget_key(self),
+            cursor_row_key=state.get("cursor_key"),
+            cursor_column=int(state.get("cursor_column", 0)),
+            first_visible_row_key=state.get("first_visible_row_key"),
+            row_offset=float(state.get("row_offset", 0.0)),
+            scroll_x=float(state.get("scroll_x", 0.0)),
+            scroll_y=float(state.get("scroll_y", 0.0)),
+            selection_keys=tuple(state.get("selection_keys", ())),
+            confirmation_state=None,
+            detail_context_key=state.get("detail_context_key"),
+        )
+
+    def set_mutation_anchor(self, anchor: ViewAnchor | None) -> None:
+        """Make the coordinator snapshot available to async table refreshes."""
+        self._mutation_anchor = anchor
+        if anchor is None or anchor.view_tab_id not in self._view_states:
+            return
+        self._view_states[anchor.view_tab_id].update({
+            "cursor_key": anchor.cursor_row_key,
+            "cursor_column": anchor.cursor_column,
+            "first_visible_row_key": anchor.first_visible_row_key,
+            "row_offset": anchor.row_offset,
+            "scroll_x": anchor.scroll_x,
+            "scroll_y": anchor.scroll_y,
+            "selection_keys": anchor.selection_keys,
+            "detail_context_key": anchor.detail_context_key,
+        })
+
+    def restore_view_anchor(self, anchor: ViewAnchor | None) -> None:
+        """Restore the captured table position without changing the active tab."""
+        if anchor is None or anchor.view_tab_id not in self._view_states:
+            return
+        self._restore_view_anchor(anchor.view_tab_id)
+        if not anchor.focused_widget:
+            return
+        focused = getattr(self.app, "focused", None)
+        try:
+            focus_still_in_panel = focused is None or any(
+                item is self for item in focused.ancestors_with_self)
+            target = self.query_one(f"#{anchor.focused_widget}")
+        except Exception:
+            return
+        if focus_still_in_panel:
+            target.focus()
 
     def on_view_tab_strip_changed(self, event: ViewTabStrip.Changed) -> None:
         self.activate_view_tab(event.view_tab_id)
@@ -743,7 +989,13 @@ class LibraryPanel(Vertical):
             strip.focus()
 
     def _type_values_for_table(self, table: DataTable) -> list[str]:
-        values: set[str] = set()
+        pane_id = {
+            "lib-table-local": "pane-local",
+            "lib-table-tone": "pane-tone",
+            "lib-table-favorites": "pane-favorites",
+        }.get(table.id or "")
+        values = (set(self._type_values_by_pane.get(pane_id, set()))
+                  if pane_id else set())
         for row in table.ordered_rows:
             key = row.key.value
             tone = self._tone_for_key(key)
@@ -751,6 +1003,8 @@ class LibraryPanel(Vertical):
                 value = str(tone["gear"]).strip()
                 if value:
                     values.add(value)
+        if pane_id is not None:
+            self._type_values_by_pane[pane_id].update(values)
         return sorted(values, key=str.casefold)
 
     def _sync_legacy_type_options(self, table: DataTable) -> None:
@@ -768,9 +1022,14 @@ class LibraryPanel(Vertical):
                 pass
 
     def _open_type_filter(self, table: DataTable) -> None:
-        if table.id not in {"lib-table-local", "lib-table-tone"}:
+        if table.id not in {
+                "lib-table-local", "lib-table-tone", "lib-table-favorites"}:
             return
-        pane_id = "pane-local" if table.id == "lib-table-local" else "pane-tone"
+        pane_id = {
+            "lib-table-local": "pane-local",
+            "lib-table-tone": "pane-tone",
+            "lib-table-favorites": "pane-favorites",
+        }[table.id]
         menu = self.query_one(TypeFilterMenu)
         menu.target_table_id = table.id
         values = self._type_values_for_table(table)
@@ -788,6 +1047,8 @@ class LibraryPanel(Vertical):
         active = getattr(self, "_active_pane", None) or self.query_one(TabbedContent).active
         if active == "pane-creators":
             return self.query_one("#lib-table-creators", DataTable)
+        if active == "pane-favorites":
+            return self.query_one("#lib-table-favorites", DataTable)
         return self.query_one("#lib-table-local" if active == "pane-local"
                               else "#lib-table-tone", DataTable)
 
@@ -813,12 +1074,20 @@ class LibraryPanel(Vertical):
             pass
 
     def table_for(self, input_id: str | None) -> DataTable:
-        return self.query_one("#lib-table-local" if input_id == "local-search"
-                              else "#lib-table-tone", DataTable)
+        table_id = {
+            "local-search": "lib-table-local",
+            "tone-search": "lib-table-tone",
+            "favorites-search": "lib-table-favorites",
+        }.get(input_id, "lib-table-tone")
+        return self.query_one(f"#{table_id}", DataTable)
 
     def search_for(self, table_id: str | None) -> Input:
-        return self.query_one("#local-search" if table_id == "lib-table-local"
-                              else "#tone-search", Input)
+        input_id = {
+            "lib-table-local": "local-search",
+            "lib-table-tone": "tone-search",
+            "lib-table-favorites": "favorites-search",
+        }.get(table_id, "tone-search")
+        return self.query_one(f"#{input_id}", Input)
 
     def _search_creator(self, name: str) -> None:
         """REQ-033：作者行 Enter/双击 → 跳 TONE3000 tab，搜索栏填
@@ -913,6 +1182,10 @@ class LibraryPanel(Vertical):
             self._creator_cache = None
             self.run_worker(partial(self._show_top_creators, refresh=True),
                             name="creators", exclusive=True)
+        elif active == "pane-favorites":
+            self._favorites_cache = None
+            self.run_worker(partial(self._reload_favorites_table, refresh=True),
+                            name="favorites", exclusive=True)
 
     def _update_tone_subtitle(self, *, loading: bool = False,
                               error: bool = False) -> None:
@@ -942,6 +1215,25 @@ class LibraryPanel(Vertical):
             self, state,
             [token for token, _action in self._border_hint_actions()])
 
+    def _update_favorites_subtitle(self, *, loading: bool = False,
+                                   error: bool = False) -> None:
+        if loading:
+            self._favorites_error = False
+            set_border_hint_layout(
+                self, "loading…",
+                [token for token, _action in self._border_hint_actions()])
+            return
+        count = len(self._favorites_tones)
+        if error:
+            self._favorites_error = True
+            state = f"{count} · load failed"
+        else:
+            self._favorites_error = False
+            state = f"{count} · all loaded"
+        set_border_hint_layout(
+            self, state,
+            [token for token, _action in self._border_hint_actions()])
+
     def _load_more_from_hint(self) -> None:
         """Load the active table's next page from its clickable hint token."""
         self._maybe_load_more_from_viewport(self._table(), force=True)
@@ -954,6 +1246,8 @@ class LibraryPanel(Vertical):
             has_more, loading = self._local_has_more, self._local_loading
         elif table.id == "lib-table-creators":
             has_more, loading = self._creator_has_more, self._creator_loading
+        elif table.id == "lib-table-favorites":
+            has_more, loading = False, self._favorites_loading
         else:
             return
         if not has_more or loading:
@@ -968,10 +1262,12 @@ class LibraryPanel(Vertical):
             worker, name = self._load_more_tones, "search-more"
         elif table.id == "lib-table-local":
             worker, name = self._load_more_local, "local-more"
-        else:
+        elif table.id == "lib-table-creators":
             self.run_worker(
                 partial(self._load_more_creators),
                 name="creators-more", exclusive=True)
+            return
+        else:
             return
         self.run_worker(partial(worker), name=name, exclusive=True)
 
@@ -989,16 +1285,20 @@ class LibraryPanel(Vertical):
         strip = self.query_one("#library-view-tabs", ViewTabStrip)
         keep_strip_focus = strip.has_focus
         previous = getattr(self, "_active_pane", None)
-        if previous and previous != active:
+        view_changed = bool(previous and previous != active)
+        if view_changed:
+            self._invalidate_async_requests()
             self._capture_view_state(previous)
-        self.clear_local_selection()
         self._last_active = active
         self._active_pane = active
         self._restore_view_state(active)
         self.query_one("#library-view-tabs", ViewTabStrip).set_active(active)
         self._sync_search_bars()
         self._mode = "local" if active == "pane-local" else "tone"
-        self._highlighted_key = None
+        if view_changed:
+            # The saved key belongs to this tab, but DetailPane may still show
+            # the previous tab. Force one highlight publication below.
+            self._highlighted_key = None
         if active == "pane-tone":
             if not self.query_one("#lib-table-tone", DataTable).row_count:
                 self.run_worker(partial(self._reload_tone_table),
@@ -1008,10 +1308,23 @@ class LibraryPanel(Vertical):
                 # 提示词（a all/space select…）挂在 TONE3000 tab 上，既误导
                 # 又让提示与可点 token 脱节（REQ-040 点击等效审计发现）。
                 self._update_tone_subtitle()
+        elif active == "pane-favorites":
+            if not self.query_one("#lib-table-favorites", DataTable).row_count:
+                self.run_worker(partial(self._reload_favorites_table),
+                                name="favorites", exclusive=True)
+            else:
+                self._update_favorites_subtitle()
         elif active == "pane-creators":
-            # always reload the default 5-creator view: MORE expansion (limit=0)
-            # must not persist across tab switches
-            self.run_worker(partial(self._show_top_creators), name="creators", exclusive=True)
+            # TOP CREATORS is a tab-local paged view. Re-entering it must show
+            # the retained page set instead of replacing it with page one.
+            if self._creator_cache is not None:
+                self._creator_loading = False
+                self._restore_creator_entry()
+            elif not self.query_one("#lib-table-creators", DataTable).row_count:
+                self.run_worker(partial(self._show_top_creators),
+                                name="creators", exclusive=True)
+            else:
+                self._update_creator_subtitle()
         elif active == "pane-local":
             self._update_local_selection_status()
             self._fingerprint = None
@@ -1032,6 +1345,7 @@ class LibraryPanel(Vertical):
         search.value = ""
         self.query_one("#local-search", Input).value = ""
         self.query_one("#tone-search", Input).value = ""
+        self.query_one("#favorites-search", Input).value = ""
         self._set_search_spec("", SearchSpec())
         if self._mode != "local":
             self.activate_view_tab("pane-local")
@@ -1049,7 +1363,8 @@ class LibraryPanel(Vertical):
 
     # ---- local tab --------------------------------------------------------
 
-    def refresh_rows(self) -> None:
+    def refresh_rows(self, *, force: bool = False, publish: bool = True,
+                     preserve_pages: bool = False) -> None:
         """Reload local rows from the DB (called on tick so external imports appear).
 
         Skips repaint unless the DB or local install state changed, so the
@@ -1057,7 +1372,8 @@ class LibraryPanel(Vertical):
         """
         # _mode can lag behind inside tab-activation handlers; _active_pane is
         # set first and is the authoritative "which tab is showing" signal.
-        if getattr(self, "_active_pane", "pane-local") != "pane-local":
+        if (not force
+                and getattr(self, "_active_pane", "pane-local") != "pane-local"):
             return
         with library.connect() as conn:
             fp = tuple(conn.execute(
@@ -1066,12 +1382,20 @@ class LibraryPanel(Vertical):
                 "(SELECT COUNT(*) FROM models WHERE local_path IS NOT NULL), "
                 "(SELECT COALESCE(GROUP_CONCAT(id || ':' || local_path, '|'), '') "
                 "FROM models WHERE local_path IS NOT NULL) FROM tones").fetchone())
-        if fp == self._fingerprint:
+            all_local_ids = {
+                int(row[0]) for row in conn.execute(
+                    "SELECT id FROM tones WHERE local_dir IS NOT NULL "
+                    "OR id IN (SELECT tone_id FROM models "
+                    "WHERE local_path IS NOT NULL)").fetchall()
+            }
+        if not force and fp == self._fingerprint:
             return
         self._fingerprint = fp
         # 注意：此处不能清 _remote_tones——TONE3000 表的行还在，Enter 依赖
         # 这张查找表（remote:<id> → tone）；本地 DB 变化与远程表无关。
-        self._local_page = 0
+        loaded_page = max(int(self._local_page), 0) if preserve_pages else 0
+        page_limit = LOCAL_PAGE_SIZE * (loaded_page + 1)
+        self._local_page = loaded_page
         self._local_has_more = False
         self._local_loading = False
         self._local_request_id += 1
@@ -1080,7 +1404,7 @@ class LibraryPanel(Vertical):
         spec = getattr(self, "_search_spec", SearchSpec())
         tones = library.list_tones(
             gear=None if self._type_filter == "all" else self._type_filter,
-            limit=LOCAL_PAGE_SIZE,
+            limit=page_limit,
             authors=self._effective_authors(spec) or None,
             tags=spec.tags or None,
             makes=spec.makes or None,
@@ -1088,9 +1412,11 @@ class LibraryPanel(Vertical):
             query=spec.text or None,
             has_files=True,
             offset=0)
-        self._local_has_more = len(tones) == LOCAL_PAGE_SIZE
-        local_ids = {t["id"] for t in tones}
-        self._local_selected.intersection_update(local_ids)
+        self._local_has_more = len(tones) == page_limit
+        if preserve_pages and tones:
+            self._local_page = min(
+                loaded_page, (len(tones) - 1) // LOCAL_PAGE_SIZE)
+        self._local_selected.intersection_update(all_local_ids)
         self._update_local_selection_status()
         for t in tones:
             checked = "\\[x]" if t["id"] in self._local_selected else "\\[ ]"
@@ -1103,7 +1429,319 @@ class LibraryPanel(Vertical):
                 "to search and import")
         self._update_local_selection_status()
         self._restore_view_anchor("pane-local")
-        self._publish_highlight(table)
+        if publish:
+            self._publish_highlight(table)
+
+    @staticmethod
+    def _update_remote_row(table: DataTable, row_key: str, cells: list[str]) -> None:
+        columns = ("title", "type", "downloads", "favorites", "arch",
+                   "files", "uploaded", "author")
+        for column, value in zip(columns, cells):
+            try:
+                table.update_cell(row_key, column, value, update_width=False)
+            except Exception:
+                pass
+
+    def _update_local_row(self, table: DataTable, tone: dict) -> None:
+        columns = ("pick", "title", "type", "downloads", "favorites", "arch",
+                   "files", "uploaded", "author")
+        cells = [
+            "\\[x]" if int(tone["id"]) in self._local_selected else "\\[ ]",
+            *self._row_cells(tone),
+        ]
+        for column, value in zip(columns, cells):
+            try:
+                table.update_cell(
+                    f"local:{tone['id']}", column, value, update_width=False)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _local_tone_has_files(tone: dict | None) -> bool:
+        if not tone:
+            return False
+        if tone.get("local_dir"):
+            return True
+        return any(model.get("local_path") for model in (tone.get("models") or [])
+                   if isinstance(model, dict))
+
+    def _local_tone_matches(self, tone: dict, spec: SearchSpec,
+                            type_filter: str) -> bool:
+        if not self._local_tone_has_files(tone):
+            return False
+        if type_filter != "all" and str(tone.get("gear") or "") != type_filter:
+            return False
+        if spec.authors and str(tone.get("username") or "") not in spec.authors:
+            return False
+
+        def tokens(value) -> set[str]:
+            if isinstance(value, str):
+                return {value}
+            return {str(item) for item in (value or ())}
+
+        if spec.tags and not tokens(tone.get("tags")).intersection(spec.tags):
+            return False
+        if spec.makes and not tokens(tone.get("makes")).intersection(spec.makes):
+            return False
+        if spec.model_ids:
+            model_ids = {
+                int(model.get("id")) for model in (tone.get("models") or [])
+                if isinstance(model, dict) and str(model.get("id") or "").isdigit()
+            }
+            if not model_ids.intersection(spec.model_ids):
+                return False
+        if spec.text:
+            needle = spec.text.casefold()
+            haystack = " ".join(
+                str(tone.get(key) or "")
+                for key in ("title", "username", "description")
+            ).casefold()
+            if needle not in haystack:
+                return False
+        return True
+
+    def _mutation_tone_ids(self, event) -> set[int]:
+        """Resolve committed tone/model keys without scanning the library."""
+        keys = getattr(event, "keys", ()) or getattr(event, "object_keys", ())
+        tone_ids: set[int] = set()
+        model_ids: set[int] = set()
+        for raw_key in keys:
+            kind, separator, value = str(raw_key).partition(":")
+            if not separator or not value.isdigit():
+                continue
+            if kind == "tone":
+                tone_ids.add(int(value))
+            elif kind == "model":
+                model_ids.add(int(value))
+        if not model_ids:
+            return tone_ids
+
+        try:
+            rows = library.list_tones(model_ids=sorted(model_ids), limit=None)
+        except Exception:
+            rows = []
+        for tone in rows:
+            try:
+                tone_ids.add(int(tone["id"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        if tone_ids:
+            return tone_ids
+        # Narrow test doubles and remote-only caches may not expose the SQL
+        # model lookup. Use already loaded model metadata as a local fallback.
+        for tone_map in (self._remote_tones, self._favorites_tones):
+            for tone_id, tone in tone_map.items():
+                for model in tone.get("models") or ():
+                    try:
+                        if int(model.get("id")) in model_ids:
+                            tone_ids.add(int(tone_id))
+                            break
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+        return tone_ids
+
+    def _local_fingerprint(self) -> tuple:
+        with library.connect() as conn:
+            return tuple(conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0), "
+                "COALESCE(SUM(local_dir IS NOT NULL), 0), "
+                "(SELECT COUNT(*) FROM models WHERE local_path IS NOT NULL), "
+                "(SELECT COALESCE(GROUP_CONCAT(id || ':' || local_path, '|'), '') "
+                "FROM models WHERE local_path IS NOT NULL) FROM tones"
+            ).fetchone())
+
+    def _reconcile_local_rows(self, tone_ids: set[int]) -> None:
+        table = self.query_one("#lib-table-local", DataTable)
+        state = self._view_states["pane-local"]
+        query = str(state.get("query", ""))
+        spec = self._parse_or_notify(query) or SearchSpec()
+        type_filter = state.get("type_filter", "all")
+
+        def has_row(row_key: str) -> bool:
+            return any(row.key.value == row_key for row in table.ordered_rows)
+
+        for tone_id in sorted(tone_ids):
+            row_key = f"local:{tone_id}"
+            try:
+                tone = library.get_tone(tone_id)
+            except Exception:
+                continue
+            visible = bool(tone and self._local_tone_matches(
+                tone, spec, type_filter))
+            if visible:
+                if has_row("__status__"):
+                    table.remove_row("__status__")
+                table.cursor_type = "row"
+                if has_row(row_key):
+                    self._update_local_row(table, tone)
+                else:
+                    checked = "\\[x]" if tone_id in self._local_selected else "\\[ ]"
+                    table.add_row(checked, *self._row_cells(tone), key=row_key)
+            else:
+                if has_row(row_key):
+                    table.remove_row(row_key)
+                if not self._local_tone_has_files(tone):
+                    self._local_selected.discard(tone_id)
+
+        if any(row.key.value != "__status__" for row in table.ordered_rows):
+            if has_row("__status__"):
+                table.remove_row("__status__")
+            table.cursor_type = "row"
+        elif not has_row("__status__"):
+            self._status_row(
+                table,
+                "[bold $state-idle]○[/] no local tones — switch to TONE3000 "
+                "to search and import")
+        state["selection_keys"] = tuple(
+            f"local:{tone_id}" for tone_id in sorted(self._local_selected)
+        )
+        self._sync_legacy_type_options(table)
+        try:
+            self._fingerprint = self._local_fingerprint()
+        except Exception:
+            self._fingerprint = None
+
+    def _mutation_download_candidates(self,
+                                      affected_ids: set[int]) -> list[dict]:
+        """Snapshot visible remote rows before leaving the UI thread.
+
+        ``mark_download_state`` may query TONE3000 once per locally known tone,
+        so it must receive detached dictionaries and run outside Textual's
+        event loop. The current and cached views are deduplicated here; the
+        returned rows are applied back to every matching cache after the
+        worker completes.
+        """
+        maps: list[dict[int, dict]] = [self._remote_tones,
+                                       self._favorites_tones]
+        maps.extend(entry.get("tones", {})
+                    for entry in self._tone_cache.values())
+        if self._favorites_cache is not None:
+            maps.append(self._favorites_cache.get("tones", {}))
+        known: dict[int, dict] = {}
+        for tone_map in maps:
+            for raw_id, tone in tone_map.items():
+                try:
+                    tone_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if tone_id in affected_ids and isinstance(tone, dict):
+                    known.setdefault(tone_id, dict(tone))
+        return list(known.values())
+
+    def _apply_download_state_updates(self, updated: list[dict]) -> None:
+        """Apply worker results on the UI loop and repaint loaded rows."""
+        by_id: dict[int, dict] = {}
+        for tone in updated:
+            try:
+                by_id[int(tone["id"])] = tone
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not by_id:
+            return
+        maps: list[dict[int, dict]] = [self._remote_tones,
+                                       self._favorites_tones]
+        maps.extend(entry.get("tones", {})
+                    for entry in self._tone_cache.values())
+        if self._favorites_cache is not None:
+            maps.append(self._favorites_cache.get("tones", {}))
+        for tone_map in maps:
+            for tone_id, tone in by_id.items():
+                if tone_id in tone_map:
+                    tone_map[tone_id] = tone
+        try:
+            tone_table = self.query_one("#lib-table-tone", DataTable)
+        except Exception:
+            tone_table = None
+        try:
+            favorites_table = self.query_one("#lib-table-favorites", DataTable)
+        except Exception:
+            favorites_table = None
+        for tone_id, tone in by_id.items():
+            if tone_id in self._remote_tones and tone_table is not None:
+                self._update_remote_row(
+                    tone_table, f"remote:{tone_id}", self._row_cells(tone))
+            if tone_id in self._favorites_tones and favorites_table is not None:
+                self._update_remote_row(
+                    favorites_table, f"favorite:{tone_id}", self._row_cells(tone))
+
+    def _reconcile_download_states(self, table_id: str,
+                                   tones: dict[int, dict],
+                                   key_prefix: str,
+                                   affected_ids: set[int] | None = None) -> None:
+        """Compatibility wrapper for callers that still need sync refresh."""
+        ids = affected_ids if affected_ids is not None else {
+            int(tone_id) for tone_id in tones
+        }
+        candidates = self._mutation_download_candidates(ids)
+        if candidates:
+            self._apply_download_state_updates(
+                library.mark_download_state(candidates))
+
+    async def _reconcile_mutation_worker(self, tone_ids: set[int],
+                                         generation: int,
+                                         request_id: int) -> None:
+        """Refresh mutation-dependent remote state without blocking Textual."""
+        if not (self._screen_alive(generation)
+                and request_id == self._mutation_request_id):
+            return
+        candidates = self._mutation_download_candidates(tone_ids)
+        try:
+            updated = (await asyncio.to_thread(
+                library.mark_download_state, candidates)
+                       if candidates else [])
+        except Exception:
+            # The committed filesystem/DB mutation remains valid even when a
+            # remote state probe fails. Continue with the local reconciliation;
+            # the next normal search can retry the remote probe.
+            updated = []
+        if not (self._screen_alive(generation)
+                and request_id == self._mutation_request_id):
+            return
+
+        # Everything below this point is UI/cache work and therefore runs
+        # after the blocking state probe has returned to the event loop.
+        self._reconcile_local_rows(tone_ids)
+        self._apply_download_state_updates(updated)
+        self._restore_view_anchor("pane-local")
+
+        active = self._active_pane
+        if active == "pane-local":
+            self._update_local_selection_status()
+            self._publish_highlight(self._table())
+        elif active == "pane-tone":
+            self._update_tone_subtitle()
+            self._publish_highlight(self._table())
+        elif active == "pane-favorites":
+            self._update_favorites_subtitle()
+            self._publish_highlight(self._table())
+        else:
+            self._update_creator_subtitle()
+            self._publish_highlight(self._table())
+
+    def reconcile_after_mutation(self, event) -> None:
+        """Reconcile only library rows named by a successful mutation."""
+        if not getattr(self, "is_mounted", False):
+            return
+        operations = set(getattr(event, "operations", ()) or ())
+        operation = getattr(event, "operation", "")
+        library_operations = {"install", "uninstall", "import", "batch"}
+        if operation not in library_operations \
+                and not operations.intersection(library_operations):
+            return
+
+        tone_ids = self._mutation_tone_ids(event)
+        if not tone_ids:
+            return
+        for pane_id in self._view_states:
+            self._capture_view_state(pane_id)
+        self._mutation_request_id += 1
+        generation = self._screen_generation
+        request_id = self._mutation_request_id
+        self.run_worker(
+            partial(self._reconcile_mutation_worker, tone_ids,
+                    generation, request_id),
+            name="mutation-reconcile", exclusive=False)
 
     async def _load_more_local(self) -> None:
         """Append the next local SQLite page without resetting the cursor."""
@@ -1216,7 +1854,28 @@ class LibraryPanel(Vertical):
         if hasattr(self, "_active_pane") and self._active_pane == "pane-local":
             self._update_local_selection_status()
 
+    def remove_local_selection(self, tone_ids) -> None:
+        """Drop only rows whose uninstall actually changed local storage."""
+        removed = {int(tone_id) for tone_id in tone_ids}
+        if not removed:
+            return
+        selected = getattr(self, "_local_selected", set())
+        affected = selected.intersection(removed)
+        if not affected:
+            return
+        selected.difference_update(removed)
+        try:
+            table = self.query_one("#lib-table-local", DataTable)
+            for tone_id in affected:
+                table.update_cell(f"local:{tone_id}", "pick", "\\[ ]")
+        except Exception:
+            pass
+        if getattr(self, "_active_pane", None) == "pane-local":
+            self._update_local_selection_status()
+
     def uninstall_local_selection(self) -> None:
+        if getattr(self, "_active_pane", None) != "pane-local":
+            return
         tone_ids = sorted(self._local_selected)
         if not tone_ids:
             cursor_id = self._local_cursor_id()
@@ -1228,7 +1887,7 @@ class LibraryPanel(Vertical):
         spec = spec or self._parse_or_notify(query)
         if spec is None:
             return
-        self.clear_local_selection()
+        self._capture_view_state("pane-local")
         self._set_search_spec(query, spec)
         self._fingerprint = None
         self.refresh_rows()
@@ -1260,7 +1919,7 @@ class LibraryPanel(Vertical):
             "has_more": self._tone_has_more,
         }
 
-    def _restore_tone_entry(self, key: tuple) -> None:
+    def _restore_tone_entry(self, key: tuple, *, silent: bool = False) -> None:
         """Render a cached page set without touching the network."""
         entry = self._tone_cache[key]
         self._remote_tones = dict(entry["tones"])
@@ -1272,13 +1931,16 @@ class LibraryPanel(Vertical):
         table.cursor_type = "row"
         for tone_id, t in self._remote_tones.items():
             table.add_row(*self._row_cells(t), key=f"remote:{tone_id}")
-        status = self.query_one("#tone-status", MarqueeBar)
-        if key[2] == "favorites":
-            status.content = "(most favorited · enter detail)"
-        else:
-            status.content = (
-                f"({self._tone_status_hint(self._search_spec)}"
-                " · ✓ downloaded · ◐ partial · ○ new)")
+        if not silent:
+            status = self.query_one("#tone-status", MarqueeBar)
+            if key[2] == "favorites":
+                status.content = "(most favorited · enter detail)"
+            else:
+                status.content = (
+                    f"({self._tone_status_hint(self._search_spec)}"
+                    " · ✓ downloaded · ◐ partial · ○ new)")
+        if silent:
+            return
         self._update_tone_subtitle()
         self._restore_view_anchor("pane-tone")
         self._publish_highlight(table)
@@ -1297,8 +1959,13 @@ class LibraryPanel(Vertical):
         spec = spec or self._parse_or_notify(query)
         if spec is None:
             return
+        if not silent and self._active_pane != "pane-tone":
+            return
         generation = self._screen_generation
+        if not append:
+            self._capture_view_state("pane-tone")
         if append:
+            self._capture_view_state("pane-tone")
             request_id = self._tone_request_id
             key = self._tone_cache_key
         else:
@@ -1308,6 +1975,8 @@ class LibraryPanel(Vertical):
             self._tone_cache_key = key
             self._tone_error = False
         self._set_search_spec(query, spec)
+        self._tone_request_view = (
+            None if silent else self._view_identity("pane-tone"))
         table = self.query_one("#lib-table-tone", DataTable)
         status = self.query_one("#tone-status", MarqueeBar)
         # A page request owns this flag for its complete lifetime.  Cursor
@@ -1319,7 +1988,7 @@ class LibraryPanel(Vertical):
             if not refresh and key in self._tone_cache:
                 # Cache hit: render the cached page set, no network request.
                 if self._tone_alive(generation, request_id):
-                    self._restore_tone_entry(key)
+                    self._restore_tone_entry(key, silent=silent)
                 return
             self._tone_page = 0
             self._tone_total = None
@@ -1424,6 +2093,10 @@ class LibraryPanel(Vertical):
             self.post_message(ToneHighlighted(None))
             self._focus_if_pane_active(table)
             return
+        # Both a filtered first page and an appended page are a table
+        # reconciliation. Restore the stable row/viewport anchor after rows
+        # land so network completion cannot move the user's view.
+        self._restore_view_anchor("pane-tone")
         self._publish_highlight(table)
         if not append:
             self._focus_if_pane_active(table)
@@ -1442,6 +2115,8 @@ class LibraryPanel(Vertical):
         has no favorites ordering)."""
         sort = self._sort
         generation = self._screen_generation
+        if not silent:
+            self._capture_view_state("pane-tone")
         table = self.query_one("#lib-table-tone", DataTable)
         status = self.query_one("#tone-status", MarqueeBar)
         if sort == "favorites":
@@ -1452,7 +2127,7 @@ class LibraryPanel(Vertical):
             if not refresh and key in self._tone_cache:
                 if self._tone_alive(generation, request_id):
                     self._tone_loading = False
-                    self._restore_tone_entry(key)
+                    self._restore_tone_entry(key, silent=silent)
                 return
             self._tone_loading = True
             if not silent:
@@ -1472,7 +2147,16 @@ class LibraryPanel(Vertical):
                 return
             if not self._tone_alive(generation, request_id):
                 return
-            hits = await asyncio.to_thread(library.mark_download_state, hits)
+            try:
+                hits = await asyncio.to_thread(library.mark_download_state, hits)
+            except Exception as e:
+                if not self._tone_alive(generation, request_id) or silent:
+                    return
+                self._tone_loading = False
+                self._update_tone_subtitle(error=True)
+                self._show_status_if_empty(
+                    table, self._network_error("Favorites", e))
+                return
             if not self._tone_alive(generation, request_id):
                 return
             self._tone_loading = False
@@ -1502,6 +2186,110 @@ class LibraryPanel(Vertical):
             order = self._selected_order()
             await self._show_search(self._query or "", order_by=order,
                                     refresh=refresh, silent=silent)
+
+    # ---- favorites view ---------------------------------------------------
+
+    @staticmethod
+    def _favorite_matches(tone: dict, spec: SearchSpec) -> bool:
+        if spec.authors and str(tone.get("username") or "") not in spec.authors:
+            return False
+        if spec.tags:
+            tags = {str(tag) for tag in (tone.get("tags") or [])}
+            if not tags.intersection(spec.tags):
+                return False
+        if spec.makes:
+            makes = {str(make) for make in (tone.get("makes") or [])}
+            if not makes.intersection(spec.makes):
+                return False
+        if spec.text:
+            needle = spec.text.casefold()
+            haystack = " ".join(
+                str(tone.get(key) or "")
+                for key in ("title", "username", "description", "gear")
+            ).casefold()
+            if needle not in haystack:
+                return False
+        return True
+
+    def _render_favorites_entry(self, entry: dict, *, silent: bool = False) -> None:
+        self._favorites_tones = dict(entry.get("tones") or {})
+        table = self.query_one("#lib-table-favorites", DataTable)
+        table.clear()
+        table.cursor_type = "row"
+        for tone_id, tone in self._favorites_tones.items():
+            table.add_row(*self._row_cells(tone), key=f"favorite:{tone_id}")
+        if not self._favorites_tones:
+            self._status_row(table, "No favorite tones")
+        self._sync_legacy_type_options(table)
+        if silent:
+            return
+        self._update_favorites_subtitle()
+        self._restore_view_anchor("pane-favorites")
+        if self._active_pane == "pane-favorites":
+            self._publish_highlight(table)
+            self._focus_if_pane_active(table)
+
+    async def _reload_favorites_table(self, *, refresh: bool = False,
+                                      silent: bool = False) -> None:
+        """Load the official favorites source without changing row order later.
+
+        Favorites is a finite source today. Query and Type are applied to the
+        fetched source locally, so changing local download state never causes a
+        remote re-sort or a new page to replace the user's viewport.
+        """
+        generation = self._screen_generation
+        self._favorites_request_id += 1
+        request_id = self._favorites_request_id
+        self._capture_view_state("pane-favorites")
+        query = str(self._view_states["pane-favorites"].get("query", ""))
+        type_filter = self._type_filters.get("pane-favorites", "all")
+        sort = self._favorites_sort
+        key = (query, type_filter, sort)
+        self._favorites_request_view = (
+            None if silent else self._view_identity("pane-favorites"))
+        if not refresh and self._favorites_cache is not None:
+            cached_key = self._favorites_cache.get("key")
+            if cached_key == key and self._favorites_alive(generation, request_id):
+                self._favorites_loading = False
+                self._render_favorites_entry(self._favorites_cache, silent=silent)
+                return
+        table = self.query_one("#lib-table-favorites", DataTable)
+        self._favorites_loading = True
+        if not silent:
+            self._show_status_if_empty(table, "loading…")
+            self._update_favorites_subtitle(loading=True)
+        try:
+            hits = await asyncio.to_thread(library.tone3000.top_favorites, 50)
+            hits = await asyncio.to_thread(library.mark_download_state, hits)
+        except Exception as exc:
+            if not self._favorites_alive(generation, request_id):
+                return
+            self._favorites_loading = False
+            if not silent:
+                self._update_favorites_subtitle(error=True)
+                self._show_status_if_empty(
+                    table, self._network_error("Favorites", exc))
+            return
+        if not self._favorites_alive(generation, request_id):
+            return
+        parsed = self._parse_or_notify(query) or SearchSpec()
+        gear = type_filter
+        visible = [tone for tone in hits
+                   if (gear == "all" or str(tone.get("gear") or "") == gear)
+                   and self._favorite_matches(tone, parsed)]
+        self._favorites_loading = False
+        tones = {int(tone["id"]): tone for tone in visible}
+        entry = {"key": key, "tones": tones}
+        self._favorites_cache = entry
+        self._render_favorites_entry(entry, silent=silent)
+
+    def _favorites_alive(self, generation: int, request_id: int) -> bool:
+        if not (self._screen_alive(generation)
+                and request_id == self._favorites_request_id):
+            return False
+        return (self._favorites_request_view is None
+                or self._request_view_alive(
+                    "pane-favorites", self._favorites_request_view))
 
     def _update_creator_subtitle(self, *, loading: bool = False,
                                  error: bool = False) -> None:
@@ -1573,7 +2361,8 @@ class LibraryPanel(Vertical):
         name = str(username or "").lower()
         if not name or not library.tone3000.is_verified(name):
             return
-        for table_id in ("lib-table-local", "lib-table-tone"):
+        for table_id in ("lib-table-local", "lib-table-tone",
+                         "lib-table-favorites"):
             try:
                 table = self.query_one(f"#{table_id}", DataTable)
             except Exception:
@@ -1596,7 +2385,7 @@ class LibraryPanel(Vertical):
                         row.key, "creator", self._author_label(creator_name),
                         update_width=False)
 
-    def _restore_creator_entry(self) -> None:
+    def _restore_creator_entry(self, *, silent: bool = False) -> None:
         """Render the cached TOP CREATORS view without a network request."""
         entry = self._creator_cache
         self._creator_tones = dict(entry["tones"])
@@ -1614,6 +2403,8 @@ class LibraryPanel(Vertical):
             return
         if not ranked:
             self._status_row(table, "No creator data")
+        if silent:
+            return
         self._update_creator_subtitle()
         self._restore_view_anchor("pane-creators")
         self._publish_highlight(table)
@@ -1628,7 +2419,11 @@ class LibraryPanel(Vertical):
         The view is cached: a cache hit renders without a network request;
         `refresh` bypasses the cache, and `silent` fills the startup cache.
         """
+        if not silent and self._active_pane != "pane-creators":
+            return
         generation = self._screen_generation
+        if not append and not silent:
+            self._capture_view_state("pane-creators")
         if append:
             request_id = self._creator_request_id
         else:
@@ -1636,11 +2431,13 @@ class LibraryPanel(Vertical):
             if not refresh and self._creator_cache is not None:
                 if self._creator_alive(generation, request_id):
                     self._creator_loading = False
-                    self._restore_creator_entry()
+                    self._restore_creator_entry(silent=silent)
                 return
             self._creator_request_id += 1
             request_id = self._creator_request_id
             self._creator_error = False
+        self._creator_request_view = (
+            None if silent else self._view_identity("pane-creators"))
         table = self._creator_table()
         if table is None:
             return
@@ -1693,6 +2490,7 @@ class LibraryPanel(Vertical):
             table.clear()
         self._creator_loading = False
         self._creator_page = page
+        existing_count = len(self._creator_tones)
         new_creators: list[tuple[str, list[dict]]] = []
         for creator in hits:
             username = creator.get("username")
@@ -1701,7 +2499,7 @@ class LibraryPanel(Vertical):
                 new_creators.append((username, [creator]))
         self._creator_has_more = len(hits) == CREATOR_PAGE_SIZE
         if append:
-            start_rank = table.row_count + 1
+            start_rank = existing_count + 1
             for offset, (name, tones_) in enumerate(new_creators):
                 self._add_creator_row(table, start_rank + offset, name, tones_)
             shown = list(self._creator_tones.items())
@@ -1715,11 +2513,15 @@ class LibraryPanel(Vertical):
             self._status_row(table, "No creator data")
         self._save_creator_cache()
         if not silent:
-            self._update_creator_subtitle()
+            if self._active_pane == "pane-creators":
+                self._update_creator_subtitle()
+            # Appending is intentionally left to DataTable's natural row
+            # insertion. Restoring an anchor here would actively scroll the
+            # table and can overwrite a position changed while the request ran.
             if not append:
                 self._restore_view_anchor("pane-creators")
-            self._publish_highlight(table)
-            self._focus_if_pane_active(table)
+                self._publish_highlight(table)
+                self._focus_if_pane_active(table)
 
     def _render_creator_rows(
             self, ranked: list[tuple[str, list[dict]]],
@@ -1768,7 +2570,7 @@ class LibraryPanel(Vertical):
         if t.get("downloaded") is not None and total:
             files = f"{t['downloaded']}/{total}"
         return [
-            title, t.get("gear") or "?",
+            title, str(t.get("gear") or "?").upper(),
             str(t.get("downloads_count") or 0), str(t.get("favorites_count") or 0),
             _arch(t), files, _uploaded(t),
             self._author_label(t.get("username")),
@@ -1789,12 +2591,17 @@ class LibraryPanel(Vertical):
             return None
         if kind == "remote":
             return self._remote_tones.get(tone_num)
+        if kind == "favorite":
+            return self._favorites_tones.get(tone_num)
         if kind == "local":
             return library.get_tone(tone_num)
         return None
 
     def _publish_highlight(self, table: DataTable) -> None:
         """Send the current row's metadata to the detail pane without side effects."""
+        pane_id = _TABLE_PANE.get(table.id or "")
+        if pane_id is not None and pane_id != self._active_pane:
+            return
         rows = table.ordered_rows
         key_value = None
         if 0 <= table.cursor_row < len(rows):
@@ -1818,6 +2625,7 @@ class LibraryPanel(Vertical):
             self.post_message(CreatorFocused(key_value.partition(":")[2]))
             return
         tone = self._tone_for_key(key_value)
+        remote = bool(key_value and key_value.startswith(("remote:", "favorite:")))
         if isinstance(table, LibraryTable):
             table.set_focused_tone(key_value, tone)
         if key_value == self._highlighted_key:
@@ -1825,7 +2633,7 @@ class LibraryPanel(Vertical):
         self._highlighted_key = key_value
 
         if key_value:
-            self.post_message(ToneHighlighted(tone))
+            self.post_message(ToneHighlighted(tone, remote=remote))
 
     # ---- import (TONE3000 tab) ----------------------------------------------
 
@@ -1860,17 +2668,19 @@ class LibraryPanel(Vertical):
                 status.content = f"import failed: {e}"
                 bar.display = False
             return
-        if not self._import_alive(generation, request_id):
-            return
         if not t:
-            status.content = f"tone3000 has no tone {tone_id}"
-            bar.display = False
+            if self._import_alive(generation, request_id):
+                status.content = f"tone3000 has no tone {tone_id}"
+                bar.display = False
+            return
+        publish = getattr(self.app, "_publish_mutation", None)
+        if callable(publish):
+            publish("import", (f"tone:{tone_id}",), t.get("revision"))
+        if not self._import_alive(generation, request_id):
             return
         count = len(t.get("models") or [])
         bar.update(total=max(count, 1), progress=max(count, 1))
         status.content = f"Imported tone {tone_id}: {count} file(s) — see LOCAL"
-        self._fingerprint = None  # force repaint with the new row
-        self.refresh_rows()
         self.post_message(ToneSelected(tone_id))
 
     def _show_import_progress(self, generation: int, request_id: int,
@@ -1891,10 +2701,10 @@ class LibraryPanel(Vertical):
         if spec is None:
             return
         if event.input.id == "local-search":
-            self.clear_local_selection()
             if query:
                 self._show_local_filter(query, spec)
             else:
+                self._capture_view_state("pane-local")
                 self._set_search_spec("", SearchSpec())
                 self._fingerprint = None
                 self.refresh_rows()
@@ -1909,6 +2719,10 @@ class LibraryPanel(Vertical):
                 # An empty TONE3000 query is the public Trending feed; do not
                 # jump back to LOCAL merely because the input was cleared.
                 self.run_worker(partial(self._reload_tone_table), name="search", exclusive=True)
+        elif event.input.id == "favorites-search":
+            self._set_search_spec(query, spec)
+            self.run_worker(partial(self._reload_favorites_table),
+                            name="favorites", exclusive=True)
 
     def _border_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
         active = getattr(self, "_active_pane", "pane-local")
@@ -1940,6 +2754,12 @@ class LibraryPanel(Vertical):
                 actions.append(("r retry", self.retry_active))
             elif self._tone_has_more:
                 actions.append(("↓ more", self._load_more_from_hint))
+            actions.append(("enter detail", lambda: self._table().action_select_cursor()))
+            return actions
+        if active == "pane-favorites":
+            actions = []
+            if self._favorites_error:
+                actions.append(("r retry", self.retry_active))
             actions.append(("enter detail", lambda: self._table().action_select_cursor()))
             return actions
         actions = []
@@ -2004,35 +2824,49 @@ class LibraryPanel(Vertical):
                 self.run_worker(partial(self._show_top_creators, refresh=True),
                                 name="creators", exclusive=True)
             return
+        if event.select.id == "sort-filter-favorites":
+            self._favorites_sort = str(event.value)
+            self._view_states["pane-favorites"]["sort"] = self._favorites_sort
+            if self._active_pane == "pane-favorites":
+                self._favorites_cache = None
+                self.run_worker(partial(self._reload_favorites_table, refresh=True),
+                                name="favorites", exclusive=True)
+            return
         if event.select.id == "type-filter-menu":
             menu = event.select
-            if menu.target_table_id not in {"lib-table-local", "lib-table-tone"}:
+            if menu.target_table_id not in {
+                    "lib-table-local", "lib-table-tone", "lib-table-favorites"}:
                 # Select emits its initial value after the panel is mounted.
                 # The menu has no target until a result-table TYPE header is
                 # opened, so that event must not reload TONE3000 implicitly.
                 return
-            pane_id = ("pane-local" if menu.target_table_id == "lib-table-local"
-                       else "pane-tone")
+            pane_id = {
+                "lib-table-local": "pane-local",
+                "lib-table-tone": "pane-tone",
+                "lib-table-favorites": "pane-favorites",
+            }[menu.target_table_id]
+            self._capture_view_state(pane_id)
             value = str(event.value)
             self._type_filters[pane_id] = value
             self._view_states[pane_id]["type_filter"] = value
             self._type_filter = value
             menu.display = False
             if pane_id == "pane-local":
-                self.clear_local_selection()
                 self._fingerprint = None
                 self.refresh_rows()
-            else:
+            elif pane_id == "pane-tone":
                 self.run_worker(partial(self._reload_tone_table), name="search",
                                 exclusive=True)
+            else:
+                self.run_worker(partial(self._reload_favorites_table),
+                                name="favorites", exclusive=True)
             self._table_for_pane(pane_id).focus()
             return
         if event.select.id not in ("type-filter-local", "type-filter-tone"):
             return
         pane_id = ("pane-local" if event.select.id == "type-filter-local"
                    else "pane-tone")
-        if pane_id == "pane-local":
-            self.clear_local_selection()
+        self._capture_view_state(pane_id)
         self._type_filter = str(event.value)
         self._type_filters[pane_id] = self._type_filter
         self._view_states[pane_id]["type_filter"] = self._type_filter
@@ -2053,11 +2887,14 @@ class LibraryPanel(Vertical):
     def on_type_filter_menu_closed(self, _event: TypeFilterMenu.Closed) -> None:
         """Return focus to the table after dismissing the transient menu."""
         menu = self.query_one(TypeFilterMenu)
-        if menu.target_table_id not in {"lib-table-local", "lib-table-tone"}:
+        if menu.target_table_id not in {
+                "lib-table-local", "lib-table-tone", "lib-table-favorites"}:
             return
-        table = self._table_for_pane(
-            "pane-local" if menu.target_table_id == "lib-table-local"
-            else "pane-tone")
+        table = self._table_for_pane({
+            "lib-table-local": "pane-local",
+            "lib-table-tone": "pane-tone",
+            "lib-table-favorites": "pane-favorites",
+        }[menu.target_table_id])
         if table is not None and table.is_attached:
             table.focus()
 
@@ -2095,17 +2932,21 @@ class LibraryPanel(Vertical):
             # REQ-033：作者行 Enter/双击 → 跳 TONE3000 搜索 @author——
             # 搜索栏填上 @名并触发真实搜索（作者信息聚焦联动保留）。
             self._search_creator(tid)
-        else:
+        elif kind in {"remote", "favorite"}:
             # Legacy remote flow opens the install screen directly. Canonical
             # v0.2 first opens Remote Description so the Detail view tabs keep
             # the same source/target contract as LOCAL.
-            tone = self._remote_tones.get(int(tid))
+            tone = (self._remote_tones if kind == "remote"
+                    else self._favorites_tones).get(int(tid))
             if tone is None:
                 # 查找表与音色表失配（旧版本在 TOP CREATORS/本地刷新时清过
                 # 它）：行还在但数据没了——重载音色表而不是静默无响应。
                 self.notify("Tone list expired — reloading", severity="warning")
-                self.run_worker(partial(self._reload_tone_table),
-                                name="search", exclusive=True)
+                worker = (self._reload_tone_table
+                          if kind == "remote" else self._reload_favorites_table)
+                self.run_worker(partial(worker),
+                                name="search" if kind == "remote" else "favorites",
+                                exclusive=True)
                 return
             try:
                 canonical = not self.app.query_one("ChainPanel")._legacy_mode

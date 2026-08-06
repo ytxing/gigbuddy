@@ -55,13 +55,8 @@ def border_hint_hit(widget, screen_x: int, screen_y: int) -> tuple[str, int] | N
 
 def hint_span(label: str, token: str) -> tuple[int, int] | None:
     """Return a token's visual-cell span in a border subtitle."""
-    start = label.casefold().find(token.casefold())
-    if start >= 0:
-        visual_start = cell_len(label[:start])
-        return visual_start, visual_start + cell_len(token)
-
-    # Narrow surfaces may display the key-only form (``enter``) while the
-    # action mapping still contains its descriptive token (``enter load``).
+    # Match complete separator-delimited segments first.  A raw substring
+    # search would resolve the ``d`` action to the ``d`` in ``add``.
     key = _compact_hint_action(token).casefold()
     if not key:
         return None
@@ -69,7 +64,9 @@ def hint_span(label: str, token: str) -> tuple[int, int] | None:
     for segment in label.split("·"):
         stripped = segment.strip()
         leading = len(segment) - len(segment.lstrip())
-        if stripped.casefold().startswith(key + " ") or stripped.casefold() == key:
+        visible = stripped.casefold()
+        wanted = token.strip().casefold()
+        if visible == wanted or visible == key or visible.startswith(key + " "):
             segment_start = offset + leading
             segment_end = offset + len(segment.rstrip())
             return cell_len(label[:segment_start]), cell_len(label[:segment_end])
@@ -459,15 +456,9 @@ class GigBuddyModal(ShiftSelectableScreenMixin, ModalScreen):
             set_border_hint_hover(box, None)
 
     def on_click(self, event: MouseEvent) -> None:
-        """Click the existing border hint; double-click modal empty space closes."""
+        """Handle the explicit border action without dismissing the modal."""
         if self._click_border_hint(event):
             return
-        target = getattr(event, "widget", None)
-        blank_static = isinstance(target, Static) and _is_blank_static_click(target, event)
-        if (getattr(event, "chain", 1) >= 2
-                and (isinstance(target, (GigBuddyModal, ModalBox)) or blank_static)):
-            event.stop()
-            self.dismiss()
 
     def _confirm(self) -> None:
         raise NotImplementedError

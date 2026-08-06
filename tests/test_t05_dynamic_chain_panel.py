@@ -47,10 +47,40 @@ def _render_slot_text(slot, tone: dict | None) -> str:
     return f"{widget._state_lamp()} {widget._display_label()}\n{widget.render()}"
 
 
+def _render_slot_with_quality_warning(slot, *, unsupported: bool) -> str:
+    pytest.importorskip("textual", reason="T05 renderer smoke needs Textual")
+    from tui.panels import ChainSlotWidget
+
+    widget = ChainSlotWidget(
+        slot.index,
+        slot,
+        title="Tone",
+        gear="amp",
+        quality_unsupported=unsupported,
+    )
+    return _widget_plain(widget)
+
+
 def _widget_plain(widget) -> str:
     rendered = widget.render()
     plain = getattr(rendered, "plain", rendered)
     return plain if isinstance(plain, str) else str(plain)
+
+
+def test_quality_warning_only_marks_unsupported_non_empty_nam() -> None:
+    unsupported = ChainState(_chain(["amp.nam"])).slot(0)
+    supported = ChainState(_chain(["amp.nam"])).slot(0)
+    wav = ChainState(_chain(["cab.wav"])).slot(0)
+    empty = ChainState(_chain([None])).slot(0)
+
+    assert "quality unsupported" in _render_slot_with_quality_warning(
+        unsupported, unsupported=True)
+    assert "quality unsupported" not in _render_slot_with_quality_warning(
+        supported, unsupported=False)
+    assert "quality unsupported" not in _render_slot_with_quality_warning(
+        wav, unsupported=False)
+    assert "quality unsupported" not in _render_slot_with_quality_warning(
+        empty, unsupported=False)
 
 
 def _region_tuple(region) -> tuple[int, int, int, int]:
@@ -271,6 +301,7 @@ def test_dynamic_panel_routes_focus_bypass_reorder_delete_and_add(
             await pilot.pause()
             assert panel.state.slot_count == 1
             assert panel.state.target_index == 0
+            assert app.focused is panel.slot_widgets[0]
 
             await pilot.click(panel.add_slot)
             await pilot.pause()

@@ -48,7 +48,7 @@ def send_move(params, x):
 
 def test_click_dot_resets_each_parameter(monkeypatch, tmp_path):
     """三个点分别点击 → 对应参数恢复协议默认值（链文件 + UI）。"""
-    state, writes = setup_chain(monkeypatch, tmp_path)
+    state, writes = setup_chain(monkeypatch, tmp_path, quality=0.8)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -160,7 +160,7 @@ def test_dot_hover_highlights_only_itself(monkeypatch, tmp_path):
 
 def test_dot_press_does_not_long_press(monkeypatch, tmp_path):
     """按住点 >350ms 也只恢复一次（点不进长按步进）。"""
-    state, writes = setup_chain(monkeypatch, tmp_path)
+    state, writes = setup_chain(monkeypatch, tmp_path, quality=0.8)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)

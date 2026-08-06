@@ -1,6 +1,6 @@
 # ADR-0001：Chain 协议迁移到 Slots 数组
 
-- 状态：已采纳（v0.2.13）
+- 状态：已采纳（v0.2.14）
 - 日期：2026-08-04
 
 ## 背景
@@ -9,7 +9,7 @@ Chain 从固定两级（model/ir）升级为多 Slot 架构（REQ-032，见 CONT
 
 ## 决策
 
-`live_chain.json` 的链配置从 `model`/`ir` 两个键迁移为**有序 `slots` 数组**。具体校验、默认值、旧格式读取和原子写入以 `docs/ui-interaction-spec-v0.2.md` v0.2.13 及其 canonical protocol seam 为准：
+`live_chain.json` 的链配置从 `model`/`ir` 两个键迁移为**有序 `slots` 数组**。具体校验、默认值、旧格式读取、managed transaction 身份和原子写入以 `docs/ui-interaction-spec-v0.2.md` v0.2.14 及其 canonical protocol seam 为准：
 
 ```json
 {

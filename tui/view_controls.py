@@ -194,6 +194,9 @@ class SearchBar(Horizontal):
         background: $surface;
         color: $text;
     }
+    SearchBar.search-bar--compact > Input {
+        min-width: 10;
+    }
     SearchBar > Input:focus {
         background: $boost;
         border: none;
@@ -256,6 +259,9 @@ class SearchBar(Horizontal):
             )
             yield NonSelectableStatic("·", classes="search-separator")
             yield NonSelectableStatic("SORT", classes="search-label")
+        else:
+            # Keep sort-only bars right-aligned in the same fixed final track.
+            yield NonSelectableStatic("", classes="search-spacer")
         yield Select(
             self._sort_options,
             value=self._sort_options[0][1] if self._sort_options else Select.NULL,

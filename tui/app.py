@@ -9,14 +9,18 @@ Run: .venv/bin/python -m tui            (spawns the realtime engine automaticall
 """
 import argparse
 import asyncio
+from copy import deepcopy
 from functools import partial
+import hashlib
 import json
 import re
 import subprocess
 import sys
 import time
+import uuid
 import webbrowser
 from pathlib import Path
+from urllib.parse import unquote
 
 from rich.cells import cell_len
 from rich.markup import escape
@@ -35,8 +39,9 @@ if str(SRC) not in sys.path:
 
 from . import live  # noqa: E402
 from .chain_state import (ChainStateError, SlotStatus,
-                          chain_fingerprint)  # noqa: E402
+                          CommitReceipt, PreparedCommit, chain_fingerprint)  # noqa: E402
 import library  # noqa: E402
+import chain_protocol  # noqa: E402
 from .input_screen import InputSourceScreen  # noqa: E402
 from .install_screen import PackInstallScreen  # noqa: E402
 from .library_panel import (LibraryPanel, LibraryTable, RemoteToneSelected,
@@ -44,12 +49,15 @@ from .library_panel import (LibraryPanel, LibraryTable, RemoteToneSelected,
                             VerifiedAuthor)  # noqa: E402
 from .marquee import MarqueeBar  # noqa: E402
 from .metadata import signed_fixed  # noqa: E402
+from .mutations import (MutationCommitted, MutationRefreshCoordinator,
+                        ViewAnchor)  # noqa: E402
 from .panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar,
                      AddSlotButton, ChainSlotWidget, DeviceChanged,
                      InterfaceBar, MeterBar, NodeSwitchButton, NodeWidget)  # noqa: E402
 from .picker import TonePickerScreen  # noqa: E402
-from .presets import (PresetDeleteModal, PresetNameModal, PresetNoteModal,
-                      PresetPanel, PresetPickerScreen, PresetRenameModal)  # noqa: E402
+from .presets import (PresetDeleteModal, PresetEditModal, PresetLoadConfirm,
+                      PresetNameModal, PresetNoteModal, PresetPanel,
+                      PresetRenameModal)  # noqa: E402
 from .selection import ShiftSelectableScreen  # noqa: E402
 from .uninstall_screen import LocalUninstallScreen  # noqa: E402
 
@@ -61,6 +69,216 @@ FIXED_SEMANTIC_COLORS = {
     "success": "#8fb573",
     "state-idle": "#8a817a",
 }
+
+
+def _preset_mutation_key(preset_id: object, name: object = None) -> str | None:
+    """Build the stable row key used by all preset mutation events."""
+    if isinstance(preset_id, int) and not isinstance(preset_id, bool):
+        return f"preset:{preset_id}"
+    if isinstance(name, str) and name:
+        # Lightweight test doubles and legacy callers may not expose ids. Real
+        # database rows always take the stable-id branch above.
+        return f"preset-name:{name}"
+    return None
+
+
+class _ManagedNoOp(Exception):
+    """Internal signal for a transactional mutation that made no change."""
+
+
+class _ManagedChainAdapter:
+    """Bridge ChainState's transaction seam to the managed file/runtime pair."""
+
+    def __init__(self, app: "GigBuddyApp", *, expected_chain: dict | None = None) -> None:
+        self._app = app
+        path = live.CHAIN_FILE
+        self._previous_payload = path.read_bytes() if path.exists() else None
+        self._base_fingerprint = (
+            hashlib.sha256(self._previous_payload).hexdigest()
+            if self._previous_payload is not None else None)
+        if self._previous_payload is None:
+            self._base_chain = {}
+        else:
+            raw = json.loads(self._previous_payload.decode("utf-8"))
+            self._base_chain = chain_protocol.normalize_chain(
+                raw, root=live.ROOT)
+        if expected_chain is not None:
+            try:
+                expected_fingerprint = chain_protocol.serialized_chain_fingerprint(
+                    expected_chain, root=live.ROOT)
+                base_fingerprint = chain_protocol.serialized_chain_fingerprint(
+                    self._base_chain, root=live.ROOT)
+            except chain_protocol.ChainProtocolError as exc:
+                raise chain_protocol.ChainFileConflict(
+                    "managed UI state is no longer a valid chain base") from exc
+            if expected_fingerprint != base_fingerprint:
+                raise chain_protocol.ChainFileConflict(
+                    "chain changed before the managed transaction started")
+        base_revision = self._base_chain.get("revision", 0)
+        if (isinstance(base_revision, bool)
+                or not isinstance(base_revision, int) or base_revision < 0):
+            raise ChainStateError("managed chain has an invalid base revision")
+        self._base_revision = base_revision
+        self._runtime_before: tuple[dict[str, object], str | None] | None = None
+        self._runtime_session_id: str | None = None
+        self._transaction_id: str | None = None
+        self._candidate_fingerprint: str | None = None
+        self._file_write_succeeded = False
+        self._file_restore_succeeded = False
+        self._restore_transaction_id: str | None = None
+        self._restore_file_was_absent = False
+        self._restore_file_fingerprint: str | None = None
+        self._timeout = 2.0
+
+    def snapshot_runtime(self):
+        self._runtime_before = (
+            live.read_runtime_report(), live.level_file_fingerprint())
+        return self._runtime_before
+
+    def prepare(self, chain: dict) -> PreparedCommit:
+        current_fingerprint = live.chain_file_fingerprint()
+        if current_fingerprint != self._base_fingerprint:
+            raise chain_protocol.ChainFileConflict(
+                "chain changed while the managed transaction was preparing")
+        current_revision = self._base_revision
+        revision = current_revision + 1
+        self._transaction_id = uuid.uuid4().hex
+        candidate = deepcopy(chain)
+        candidate["_transaction_id"] = self._transaction_id
+        normalized = chain_protocol.normalize_chain(
+            candidate, root=live.ROOT, revision=revision)
+        self._timeout = min(10.0, 2.0 + 0.5 * len(normalized["slots"]))
+        self._runtime_session_id = live.request_runtime_prepare(
+            normalized, self._transaction_id, timeout=self._timeout)
+        return PreparedCommit(
+            normalized,
+            {"revision": revision, "transaction_id": self._transaction_id},
+            revision)
+
+    def write_file(self, chain: dict) -> CommitReceipt:
+        self._candidate_fingerprint = chain_protocol.serialized_chain_fingerprint(
+            chain, root=live.ROOT)
+        self._file_write_succeeded = False
+        self._file_restore_succeeded = False
+        self._restore_transaction_id = None
+        self._restore_file_was_absent = False
+        self._restore_file_fingerprint = None
+        try:
+            live.write_chain(
+                chain,
+                expected_fingerprint=self._base_fingerprint,
+                expected_revision=self._base_revision,
+                revision=chain.get("revision"),
+            )
+        except Exception:
+            # The protocol can fail after rename (for example, while
+            # re-reading the just-written file). Detect that case without
+            # mistaking a CAS rejection for a successful write.
+            self._file_write_succeeded = (
+                live.chain_file_fingerprint() == self._candidate_fingerprint)
+            raise
+        self._file_write_succeeded = True
+        persisted = live.read_chain()
+        revision = persisted.get("revision")
+        if (isinstance(revision, bool) or not isinstance(revision, int)
+                or revision < 0):
+            raise ChainStateError("managed write did not return a revision")
+        return CommitReceipt(
+            self._candidate_fingerprint or live.last_chain_write_fingerprint()
+            or live.chain_file_fingerprint(),
+            revision,
+        )
+
+    def apply_runtime(self, prepared: PreparedCommit) -> None:
+        wait_kwargs = {
+            "transaction_id": prepared.runtime.get("transaction_id"),
+            "previous": self._runtime_before,
+            "timeout": self._timeout,
+        }
+        if self._runtime_session_id is not None:
+            wait_kwargs["expected_session_id"] = self._runtime_session_id
+        live.wait_for_runtime_revision(prepared.revision, **wait_kwargs)
+
+    def restore_file(self, _chain: dict) -> None:
+        if not self._file_write_succeeded:
+            return
+        restore_payload = self._previous_payload
+        if restore_payload is None:
+            # A missing chain file still has a runtime state: the canonical
+            # zero-slot/default chain. Publish that state through a temporary
+            # file so the engine can acknowledge rollback before the file is
+            # removed again.
+            try:
+                previous = chain_protocol.normalize_chain(
+                    self._base_chain, root=live.ROOT, revision=self._base_revision)
+            except chain_protocol.ChainProtocolError as exc:
+                raise ChainStateError(
+                    "managed rollback base chain is invalid") from exc
+        else:
+            try:
+                previous = json.loads(restore_payload.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ChainStateError(
+                    "managed rollback payload is not valid JSON") from exc
+            if not isinstance(previous, dict):
+                raise ChainStateError("managed rollback payload is not an object")
+        self._restore_transaction_id = uuid.uuid4().hex
+        previous["_transaction_id"] = self._restore_transaction_id
+        # Rollback is a new managed transaction, even though it restores the
+        # old chain content. Keep the base revision explicit so the prepare
+        # request and the file written below describe the same candidate.
+        previous["revision"] = self._base_revision
+        self._runtime_session_id = live.request_runtime_prepare(
+            previous, self._restore_transaction_id, timeout=self._timeout)
+        if self._previous_payload is None:
+            self._restore_file_was_absent = True
+            restore_payload = (
+                json.dumps(previous, ensure_ascii=False, indent=2) + "\n"
+            ).encode("utf-8")
+        else:
+            restore_payload = (
+                json.dumps(previous, ensure_ascii=False, indent=2) + "\n"
+            ).encode("utf-8")
+        live.restore_chain_bytes(
+            restore_payload,
+            expected_fingerprint=self._candidate_fingerprint,
+        )
+        self._restore_file_fingerprint = live.chain_file_fingerprint()
+        self._file_restore_succeeded = True
+
+    def restore_runtime(self, _snapshot) -> None:
+        if not self._file_restore_succeeded:
+            return
+        if not self._app._managed_engine_active():
+            raise ChainStateError(
+                "managed engine became inactive during rollback")
+        previous_report = self._runtime_before[0] if self._runtime_before else {}
+        previous_revision = previous_report.get("revision")
+        if (isinstance(previous_revision, bool)
+                or not isinstance(previous_revision, int)
+                or previous_revision < 0):
+            previous_revision = self._base_revision
+        if not self._restore_transaction_id:
+            raise ChainStateError("managed rollback has no transaction id")
+        wait_kwargs = {
+            "transaction_id": self._restore_transaction_id,
+            "previous": self._runtime_before,
+            "timeout": self._timeout,
+        }
+        if self._runtime_session_id is not None:
+            wait_kwargs["expected_session_id"] = self._runtime_session_id
+        live.wait_for_runtime_revision(previous_revision, **wait_kwargs)
+        if self._restore_file_fingerprint is None:
+            raise ChainStateError(
+                "managed rollback temporary chain disappeared")
+        # Only restore the caller-visible file after the new rollback
+        # acknowledgement proves that runtime no longer uses the temporary
+        # transaction candidate. Existing files must regain their exact
+        # original bytes, including formatting and unknown compatibility data.
+        live.restore_chain_bytes(
+            None if self._restore_file_was_absent else self._previous_payload,
+            expected_fingerprint=self._restore_file_fingerprint,
+        )
 
 # Warm guitar-amp palette: tube-amber accents on a dark cabinet-brown base.
 GIGBUDDY_THEME = Theme(
@@ -417,6 +635,10 @@ class GigBuddyApp(App):
         opacity: 1;
     }
     InterfaceBar MeterBar { height: 2; width: 1fr; border: none; padding: 0 1; }
+    InterfaceBar #runtime-status {
+        width: auto; min-width: 22; height: 1; color: $text-muted;
+        content-align: center middle; margin-right: 1;
+    }
     InterfaceBar .audio-action {
         height: 3; width: 18; content-align: center middle;
         border: round $secondary; text-style: bold; color: $foreground;
@@ -554,23 +776,10 @@ class GigBuddyApp(App):
     BINDINGS = [
         Binding("/", "focus_search", "search"),
         Binding("t", "next_theme", "theme"),
-        Binding("g", "bump_gain(-0.1)", "gain -"),
-        Binding("G", "bump_gain(+0.1)", "gain +"),
-        Binding("m", "bump_master(-0.05)", "master -"),
-        Binding("M", "bump_master(+0.05)", "master +"),
-        Binding("p", "open_preset_picker", "preset…"),
-        Binding("ctrl+s", "save_preset", "save preset"),
-        Binding("ctrl+shift+s", "save_preset_as", "save preset as", show=False),
         # REQ-017: preset 应用改的是链配置（live_chain.json）——undo/redo
         # 即链配置快照的恢复/还原（ctrl+shift+z = redo；无 y 键冲突）
         Binding("ctrl+z", "undo_chain", "undo preset"),
         Binding("ctrl+shift+z", "redo_chain", "redo preset"),
-        Binding("q", "bump_quality(-0.05)", "quality -"),
-        Binding("Q", "bump_quality(+0.05)", "quality +"),
-        # 干声试听播放控制（输入源为干声文件时生效；库/预设表聚焦时 space 仍为行选中）
-        Binding("space", "playback_toggle", "play/pause", show=False),
-        Binding("s", "playback_stop", "stop", show=False),
-        Binding("l", "playback_loop", "loop", show=False),
         # no single-key quit: Ctrl+C twice (from any screen/modal) exits
         Binding("ctrl+c", "request_quit", "quit (×2)", show=False,
                 priority=True),
@@ -609,13 +818,22 @@ class GigBuddyApp(App):
         # double-click toggles: remembered values for restoring IR / amp gain
         self._ir_backup: str | None = None
         self._amp_model_backup: str | None = None
-        self._master_backup: float | None = None
         self._last_quit_at = 0.0  # Ctrl+C twice within QUIT_WINDOW_S exits
         # 播放控制操作时间戳：操作后短暂抑制 level.json 回传覆盖，
         # 避免引擎处理链延迟期间 play_state 来回跳变（0.1s tick 旧状态覆盖）
         self._playback_op_ts = 0.0
         self._header_status_timer = None
         self._header_status_identity: str | None = None
+        self._last_refresh_chain_fingerprint: str | None = None
+        self._last_runtime_status_report: tuple[int | None, str] | None = None
+        self._mutation_refresh = MutationRefreshCoordinator(
+            self.call_after_refresh, self._reconcile_after_mutation,
+            self._capture_mutation_anchors)
+        # Textual queries are scoped to the active Screen. Keep the persistent
+        # main-surface widgets explicitly so a modal cannot hide them from the
+        # mutation coordinator.
+        self._mutation_pages: tuple[object, ...] = ()
+        self._mutation_anchors: dict[int, ViewAnchor] = {}
         self._device_request_generation = 0
         self._save_confirm_name: str | None = None
         self._save_confirm_at = 0.0
@@ -672,9 +890,9 @@ class GigBuddyApp(App):
                             callback=lambda: self.action_bump_quality(-0.05))
         yield SystemCommand(title="Quality +0.05", help="increase model quality",
                             callback=lambda: self.action_bump_quality(0.05))
-        yield SystemCommand(title="Preset…", help="load a named chain preset (also: p)",
+        yield SystemCommand(title="Focus Presets", help="focus the Presets panel",
                             callback=self.action_open_preset_picker, discover=True)
-        yield SystemCommand(title="Save active preset", help="save the current chain (ctrl+s twice)",
+        yield SystemCommand(title="Save active preset", help="save the current chain",
                             callback=self.action_save_preset, discover=True)
         yield SystemCommand(title="Save preset as…", help="create a new named preset",
                             callback=self.action_save_preset_as, discover=True)
@@ -723,6 +941,70 @@ class GigBuddyApp(App):
         except NoMatches:
             pass
 
+    def _publish_mutation(self, operation: str, keys=(), revision=None) -> None:
+        """Publish one successful persistence change to the app coordinator."""
+        self.post_message(MutationCommitted(operation, keys, revision))
+
+    def on_mutation_committed(self, event: MutationCommitted) -> None:
+        self._mutation_refresh.receive(event)
+
+    def _registered_mutation_pages(self) -> tuple[object, ...]:
+        """Return retained main-surface pages, including inactive panes."""
+        pages = self._mutation_pages
+        if pages:
+            return pages
+        page_types = (ChainPanel, DetailPane, LibraryPanel, PresetPanel)
+        return tuple(
+            page for page_type in page_types
+            for page in self.query(page_type)
+        )
+
+    def _capture_mutation_anchors(self) -> None:
+        """Capture every retained page before one reconcile cycle starts."""
+        anchors: dict[int, ViewAnchor] = {}
+        for page in self._registered_mutation_pages():
+            capture = getattr(page, "capture_view_anchor", None)
+            if not callable(capture):
+                continue
+            try:
+                anchor = capture()
+            except Exception as exc:
+                self.log.debug("view anchor capture failed for %r: %s", page, exc)
+                continue
+            if isinstance(anchor, ViewAnchor):
+                anchors[id(page)] = anchor
+        self._mutation_anchors = anchors
+
+    def _reconcile_after_mutation(self, event: MutationCommitted) -> None:
+        """Reconcile every mounted main-surface page exactly once."""
+        pages = self._registered_mutation_pages()
+        seen: set[int] = set()
+        for page in pages:
+            if id(page) in seen:
+                continue
+            seen.add(id(page))
+            anchor = self._mutation_anchors.get(id(page))
+            accept = getattr(page, "set_mutation_anchor", None)
+            if anchor is not None and callable(accept):
+                accept(anchor)
+            try:
+                page.reconcile_after_mutation(event)
+            except (AttributeError, NoMatches):
+                continue
+            except Exception as exc:
+                # One stale/detached page must not prevent the other retained
+                # pages from reconciling this committed mutation.
+                self.log.error("mutation reconcile failed for %r: %s", page, exc)
+            finally:
+                restore = getattr(page, "restore_view_anchor", None)
+                if anchor is not None and callable(restore):
+                    try:
+                        restore(anchor)
+                    except Exception as exc:
+                        self.log.debug(
+                            "view anchor restore failed for %r: %s", page, exc)
+        self._mutation_anchors = {}
+
     def action_next_theme(self) -> None:
         themes = list(self.available_themes)
         i = themes.index(self.theme)
@@ -733,6 +1015,9 @@ class GigBuddyApp(App):
         # REQ-017: 链配置撤销/重做栈（preset 应用快照），启动清空。
         self._undo_stack: list[dict] = []
         self._redo_stack: list[dict] = []
+        page_types = (ChainPanel, DetailPane, LibraryPanel, PresetPanel)
+        self._mutation_pages = tuple(
+            self.query_one(page_type) for page_type in page_types)
         self._ensure_engine()
         self.set_interval(0.1, self.refresh_from_files)
         self.query_one("#lib-table-local").focus()
@@ -771,7 +1056,11 @@ class GigBuddyApp(App):
              if isinstance(slot, dict) and slot.get("path")), "")
         inp = live.chain_input(cfg)
         dry_path = inp.get("file") if inp.get("source") == "file" else ""
-        has_source = ((model_path and Path(model_path).exists())
+        # Instrument input is already a valid source even when the chain has
+        # zero effective Slots. This is the legal direct-through state in the
+        # v0.2 engine contract; only a file input needs an existing WAV.
+        has_source = (inp.get("source") != "file"
+                      or (model_path and Path(model_path).exists())
                       or (dry_path and Path(dry_path).exists()))
         if not has_source:
             if self._engine is not None:
@@ -780,13 +1069,22 @@ class GigBuddyApp(App):
             return
         self._start_engine()
 
+    def _managed_engine_active(self) -> bool:
+        """Whether this App owns a live managed runtime transaction target."""
+        return bool(
+            self._spawn_engine
+            and self._engine is not None
+            and self._engine.poll() is None
+        )
+
     def _start_engine(self) -> None:
         """Spawn realtime_cli as a child; it hot-swaps via live_chain.json and feeds
         level.json back. Killed on TUI exit. Use --no-engine if running it externally."""
         root = Path(__file__).resolve().parent.parent
         cmd = [str(root / "bin" / "realtime_cli"),
                "--live", str(live.CHAIN_FILE), "--level-file", str(live.LEVEL_FILE),
-               "--root", str(root)]   # REQ-035 portable：chain 内相对路径按根解析
+               "--root", str(root), "--managed",
+               "--control-file", str(live.CONTROL_FILE)]   # REQ-035 portable：chain 内相对路径按根解析
         if self._dev_in:
             cmd += ["--in", self._dev_in]
         if self._dev_out:
@@ -798,6 +1096,14 @@ class GigBuddyApp(App):
         if self._sr:
             cmd += ["--sr", str(self._sr)]
         try:
+            # Control/reply files are process-local session state. Remove only
+            # these exact sidecars so a restarted engine cannot consume a
+            # request from the previous process or inherit its ready marker.
+            for sidecar in (live.CONTROL_FILE, live.CONTROL_REPLY_FILE):
+                try:
+                    sidecar.unlink()
+                except FileNotFoundError:
+                    pass
             log = open(root / "data" / "engine.log", "w")
             self._engine = subprocess.Popen(cmd, stdout=log, stderr=log,
                                             stdin=subprocess.DEVNULL)
@@ -857,16 +1163,17 @@ class GigBuddyApp(App):
         if event.kind == "mute":
             # chain-level toggle, works regardless of engine ownership
             cfg = live.read_chain()
-            if float(cfg.get("master", 1.0)) > 0:
-                self._master_backup = float(cfg.get("master", 1.0))
-                cfg["master"] = 0.0
+            cfg["mute"] = not bool(cfg.get("mute", False))
+            if cfg["mute"]:
                 note = "MUTED (click again to restore)"
             else:
-                cfg["master"] = getattr(self, "_master_backup", None) or 1.0
-                note = f"Unmuted → master {signed_fixed(cfg['master'])}"
-            live.write_chain(cfg)
-            cfg = self._publish_chain_write(cfg)
-            self.query_one(InterfaceBar).set_muted(cfg["master"] <= 0)
+                note = f"Unmuted · master {signed_fixed(cfg.get('master', 1.0))}"
+            cfg = self._commit_external_chain(cfg)
+            if cfg is None:
+                return
+            self.query_one(InterfaceBar).set_muted(bool(cfg.get("mute", False)))
+            self._publish_mutation(
+                "mute", ("chain:mute",), cfg.get("revision"))
             self.notify(note)
             return
         if event.kind == "buffer":
@@ -895,20 +1202,19 @@ class GigBuddyApp(App):
             self._block, self._sr))
 
     def on_pack_install_screen_installed(self, event: PackInstallScreen.Installed) -> None:
-        """Pack installed: toast + library refresh + show the tone in the detail pane."""
+        """Pack installed: preserve the existing detail flow and reconcile once."""
         self.notify(f"Installed {event.count} file(s) from tone {event.tone_id}")
-        panel = self.query_one(LibraryPanel)
-        panel._fingerprint = None
-        panel.refresh_rows()
-        self.on_tone_selected(ToneSelected(event.tone_id))
+        # Canonical v0.2 opens PackInstallScreen from Remote Pack; dismissing
+        # it must leave that Pack view in place so the coordinator can update
+        # the installed marker without changing the user's context. Legacy
+        # model/ir chains still use the old picker flow.
+        if self.query_one(ChainPanel)._legacy_mode:
+            self.on_tone_selected(ToneSelected(event.tone_id))
 
     def on_local_uninstall_screen_uninstalled(
-            self, event: LocalUninstallScreen.Uninstalled) -> None:
-        panel = self.query_one(LibraryPanel)
-        panel.clear_local_selection()
-        panel._fingerprint = None
-        panel.refresh_rows()
-        self.query_one(DetailPane).clear()
+        self, event: LocalUninstallScreen.Uninstalled) -> None:
+        tone_ids = tuple(event.tone_ids)
+        self.query_one(LibraryPanel).remove_local_selection(tone_ids)
         self.notify(f"Uninstalled {event.count} file(s) · metadata retained")
 
     def refresh_from_files(self) -> None:
@@ -926,19 +1232,40 @@ class GigBuddyApp(App):
             return
         self._ensure_engine()   # restart after crash / start after picking a tone
         in_lvl, out_lvl, play_state, play_pos = live.read_levels()
+        runtime_revision, runtime_status = live.read_runtime_status()
         meter.levels = (in_lvl, out_lvl)
+        runtime_report = (runtime_revision, runtime_status)
+        if (runtime_status == "rejected"
+                and runtime_report != self._last_runtime_status_report):
+            self.notify(
+                "Runtime rejected the chain; previous applied revision kept",
+                severity="error")
+        self._last_runtime_status_report = runtime_report
         cfg = live.read_chain()
-        self._clear_external_bypass_candidates(cfg)
-        chain.chain = cfg
+        chain_error = live.consume_chain_error()
+        if chain_error:
+            self.notify(
+                f"Chain update rejected; keeping last valid chain: {chain_error}",
+                severity="error")
+        try:
+            chain_revision = chain_fingerprint(cfg)
+        except (TypeError, ValueError):
+            chain_revision = None
+        chain_changed = chain_revision != self._last_refresh_chain_fingerprint
+        if chain_changed:
+            self._clear_external_bypass_candidates(cfg)
+            chain.chain = cfg
+            self._last_refresh_chain_fingerprint = chain_revision
         # 用户刚操作播放控制（写入 chain 后引擎处理有延迟）：窗口内不用
         # level.json 的旧 play_state 覆盖，避免 PLAY/PAUSE 来回跳变
         if time.monotonic() - self._playback_op_ts > 0.4:
             chain.update_playback(play_state, play_pos)  # 引擎实际播放状态（0.1s 回传）
-        master = float(cfg.get("master", 1.0))
-        if master > 0:
-            self._master_backup = master
-        self.query_one(InterfaceBar).set_muted(master <= 0)
-        detail.refresh_pack_active(cfg)  # pack 视图的 ▶ 标记跟随外部链变更
+        interface = self.query_one(InterfaceBar)
+        interface.set_muted(bool(cfg.get("mute", False)))
+        interface.set_runtime_status(cfg.get("revision"), runtime_revision,
+                                     runtime_status)
+        if chain_changed:
+            detail.refresh_pack_active(cfg)  # pack 视图的 ▶ 标记跟随外部链变更
         library_panel.check_active_tab()
         library_panel.refresh_rows()
         preset_panel.refresh_presets()
@@ -966,10 +1293,24 @@ class GigBuddyApp(App):
         """Publish a non-structural TUI chain write without losing Slot UI state."""
         panel = self.query_one(ChainPanel)
         persisted = live.read_chain() or cfg
+        managed_fingerprint = live.last_chain_write_fingerprint()
+        managed_revision = persisted.get("revision")
+        try:
+            # This write is already reflected in the process-local Slot
+            # objects.  Adopt only its chain-level fields so a writer without
+            # a byte fingerprint cannot turn a just-created BYPASS into
+            # EMPTY.  A path/order change (preset load, undo, redo) falls
+            # through to the normal replacement rules below.
+            panel.state.adopt_managed_chain(persisted)
+        except ChainStateError:
+            panel.state.reconcile(
+                persisted,
+                fingerprint=managed_fingerprint,
+                revision=managed_revision,
+            )
         try:
             panel.state.mark_managed_write(
-                live.last_chain_write_fingerprint(),
-                persisted.get("revision"),
+                managed_fingerprint, managed_revision,
             )
         except ChainStateError:
             pass
@@ -981,6 +1322,37 @@ class GigBuddyApp(App):
         panel._refresh_dynamic_slots()
         return persisted
 
+    def _commit_external_chain(self, cfg: dict) -> dict | None:
+        """Write a chain through the external-engine file boundary once.
+
+        A managed engine gets the full prepare/write/runtime acknowledgement
+        path. ``--no-engine`` and externally owned engines intentionally retain
+        the file-only contract from the external-engine part of the spec.
+        """
+        try:
+            panel = self.query_one(ChainPanel)
+        except NoMatches:
+            panel = None
+        if (panel is not None and not panel._legacy_mode
+                and self._managed_engine_active()):
+            adapter = _ManagedChainAdapter(
+                self, expected_chain=panel.state.to_chain())
+            try:
+                committed = panel.state.commit(
+                    adapter,
+                    lambda draft: draft.apply_candidate(cfg),
+                )
+                return self._publish_chain_write(committed)
+            except Exception as exc:
+                self.notify(f"Chain unchanged: {exc}", severity="error")
+                return None
+        try:
+            live.write_chain(cfg)
+            return self._publish_chain_write(cfg)
+        except Exception as exc:
+            self.notify(f"Chain unchanged: {exc}", severity="error")
+            return None
+
     def _bump(self, key: str, delta: float) -> None:
         cfg = live.read_chain()
         ranges = {"gain": (0.0, 10.0), "master": (0.0, 10.0)}
@@ -988,15 +1360,13 @@ class GigBuddyApp(App):
         previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
         value = previous + delta
         cfg[key] = round(max(lo, min(hi, value)), 2)
-        if key == "master":
-            if previous > 0:
-                self._master_backup = previous
-            if cfg[key] > 0:
-                self._master_backup = cfg[key]
-        live.write_chain(cfg)
-        cfg = self._publish_chain_write(cfg)
-        if key == "master":
-            self.query_one(InterfaceBar).set_muted(cfg["master"] <= 0)
+        if cfg[key] == previous:
+            return
+        cfg = self._commit_external_chain(cfg)
+        if cfg is None:
+            return
+        self._publish_mutation(
+            "chain-param", (f"chain:{key}",), cfg.get("revision"))
 
     def _set_chain_param(self, key: str, value: float) -> None:
         """手动填写参数（REQ-021）：绝对设置，走与 g·G 同一条写链路径。
@@ -1006,17 +1376,16 @@ class GigBuddyApp(App):
         cfg = live.read_chain()
         lo, hi = (0.0, 1.0) if key == "quality" else (0.0, 10.0)
         value = max(lo, min(hi, value))
-        if key == "master":
-            previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
-            if previous > 0:
-                self._master_backup = previous
-        cfg[key] = round(value, 2)
-        if key == "master" and cfg[key] > 0:
-            self._master_backup = cfg[key]
-        live.write_chain(cfg)
-        cfg = self._publish_chain_write(cfg)
-        if key == "master":
-            self.query_one(InterfaceBar).set_muted(cfg["master"] <= 0)
+        previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+        value = round(value, 2)
+        if value == previous:
+            return
+        cfg[key] = value
+        cfg = self._commit_external_chain(cfg)
+        if cfg is None:
+            return
+        self._publish_mutation(
+            "chain-param", (f"chain:{key}",), cfg.get("revision"))
 
     def action_bump_gain(self, delta: float) -> None:
         self._bump("gain", delta)
@@ -1030,12 +1399,25 @@ class GigBuddyApp(App):
         1.0 = full precision (default), lower = lighter CPU. A1 models ignore it.
         """
         cfg = live.read_chain()
-        q = round(float(cfg.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])) + delta, 2)
+        previous = float(cfg.get(
+            "quality", live.CHAIN_PARAMETER_DEFAULTS["quality"]))
+        q = round(previous + delta, 2)
         cfg["quality"] = max(0.0, min(1.0, q))
-        live.write_chain(cfg)
-        self._publish_chain_write(cfg)
+        if cfg["quality"] == previous:
+            return
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
+        self._publish_mutation(
+            "chain-param", ("chain:quality",), persisted.get("revision"))
 
     def action_focus_search(self) -> None:
+        focused = self.focused
+        if focused is not None and any(
+                isinstance(ancestor, PresetPanel)
+                for ancestor in focused.ancestors_with_self):
+            self.query_one(PresetPanel).focus_search()
+            return
         self.query_one(LibraryPanel).focus_search()
 
     # ---- 干声试听：播放控制（space/s/l）与输入源选择器 ----
@@ -1051,8 +1433,9 @@ class GigBuddyApp(App):
             return
         edit(inp)
         cfg["input"] = inp
-        live.write_chain(cfg)
-        self._publish_chain_write(cfg)
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
         self._playback_op_ts = time.monotonic()
 
     def action_playback_toggle(self) -> None:
@@ -1089,9 +1472,11 @@ class GigBuddyApp(App):
         """
         cfg = live.read_chain()
         cfg[key] = None
-        live.write_chain(cfg)
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
         panel = self.query_one(ChainPanel)
-        panel.chain = cfg
+        panel.chain = persisted
         node = next((n for n in panel.query(NodeWidget)
                      if n.kind == node_kind), None)
         if node is not None:
@@ -1099,6 +1484,8 @@ class GigBuddyApp(App):
             node.set_label("NONE")
             node.set_bypassed(False)
             node.set_class(True, "chain-node-empty")
+        self._publish_mutation("slot-unload", (f"slot:{key}",),
+                                persisted.get("revision"))
         self.notify(note)
 
     def on_node_widget_delete_requested(self, event) -> None:
@@ -1135,9 +1522,12 @@ class GigBuddyApp(App):
     def on_input_source_screen_source_changed(self, event) -> None:
         """输入源切换完成：刷新链面板 INPUT 行"""
         self._publish_chain_write(event.chain)
+        self._publish_mutation("input-source", ("input",), event.chain.get("revision"))
 
     def action_open_preset_picker(self) -> None:
-        self.push_screen(PresetPickerScreen())
+        # v0.2 has one Presets surface. Command palette navigation focuses it;
+        # it must not open the removed second preset browser.
+        self.query_one(PresetPanel).focus_table()
 
     def action_save_preset(self) -> None:
         active = library.preset_current()
@@ -1162,7 +1552,8 @@ class GigBuddyApp(App):
             self._save_confirm_at = 0.0
             self._save_confirm_chain = None
             self.query_one(PresetPanel)._fingerprint = None
-            self.query_one(PresetPanel).refresh_presets()
+            key = _preset_mutation_key(p.get("id"), p.get("name"))
+            self._publish_mutation("preset-save", (key,) if key else ())
             self.notify(f"Preset '{p['name']}' overwritten")
             return
         self._save_confirm_name = active
@@ -1286,25 +1677,42 @@ class GigBuddyApp(App):
                         severity="warning")
             return False
         state = panel.state
-        before = state.checkpoint()
-        try:
-            result = mutation(state)
-        except ChainStateError as exc:
-            self.notify(str(exc), severity="warning")
-            return False
-        if result is False:
-            self.notify(failure_note or note, severity="warning")
-            return False
-        focus_index = state.target_index
-        candidate = state.to_chain()
-        try:
-            live.write_chain(candidate)
-            persisted = live.read_chain() or candidate
-        except Exception as exc:
-            state.restore_checkpoint(before)
-            panel.chain = state.to_chain()
-            self.notify(f"Chain unchanged: {exc}", severity="error")
-            return False
+        if self._managed_engine_active():
+            def transactional_mutation(draft):
+                result = mutation(draft)
+                if result is False:
+                    raise _ManagedNoOp
+                return result
+
+            try:
+                persisted = state.commit(
+                    _ManagedChainAdapter(
+                        self, expected_chain=state.to_chain()),
+                    transactional_mutation)
+            except _ManagedNoOp:
+                self.notify(failure_note or note, severity="warning")
+                return False
+            except Exception as exc:
+                self.notify(f"Chain unchanged: {exc}", severity="error")
+                return False
+            focus_index = state.target_index
+        else:
+            before = state.checkpoint()
+            try:
+                result = mutation(state)
+            except ChainStateError as exc:
+                self.notify(str(exc), severity="warning")
+                return False
+            if result is False:
+                self.notify(failure_note or note, severity="warning")
+                return False
+            focus_index = state.target_index
+            candidate = state.to_chain()
+            persisted = self._commit_external_chain(candidate)
+            if persisted is None:
+                state.restore_checkpoint(before)
+                panel.chain = state.to_chain()
+                return False
         try:
             state.mark_managed_write(
                 live.last_chain_write_fingerprint(),
@@ -1330,6 +1738,9 @@ class GigBuddyApp(App):
         if focus_index is not None and not keep_pack_focus:
             self.call_after_refresh(
                 lambda index=focus_index: self._focus_slot(index))
+        self._publish_mutation(
+            "slot", (f"slot:{focus_index}" if focus_index is not None else "chain",),
+            persisted.get("revision"))
         self.notify(note)
         return True
 
@@ -1518,6 +1929,7 @@ class GigBuddyApp(App):
         bypass, not silence.
         """
         cfg = live.read_chain()
+        key = "ir" if kind == "cab" else "model"
         if kind == "cab":
             if cfg.get("ir"):
                 self._ir_backup = cfg["ir"]
@@ -1544,15 +1956,18 @@ class GigBuddyApp(App):
             else:
                 self.notify("AMP: nothing to restore")
                 return
-        live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
+        self._publish_mutation(
+            "bypass", (f"chain:{key}",), persisted.get("revision"))
         self.notify(note)
 
-    def on_preset_picker_screen_loaded(self, event: PresetPickerScreen.Loaded) -> None:
-        self._apply_preset(event.name)
-
     def on_preset_panel_activated(self, event: PresetPanel.Activated) -> None:
-        self._apply_preset(event.name)
+        self._apply_preset(event.name, preset_id=getattr(event, "preset_id", None))
+
+    def on_preset_load_confirm_confirmed(self, event: PresetLoadConfirm.Confirmed) -> None:
+        self._apply_preset(event.name, preset_id=getattr(event, "preset_id", None))
 
     def on_preset_panel_highlighted(self, event: PresetPanel.Highlighted) -> None:
         """Preset row highlighted: mirror its chain summary in the detail pane."""
@@ -1569,31 +1984,92 @@ class GigBuddyApp(App):
             self.query_one(DetailPane).clear()
             return
         try:
-            ch = library.preset_resolved_chain(p["name"])
+            preset_id = p.get("id")
+            if isinstance(preset_id, int) and not isinstance(preset_id, bool):
+                ch = library.preset_resolved_chain_by_id(preset_id)
+            else:
+                ch = library.preset_resolved_chain(p["name"])
         except ValueError as e:
             self.query_one(DetailPane).show_text(escape(str(e)))
             return
         active = library.preset_current() == p["name"]
-        dirty = active and library.preset_is_dirty(p["name"])
+        dirty = active and library.preset_is_dirty(
+            p["name"], preset_id=preset_id if isinstance(preset_id, int)
+            and not isinstance(preset_id, bool) else None)
         self.query_one(DetailPane).show_preset(
             p, ch, active=active, dirty=dirty)
 
-    def _apply_preset(self, name: str) -> None:
+    def _apply_preset(self, name: str, *, preset_id: int | None = None) -> None:
         self._save_confirm_name = None
         self._save_confirm_chain = None
-        # preset 是全新链：双击 BYPASS 的备份作废，否则 preset 缺位槽会被
-        # _set_node 的备份判断误显示为 BYPASS（REQ-016 bug①）。
-        self._amp_model_backup = None
-        self._ir_backup = None
-        # REQ-017: 应用前快照入 undo 栈（redo 清空）。失败路径不入栈：
-        # preset_load 抛错时链未变，快照毫无意义。
-        self._push_preset_undo()
+        # Capture before loading, but only record it after every Slot has been
+        # resolved successfully. A missing file must not create an undo step.
+        before = self._chain_snapshot()
+        current_preset = (
+            library.preset_get_by_id(preset_id)
+            if isinstance(preset_id, int) and not isinstance(preset_id, bool)
+            else library.preset_get(name))
+        if current_preset is None:
+            self.notify(
+                f"Preset '{name}' is no longer available; load cancelled",
+                severity="warning")
+            return
+        name = str(current_preset["name"])
+        current_id = current_preset.get("id")
+        preset_id = current_id if isinstance(current_id, int) else preset_id
         try:
-            cfg = library.preset_load(name)
+            panel = self.query_one(ChainPanel)
+            if panel._legacy_mode:
+                # Keep the read-only v0.1 compatibility path for old chains and
+                # its test doubles. Canonical v0.2 writes use the App boundary
+                # below so live.py records the exact fingerprint and revision.
+                cfg = (library.preset_load_by_id(preset_id)
+                       if isinstance(preset_id, int)
+                       else library.preset_load(name))
+            else:
+                resolved = (library.preset_resolved_chain_by_id(preset_id)
+                            if isinstance(preset_id, int)
+                            else library.preset_resolved_chain(name))
+                current = live.read_chain()
+                cfg = dict(current)
+                cfg["slots"] = [
+                    {"path": slot.get("path")}
+                    for slot in resolved.get("slots", ())
+                ]
+                for key in ("gain", "master", "quality"):
+                    cfg[key] = resolved[key]
         except ValueError as e:
             self.notify(str(e), severity="error")
             return
-        self.query_one(ChainPanel).chain = cfg
+        if panel._legacy_mode:
+            # The legacy setter renders from the App-level recovery fields;
+            # clear them after the legacy file write succeeds but before the
+            # panel reconciles the replacement.
+            self._amp_model_backup = None
+            self._ir_backup = None
+            persisted = self._publish_chain_write(cfg)
+        else:
+            persisted = self._commit_external_chain(cfg)
+            if persisted is None:
+                return
+            try:
+                library.preset_set_active(name)
+            except Exception as exc:
+                self.notify(
+                    f"Preset '{name}' loaded but active state was not updated: {exc}",
+                    severity="warning",
+                )
+            # A successful whole-chain replacement invalidates all process-local
+            # bypass recovery candidates. Failed resolution/commit keeps them.
+            self._amp_model_backup = None
+            self._ir_backup = None
+            panel.state.reset_transient_context()
+            panel._refresh_dynamic_slots()
+            self.query_one(DetailPane).clear_slot_target_context()
+        self._push_preset_undo(before)
+        key = _preset_mutation_key(preset_id, name)
+        self._publish_mutation(
+            "preset-load", (key,) if key else (), persisted.get("revision"))
         self.notify(f"Preset '{name}' loaded — ctrl+z undo")
 
     # ---- REQ-017: preset 链配置撤销/重做 ----------------------------------
@@ -1601,7 +2077,7 @@ class GigBuddyApp(App):
     # 快照域 = preset 涉及的链配置（与 preset_save 内容一致）；input 输入源
     # 按既有语义"preset 不存输入源"不入快照——preset 应用保留输入源，undo
     # 恢复的也只是 preset 内容域，input 始终跟随当前链不变。
-    _CHAIN_SNAPSHOT_KEYS = ("model", "ir", "gain", "master", "quality")
+    _CHAIN_SNAPSHOT_KEYS = ("slots", "gain", "master", "quality")
     _CHAIN_UNDO_LIMIT = 50
 
     def _chain_snapshot(self) -> dict:
@@ -1613,14 +2089,23 @@ class GigBuddyApp(App):
         也按 preset 语义存在或显式 null（ir）——undo 恢复时保留现状即可，
         与应用前状态等效。"""
         cfg = live.read_chain()
-        return {key: cfg[key] for key in self._CHAIN_SNAPSHOT_KEYS if key in cfg}
+        return deepcopy({key: cfg[key] for key in self._CHAIN_SNAPSHOT_KEYS if key in cfg})
 
-    def _restore_chain(self, snap: dict) -> None:
+    def _restore_chain(self, snap: dict) -> dict:
         """恢复快照 → 写 live_chain.json（引擎热切换）→ UI 跟随。"""
         cfg = live.read_chain()
         cfg.update(snap)
-        live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        if "slots" in snap:
+            cfg.pop("model", None)
+            cfg.pop("ir", None)
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            raise OSError("external chain commit failed")
+        panel = self.query_one(ChainPanel)
+        panel.state.reset_transient_context()
+        panel._refresh_dynamic_slots()
+        self.query_one(DetailPane).clear_slot_target_context()
+        return persisted
 
     def _push_undo(self, snap: dict) -> None:
         self._undo_stack.append(snap)
@@ -1632,10 +2117,10 @@ class GigBuddyApp(App):
         if len(self._redo_stack) > self._CHAIN_UNDO_LIMIT:
             self._redo_stack.pop(0)
 
-    def _push_preset_undo(self) -> None:
+    def _push_preset_undo(self, snap: dict | None = None) -> None:
         """Preset 应用入栈：快照当前链进 undo 栈，redo 栈清空（新动作
         使旧 redo 失效）。与栈顶相同（preset 内容未变）则跳过。"""
-        snap = self._chain_snapshot()
+        snap = self._chain_snapshot() if snap is None else deepcopy(snap)
         if self._undo_stack and self._undo_stack[-1] == snap:
             return
         self._push_undo(snap)
@@ -1645,18 +2130,32 @@ class GigBuddyApp(App):
         if not self._undo_stack:
             self.notify("Nothing to undo")
             return
-        snap = self._undo_stack.pop()
-        self._push_redo(self._chain_snapshot())
-        self._restore_chain(snap)
+        snap = self._undo_stack[-1]
+        current = self._chain_snapshot()
+        try:
+            persisted = self._restore_chain(snap)
+        except Exception as exc:
+            self.notify(f"Undo failed: {exc}", severity="error")
+            return
+        self._undo_stack.pop()
+        self._push_redo(current)
+        self._publish_mutation("undo", ("chain",), persisted.get("revision"))
         self.notify("Undo preset")
 
     def action_redo_chain(self) -> None:
         if not self._redo_stack:
             self.notify("Nothing to redo")
             return
-        snap = self._redo_stack.pop()
-        self._push_undo(self._chain_snapshot())
-        self._restore_chain(snap)
+        snap = self._redo_stack[-1]
+        current = self._chain_snapshot()
+        try:
+            persisted = self._restore_chain(snap)
+        except Exception as exc:
+            self.notify(f"Redo failed: {exc}", severity="error")
+            return
+        self._redo_stack.pop()
+        self._push_undo(current)
+        self._publish_mutation("redo", ("chain",), persisted.get("revision"))
         self.notify("Redo preset")
 
     def on_node_widget_switch_requested(self, event) -> None:
@@ -1687,8 +2186,9 @@ class GigBuddyApp(App):
             return
         nxt = siblings[(cur + direction) % len(siblings)]
         cfg[key] = nxt["local_path"]
-        live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
         detail = self.query_one(DetailPane)
         if detail._pack_mode:
             # 聚焦打开的是 pack 视图：换模型只移动 ▶ 标记，不替换整个视图
@@ -1696,6 +2196,8 @@ class GigBuddyApp(App):
         else:
             tone = library.get_tone(nxt["tone_id"])
             detail.show_model(tone, nxt)
+        self._publish_mutation(
+            "slot-model", (f"chain:{key}",), persisted.get("revision"))
         self.notify(f"{kind.upper()} → {live.short_name(nxt['local_path'])}")
 
     def on_detail_pane_pack_install_requested(self, event) -> None:
@@ -1708,26 +2210,17 @@ class GigBuddyApp(App):
         self.push_screen(PackInstallScreen(event.tone))
 
     def on_detail_pane_pack_files_installed(self, event) -> None:
-        """pack 表 i 键批量安装完成：toast + 库表下载态刷新。"""
+        """pack 表 i 键批量安装完成：toast + one coordinated refresh."""
         self.notify(f"Installed {event.count} file(s) from tone {event.tone_id}")
-        panel = self.query_one(LibraryPanel)
-        panel._fingerprint = None
-        panel.refresh_rows()
 
     def on_detail_pane_pack_files_uninstalled(self, event) -> None:
-        """pack 表 u 键批量卸载完成：toast + 库表下载态刷新（元数据保留）。"""
+        """pack 表 u 键批量卸载完成：toast + one coordinated refresh."""
         self.notify(f"Uninstalled {event.count} file(s) · metadata retained")
-        panel = self.query_one(LibraryPanel)
-        panel._fingerprint = None
-        panel.refresh_rows()
 
     def on_pack_install_screen_uninstalled(self, event) -> None:
-        """PackInstallScreen 的 u 键卸载完成：库表下载态刷新。"""
+        """PackInstallScreen 的 u 键卸载完成：统一协调刷新。"""
         self.notify(f"Uninstalled {event.count} file(s) from tone {event.tone_id} "
                     "· metadata retained")
-        panel = self.query_one(LibraryPanel)
-        panel._fingerprint = None
-        panel.refresh_rows()
 
     def on_detail_pane_pack_file_picked(self, event) -> None:
         """Pack 列表选中一个文件：热换对应链槽（IR 行换 ir、其余换 model）。
@@ -1759,6 +2252,14 @@ class GigBuddyApp(App):
                 self.query_one(DetailPane).refresh_pack_active(
                     panel.state.to_chain())
             return
+        try:
+            panel = self.query_one(ChainPanel)
+        except NoMatches:
+            panel = None
+        if panel is not None and not panel._legacy_mode:
+            self.notify("Select a target Slot before loading a file",
+                        severity="warning")
+            return
         cfg = live.read_chain()
         if not event.path:
             return
@@ -1787,9 +2288,12 @@ class GigBuddyApp(App):
             cfg["ir"] = None
             self._ir_backup = None
             note += " · CAB empty (Amp + Cab model)"
-        live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
-        self.query_one(DetailPane).refresh_pack_active(cfg)
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
+        self.query_one(DetailPane).refresh_pack_active(persisted)
+        self._publish_mutation(
+            "slot-load", (f"chain:{event.slot}",), persisted.get("revision"))
         self.notify(note.lstrip(" ·"))
 
     def on_detail_pane_pack_closed(self, event) -> None:
@@ -1800,26 +2304,52 @@ class GigBuddyApp(App):
             self._focus_node(event.kind)
 
     def on_preset_name_modal_saved(self, event: PresetNameModal.Saved) -> None:
-        self.query_one(PresetPanel)._fingerprint = None
-        self.query_one(PresetPanel).refresh_presets()
+        key = _preset_mutation_key(getattr(event, "preset_id", None), event.name)
+        self._publish_mutation("preset-save", (key,) if key else ())
         self.notify(f"Preset '{event.name}' saved")
 
     def on_preset_rename_modal_renamed(self, event: PresetRenameModal.Renamed) -> None:
-        self.query_one(PresetPanel)._fingerprint = None
-        self.query_one(PresetPanel).refresh_presets()
+        key = _preset_mutation_key(
+            getattr(event, "preset_id", None), event.new_name)
+        self._publish_mutation("preset-rename", (key,) if key else ())
         self.notify(f"Preset '{event.old_name}' renamed to '{event.new_name}'")
 
     def on_preset_note_modal_updated(self, event: PresetNoteModal.Updated) -> None:
-        self.query_one(PresetPanel)._fingerprint = None
-        self.query_one(PresetPanel).refresh_presets()
+        key = _preset_mutation_key(getattr(event, "preset_id", None), event.name)
+        self._publish_mutation("preset-update", (key,) if key else ())
         self.notify(f"Preset '{event.name}' note updated")
 
+    def on_preset_edit_modal_saved(self, event: PresetEditModal.Saved) -> None:
+        """Persisted draft: publish once, then optionally load it explicitly."""
+        key = _preset_mutation_key(getattr(event, "preset_id", None), event.name)
+        self._publish_mutation("preset-update", (key,) if key else ())
+        if event.load:
+            self._apply_preset(
+                event.name, preset_id=getattr(event, "preset_id", None))
+        note = f"Preset '{event.name}' updated"
+        bypassed = getattr(event, "bypassed", 0)
+        if bypassed:
+            note += f" · {bypassed} BYPASS saved as EMPTY"
+        self.notify(note)
+
     def on_preset_delete_modal_deleted(self, event: PresetDeleteModal.Deleted) -> None:
-        panel = self.query_one(PresetPanel)
-        panel._selected.difference_update(event.names)
-        panel._fingerprint = None
-        panel.refresh_presets()
-        self.notify(f"Deleted {len(event.names)} preset(s)")
+        names = list(event.names)
+        stale = list(getattr(event, "stale", ()))
+        preset_ids = list(getattr(event, "preset_ids", ()))
+        keys = tuple(
+            key for key in (_preset_mutation_key(preset_id) for preset_id in preset_ids)
+            if key is not None
+        )
+        if keys:
+            self._publish_mutation(
+                "preset-delete", keys)
+        note = f"Deleted {len(names)} preset(s)"
+        if stale:
+            note += " · stale: " + ", ".join(stale)
+        if stale:
+            self.notify(note, severity="warning")
+        else:
+            self.notify(note)
 
     def on_tone_selected(self, event: ToneSelected) -> None:
         """Enter on a library row: jump straight to that tone's model files.
@@ -1838,11 +2368,11 @@ class GigBuddyApp(App):
 
     def on_remote_tone_selected(self, event: RemoteToneSelected) -> None:
         """Canonical remote rows open Remote Description in DetailPane."""
-        self.query_one(DetailPane).show(event.tone)
+        self.query_one(DetailPane).show(event.tone, remote=True)
 
     def on_link_clicked(self, event) -> None:
         """Click a metadata link (author/tag) → TONE3000 search for it."""
-        href = getattr(event, "href", "") or ""
+        href = unquote(getattr(event, "href", "") or "")
         if href.startswith(("https://", "http://")):
             webbrowser.open(href)
             self.notify("Opened link in browser")
@@ -1864,7 +2394,7 @@ class GigBuddyApp(App):
     def on_tone_highlighted(self, event: ToneHighlighted) -> None:
         detail = self.query_one(DetailPane)
         if event.tone:
-            detail.show(event.tone)
+            detail.show(event.tone, remote=event.remote)
         else:
             detail.clear()
 
@@ -1906,8 +2436,11 @@ class GigBuddyApp(App):
             cfg["ir"] = None  # 显式 null（pop 不会让引擎移除旧 IR）
             self._ir_backup = None
             note += " · CAB empty (Amp + Cab model)"
-        live.write_chain(cfg)
-        self.query_one(ChainPanel).chain = cfg
+        persisted = self._commit_external_chain(cfg)
+        if persisted is None:
+            return
+        self._publish_mutation(
+            "tone-picker", (f"chain:{key}",), persisted.get("revision"))
         self.notify(note)
 
 

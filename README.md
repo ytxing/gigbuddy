@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.1.0 — 2026-08-05*
+*v0.2.14 — 2026-08-06*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive
@@ -26,15 +26,17 @@ fully MIT core stack.
 └───────────────┬───────────────────────────────────────┴ gigbuddy │
                 │ live_chain.json / level.json               .db    │
 ┌─ Engine (realtime_cli, PortAudio + NeuralAudio) ─────────────────┐
-│  --live hot-swap (atomic model/IR swap, no audio dropout)        │
+│  --live hot-swap (atomic ordered Slot-chain swap)                 │
 │  --level-file telemetry                                          │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 - **Library DB** (`data/gigbuddy.db`): full TONE3000 metadata mirror — every search
   field preserved. Schema: docs/library-schema.md. Query via CLI or SQLite directly.
-- **Agent ↔ UI round-trip**: files (`live_chain.json` / `level.json`) — unchanged
-  protocol. The engine hot-swaps within ~0.3s of a chain write.
+- **Agent ↔ UI round-trip**: `live_chain.json` carries the ordered Slot chain and
+  revision; managed TUI writes use a transaction/control sidecar and the engine
+  reports session, transaction, revision, status, and acknowledgement sequence in
+  `level.json`.
 - Offline rendering (`src/render.py` + `bin/nam_cli`) remains for wav output.
 
 ## Quick start
@@ -49,8 +51,8 @@ bin/gigbuddy tone import 19                        # download + persist metadata
 bin/gigbuddy tone list                             # browse the local library
 bin/gigbuddy tone show 19                          # full metadata + local files
 
-# 3. Point the engine at a chain (file names = TONE3000 semantic model names)
-bin/gigbuddy chain set '{"model": "data/tones/19-fender-super-reverb-1977/Fender Super Reverb: EQ Flat, Volume 3, sm57.nam", "gain": 1.0, "master": 0.8}'
+# 3. Point the engine at an ordered Slot chain (file names = TONE3000 semantic model names)
+bin/gigbuddy chain set '{"slots": [{"path": "data/tones/19-fender-super-reverb-1977/Fender Super Reverb: EQ Flat, Volume 3, sm57.nam"}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
 bin/gigbuddy chain get
 
 # 4. Offline render (optional, when you want a wav file)
@@ -71,23 +73,23 @@ is already running in another terminal.
 .venv/bin/python -m tui --no-engine
 ```
 
-TUI features (v0.1):
-- **Library browser** (left): three tabs — LOCAL (imported tones), TONE3000
+TUI features (v0.2):
+- **Library browser** (left): four view tabs — LOCAL (imported tones), TONE3000
   (live search + trending + sortable results with per-tab SORT/TYPE filters) and
   TOP CREATORS (6-column leaderboard: Rank/Creator/Tones/Downloads/Fav/Models,
   Most Tones by default with its own SORT bar; enter/double-click a creator row
   jumps to a TONE3000 `@author` search of that creator's tones). Search syntax:
   `@author`, `#tag`, `author:name`, `tag:name`, `make:"full device name"`.
-- **Tone-chain panel** (right): INPUT / AMP / CAB nodes with state lamps
-  (green active / red BYPASS / grey empty). `↑/↓` on AMP or CAB steps through
-  the same tone folder's models; the CAB row has its own ▲/▼ arrow buttons.
-  Double-click toggles BYPASS (engine pass-through, content kept). Parameters
-  are fully editable: `g·G / m·M / q·Q` click to step, hold for fast long-press
-  stepping, click the dot to zero, and click the value to type it directly
-  (gain/master 0–10, quality 0–1). `d` unloads a slot.
+- **Tone-chain panel** (right): INPUT plus 0–6 ordered Slots with derived
+  uppercase labels and state lamps. `tab/shift+tab` navigates Slots;
+  `↑/↓` steps a Slot through its pack's models and `alt+↑/alt+↓` reorders
+  adjacent Slots. `+` adds, `d` deletes, and `enter` toggles BYPASS/restore.
+  Parameters are fully editable: `g·G / m·M / q·Q` step, hold for repeated
+  stepping, click the center dot to restore the protocol default, and click the
+  value to type it directly (gain/master 0–10, quality 0–1).
 - **Detail pane** (right, under the chain): dual-mode — Description
   (metadata) ↔ Selection (pack file list, hot-swap with enter) switched by
-  `←/→` or the corner hint. Focusing an AMP/CAB node opens its pack; focusing a
+  `[/]` or the view-tab strip. Focusing a Slot opens its pack; focusing a
   TOP CREATORS row shows that author's profile (bio + verified badge); a
   successful author verification is cached locally and the badge is reused in
   every author display; remote tones show a downloadable file list whose rows
@@ -96,8 +98,9 @@ TUI features (v0.1):
   input/output devices (System Default first), buffer, sample rate and latency.
 - **Dry input playback**: the INPUT row can play a dry guitar file
   (space play/pause, s stop, l loop) — pick the source with enter.
-- **Presets**: `p` opens the preset picker, `ctrl+s` saves, `ctrl+shift+s`
-  saves as new; `ctrl+z` undoes the last preset application.
+- **Presets**: the Presets pane owns `n` (Save As), `s` (save active), `e`
+  (edit a full Slot/parameter/note draft), `r` (rename), `d` (delete),
+  `enter` (load), and `ctrl+z`/`ctrl+shift+z` undo/redo preset application.
 - **Level meter** (bottom): 0.3s refresh from the engine.
 
 Search examples:
@@ -110,8 +113,9 @@ make:"Two Rock Traditional Clean" @coretonecaptures
 tag:"edge of breakup" marshall
 ```
 
-Engine hot-swap (`--live`): watches `data/live_chain.json` (model/ir/gain/master),
-swaps model/IR atomically within 0.3s; `--level-file` feeds levels back as JSON.
+Engine hot-swap (`--live`): watches `data/live_chain.json` (`slots[]`, parameters,
+input and mute), swaps the complete chain atomically; `--level-file` feeds levels
+back as JSON.
 
 ## gigbuddy CLI (agent-facing interface)
 
@@ -173,12 +177,15 @@ docs/           SPEC-v2.md (decoupled architecture) / chain-schema.md (chain DSL
 
 ## Tone-chain format
 
-Current live chain (`data/live_chain.json`) keys: `model` (.nam path), `ir` (.wav IR
-path, optional), `gain`, `master`, `quality` (A2 model sub-model size, 0–1,
-1.0 = full precision; TUI `q`/`Q`). Full DSL and node semantics:
-docs/chain-schema.md.
+Current `data/live_chain.json` uses an ordered `slots[]` array with 0–6 entries;
+each entry is `{ "path": "..." }` or `{ "path": null }`. The protocol also
+contains `gain`, `master`, `quality`, `mute`, `input`, and a non-negative
+`revision`. The managed-only `_transaction_id` is used for one candidate or
+rollback and is not part of preset data. `model`/`ir` are read-only legacy input;
+canonical writes remove them. Full rules are in
+`docs/ui-interaction-spec-v0.2.md` and `docs/adr/0001-slots-chain-protocol.md`.
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
 - **TOP CREATORS** reads TONE3000's official `user_public_counts` leaderboard,
   the same source used by `tone3000.com/top-creators`. Tones, Downloads,

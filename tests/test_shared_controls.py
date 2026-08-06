@@ -65,11 +65,14 @@ def test_view_tabs_are_one_focus_stop_and_brackets_switch(monkeypatch, tmp_path)
             assert app.focused is strip
             await pilot.press("]")
             await pilot.pause()
-            assert app.query_one("TabbedContent").active == "pane-creators"
+            assert app.query_one("TabbedContent").active == "pane-favorites"
             await pilot.press("]")
             await pilot.pause()
             assert app.query_one("TabbedContent").active == "pane-creators"
 
+            await pilot.press("[")
+            await pilot.pause()
+            assert app.query_one("TabbedContent").active == "pane-favorites"
             await pilot.press("[")
             await pilot.pause()
             assert app.query_one("TabbedContent").active == "pane-tone"

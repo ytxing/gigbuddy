@@ -163,7 +163,7 @@ def test_long_press_repeats_by_0_1_and_stops_on_release(monkeypatch, tmp_path):
 
 def test_long_press_stops_when_moving_off_token(monkeypatch, tmp_path):
     """长按中移出 token（仍在面板内）→ 立即停止步进；释放的 click 被丢弃。"""
-    chain, writes = setup_chain(monkeypatch, tmp_path)
+    chain, writes = setup_chain(monkeypatch, tmp_path, quality=0.8)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)

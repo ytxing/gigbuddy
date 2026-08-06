@@ -1,6 +1,8 @@
-# GigBuddy UI 交互与视觉规格（v0.1.8）
+# GigBuddy UI 交互与视觉规格（v0.1.8，Legacy）
 
-> 状态：**FROZEN**（2026-08-05，规格 v0.1.8）。本次修订固定 view tab 键位、SearchBar 轨道宽度和 Type-only 表头过滤；本版本作为 v0.1 实现与验收基线。
+> 状态：**SUPERSEDED**（2026-08-05，规格 v0.1.8）。本文件保留作为 v0.1
+> 历史验收基线；当前实现与验收以 `docs/ui-interaction-spec-v0.2.md`
+> v0.2.14 为准。
 > 本文件定义 GigBuddy v0.1 的目标 UI 行为与视觉语义，是交互验收的设计基准。
 > 实现、测试或历史需求与本文冲突时，应先确认是否变更设计；未变更设计时，冲突视为实现缺陷。
 > 需求来源：`.remember/backlog.md`、`.remember/feature-baseline.md` 中 REQ-001~041 的最终口径。

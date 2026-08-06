@@ -18,9 +18,11 @@ import tone3000
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     """Point DB + chain file at a tmp dir for every test."""
+    monkeypatch.setattr(library, "ROOT", tmp_path)
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr(library, "TONES_DIR", tmp_path / "tones")
+    monkeypatch.setattr(library, "TONES_DIR", tmp_path / "data" / "tones")
+    (tmp_path / "data" / "tones").mkdir(parents=True)
     yield
 
 
@@ -115,7 +117,7 @@ def test_download_keeps_original_remote_names(monkeypatch, tmp_path):
     monkeypatch.setattr(tone3000.urllib.request, "urlopen",
                         lambda *a, **kw: _FakeResp())
     got = tone3000.download(99, tmp_path, tag="my-tone-slug", return_paths=True)
-    names = sorted(p.name for p in tmp_path.iterdir())
+    names = sorted(p.name for p in tmp_path.iterdir() if p.is_file())
     assert names == ["9f8e7d.wav", "Original Name_a2.nam"], names
     assert got[1]["local_path"].endswith("9f8e7d.wav")
 
@@ -155,7 +157,7 @@ def test_download_prefers_semantic_name_without_duplicate_extension(monkeypatch,
 
     monkeypatch.setattr(tone3000.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
     tone3000.download(99, tmp_path, ext="wav")
-    assert sorted(p.name for p in tmp_path.iterdir()) == [
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == [
         "Greenback.wav", "JCM 800 P5.wav"
     ]
 
@@ -376,11 +378,13 @@ def test_local_uninstall_models_uninstalls_subset(tmp_path):
 
 def test_chain_get_set_atomic():
     assert library.chain_get() == {}
+    model = library.ROOT / "data" / "tones" / "19-01.nam"
+    model.write_bytes(b"amp")
     library.chain_set({"master": 0.4, "model": "data/tones/19-01.nam"})
     # REQ-035 portable：读返回绝对路径（相对根解析）
     cfg = library.chain_get()
     assert cfg["master"] == 0.4
-    assert cfg["model"] == str(library.ROOT / "data/tones/19-01.nam")
+    assert cfg["slots"] == [{"path": str(model)}]
     assert not library.CHAIN_FILE.with_suffix(".json.tmp").exists()  # no leftover tmp
 
 
@@ -429,6 +433,57 @@ def test_import_persists_tone_and_models_as_one_transaction(monkeypatch):
     assert library.get_tone(19) is None
 
 
+def test_import_rolls_back_new_files_when_db_persistence_fails(monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+
+    downloaded_path = {}
+
+    def fake_download(_tone_id, dest, **_kwargs):
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / "new.nam"
+        path.write_bytes(b"nam")
+        downloaded_path["path"] = path
+        return [{
+            "id": 51, "tone_id": 19, "model_url": "u1",
+            "model_json": {"architecture": "SlimmableContainer"},
+            "local_path": str(path),
+        }]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    real_upsert_model = library.upsert_model
+
+    def fail_after_db_write(conn, model, *, commit=True):
+        real_upsert_model(conn, model, commit=commit)
+        raise RuntimeError("simulated model write failure")
+
+    monkeypatch.setattr(library, "upsert_model", fail_after_db_write)
+    with pytest.raises(RuntimeError, match="simulated model write failure"):
+        library.import_tone(19, quiet=True)
+
+    assert not downloaded_path["path"].exists()
+    assert library.get_tone(19) is None
+
+
+def test_import_failure_does_not_remove_another_task_file(monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+
+    def fake_download(_tone_id, dest, **_kwargs):
+        # Simulate a concurrent importer publishing into the shared final
+        # directory while this task is still downloading.
+        foreign = library.TONES_DIR / "19-fender-super-reverb-1977" / "other.nam"
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_bytes(b"other task")
+        own = dest / "failed.nam"
+        own.write_bytes(b"failed task")
+        raise RuntimeError("simulated download failure")
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    with pytest.raises(RuntimeError, match="simulated download failure"):
+        library.import_tone(19, quiet=True)
+
+    assert (library.TONES_DIR / "19-fender-super-reverb-1977" / "other.nam").read_bytes() == b"other task"
+
+
 def test_import_ir_downloads_wav(monkeypatch):
     ir_row = {**SAMPLE, "gear": "cab"}
     calls = {}
@@ -470,14 +525,16 @@ def test_cli_search_json(capsys, monkeypatch):
 
 def _put_models(tmp_path):
     """Two library models (amp .nam + IR .wav) with real files on disk."""
+    base = tmp_path if tmp_path.name == "external" else library.TONES_DIR
+    base.mkdir(parents=True, exist_ok=True)
     with library.connect() as conn:  # tone row first (FK enabled)
         library.upsert_tone(conn, dict(SAMPLE))
     amp = {"id": 1001, "tone_id": 19, "model_url": "u1", "name": "SR AKG 414",
-           "architecture": "SlimmableContainer", "local_path": str(tmp_path / "SR AKG 414.nam")}
+           "architecture": "SlimmableContainer", "local_path": str(base / "SR AKG 414.nam")}
     ir = {"id": 1002, "tone_id": 19, "model_url": "u2", "name": "DR Oxford Big",
-          "architecture": "IR", "local_path": str(tmp_path / "DR Oxford Big.wav")}
-    (tmp_path / "SR AKG 414.nam").write_bytes(b"amp")
-    (tmp_path / "DR Oxford Big.wav").write_bytes(b"ir")
+          "architecture": "IR", "local_path": str(base / "DR Oxford Big.wav")}
+    (base / "SR AKG 414.nam").write_bytes(b"amp")
+    (base / "DR Oxford Big.wav").write_bytes(b"ir")
     with library.connect() as conn:
         library.upsert_model(conn, amp)
         library.upsert_model(conn, ir)
@@ -492,14 +549,17 @@ def test_preset_save_load_roundtrip(tmp_path):
     assert p["name"] == "clean-rig"
     assert p["note"] == "测试"
     # paths resolved back to logic references
-    assert p["chain"]["model_id"] == 1001
-    assert p["chain"]["ir_model_id"] == 1002
+    assert p["chain"]["slots"] == [
+        {"model_id": 1001, "path": "data/tones/SR AKG 414.nam"},
+        {"model_id": 1002, "path": "data/tones/DR Oxford Big.wav"},
+    ]
     # load resolves ids to paths and writes the live chain
     cfg = library.preset_load("clean-rig")
-    assert cfg["model"] == amp["local_path"]
-    assert cfg["ir"] == ir["local_path"]
+    assert cfg["slots"] == [
+        {"path": amp["local_path"]}, {"path": ir["local_path"]}
+    ]
     assert cfg["gain"] == 0.8 and cfg["master"] == 0.65
-    assert library.chain_get()["model"] == amp["local_path"]
+    assert library.chain_get()["slots"][0]["path"] == amp["local_path"]
 
 
 def test_preset_active_dirty_and_quality_roundtrip(tmp_path):
@@ -524,13 +584,15 @@ def test_preset_resolved_chain_follows_model_path_migration(tmp_path):
     library.chain_set({"model": amp["local_path"]})
     library.preset_save("moving")
 
-    moved = tmp_path / "renamed.nam"
+    moved = library.TONES_DIR / "renamed.nam"
     moved.write_bytes(b"amp")
     with library.connect() as conn:
         conn.execute("UPDATE models SET local_path = ? WHERE id = ?", (str(moved), amp["id"]))
         conn.commit()
 
-    assert library.preset_resolved_chain("moving")["model"] == str(moved)
+    assert library.preset_resolved_chain("moving")["slots"] == [
+        {"model_id": 1001, "path": str(moved)}
+    ]
 
 
 def test_preset_manage_keeps_active_pointer_consistent(tmp_path):
@@ -556,14 +618,11 @@ def test_preset_manage_keeps_active_pointer_consistent(tmp_path):
 
 
 def test_preset_save_external_path_kept_verbatim(tmp_path):
-    """Non-library files are stored as plain paths (no model_id)."""
+    """The v0.2 live protocol rejects files outside data/tones."""
     ext = tmp_path / "external.nam"
     ext.write_bytes(b"x")
-    library.chain_set({"model": str(ext), "gain": 1.0})
-    p = library.preset_save("external")
-    assert p["chain"]["model_id"] is None
-    assert p["chain"]["model_path"] == str(ext)
-    assert library.preset_load("external")["model"] == str(ext)
+    with pytest.raises(ValueError, match="outside data/tones"):
+        library.chain_set({"model": str(ext), "gain": 1.0})
 
 
 def test_preset_load_missing_file_raises(tmp_path):
@@ -571,7 +630,8 @@ def test_preset_load_missing_file_raises(tmp_path):
     library.chain_set({"model": amp["local_path"]})
     library.preset_save("rig")
     p = library.preset_get("rig")
-    p["chain"]["model_id"] = 999999999  # unresolved id
+    p["chain"]["slots"][0]["model_id"] = 999999999  # unresolved id
+    p["chain"]["slots"][0]["path"] = "data/tones/missing.nam"
     with library.connect() as conn:
         conn.execute("UPDATE presets SET chain_json=? WHERE name=?",
                      (json.dumps(p["chain"]), "rig"))
@@ -581,8 +641,8 @@ def test_preset_load_missing_file_raises(tmp_path):
 
 
 def test_preset_list_and_delete(tmp_path):
-    _put_models(tmp_path)
-    library.chain_set({"model": str(tmp_path / "SR AKG 414.nam")})
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
     library.preset_save("a")
     library.preset_save("b")
     names = {p["name"] for p in library.preset_list()}
@@ -605,8 +665,10 @@ def test_preset_seed_uses_library_models(tmp_path, monkeypatch):
         [("test-chain", "note", 1001, 1002)])
     assert library.preset_seed() == 1
     p = library.preset_get("test-chain")
-    assert p["chain"]["model_id"] == 1001
-    assert p["chain"]["ir_model_id"] == 1002
+    assert p["chain"]["slots"] == [
+        {"model_id": 1001, "path": "data/tones/SR AKG 414.nam"},
+        {"model_id": 1002, "path": "data/tones/DR Oxford Big.wav"},
+    ]
     assert p["chain"]["gain"] == 0.8
 
 
@@ -620,8 +682,8 @@ def test_preset_seed_skips_missing_tones(tmp_path, monkeypatch, capsys):
 
 
 def test_preset_seed_replace_deletes_existing_presets(tmp_path, monkeypatch):
-    _put_models(tmp_path)
-    library.chain_set({"model": str(tmp_path / "SR AKG 414.nam")})
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
     library.preset_save("old")
     monkeypatch.setattr(
         library, "SEED_CHAINS",
@@ -634,13 +696,13 @@ def test_preset_seed_replace_deletes_existing_presets(tmp_path, monkeypatch):
 
 
 def test_cli_preset_roundtrip(tmp_path, capsys):
-    _put_models(tmp_path)
-    library.chain_set({"model": str(tmp_path / "SR AKG 414.nam")})
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
     assert library.main(["preset", "save", "cli-rig", "--note", "n"]) == 0
     assert library.main(["preset", "list"]) == 0
     assert "cli-rig" in capsys.readouterr().out
     assert library.main(["preset", "show", "cli-rig"]) == 0
-    assert "SR AKG 414.nam" in capsys.readouterr().out
+    assert "#1001" in capsys.readouterr().out
     assert library.main(["preset", "current"]) == 0
     assert "cli-rig" in capsys.readouterr().out
     assert library.main(["preset", "rename", "cli-rig", "cli-new"]) == 0
@@ -763,6 +825,37 @@ def test_paths_stored_relative_read_absolute_and_move_dir(monkeypatch, tmp_path)
         new_root / "data" / "tones" / "1-x" / "A.nam")
 
 
+def test_relative_library_paths_resolve_against_root(monkeypatch, tmp_path):
+    root = tmp_path / "project"
+    model = root / "data" / "tones" / "1-x" / "A.nam"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"x")
+    monkeypatch.setattr(library, "ROOT", root)
+    monkeypatch.setattr(library, "TONES_DIR", root / "data" / "tones")
+
+    with library.connect() as conn:
+        library.upsert_tone(conn, {
+            "id": 1, "title": "T", "username": "u",
+            "local_dir": "data/tones/1-x",
+        })
+        library.upsert_model(conn, {
+            "id": 1, "tone_id": 1, "model_url": "u",
+            "name": "A.nam", "architecture": "SlimmableContainer",
+            "local_path": "data/tones/1-x/A.nam",
+        })
+
+    with library.connect() as conn:
+        row = conn.execute(
+            "SELECT local_dir FROM tones WHERE id=1").fetchone()
+        stored = conn.execute(
+            "SELECT local_path FROM models WHERE id=1").fetchone()
+    assert row["local_dir"] == "data/tones/1-x"
+    assert stored["local_path"] == "data/tones/1-x/A.nam"
+    tone = library.get_tone(1)
+    assert tone["local_dir"] == str(root / "data" / "tones" / "1-x")
+    assert tone["models"][0]["local_path"] == str(model)
+
+
 def test_old_absolute_path_rebased_to_new_root(monkeypatch, tmp_path):
     """REQ-035 旧数据兼容：根外绝对路径（旧机器）按 data/tones/ 段重基。"""
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
@@ -786,10 +879,12 @@ def test_chain_paths_relative_on_write_absolute_on_read(monkeypatch, tmp_path):
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(library, "ROOT", tmp_path)
     p = tmp_path / "data" / "tones" / "1-x" / "A.nam"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"amp")
     library.chain_set({"model": str(p), "gain": 1.0})
     raw = json.loads((tmp_path / "live_chain.json").read_text())
-    assert raw["model"] == "data/tones/1-x/A.nam"
-    assert library.chain_get()["model"] == str(p)
+    assert raw["slots"] == [{"path": "data/tones/1-x/A.nam"}]
+    assert library.chain_get()["slots"] == [{"path": str(p)}]
 
 
 def test_old_absolute_local_path_rows_still_resolve(monkeypatch, tmp_path):
@@ -847,4 +942,36 @@ def test_uninstall_plan_matches_active_chain_for_relative_rows(monkeypatch, tmp_
     plan = library.local_uninstall_models_plan([1])
     assert plan["active_paths"] == [str(f)]
     with pytest.raises(ValueError, match="active chain"):
+        library.local_uninstall_models([1])
+
+
+def test_uninstall_plan_matches_legacy_preset_path_reference(monkeypatch, tmp_path):
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr(library, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "TONES_DIR", tmp_path / "data" / "tones")
+    model = tmp_path / "data" / "tones" / "10-x" / "A.nam"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"amp")
+    with library.connect() as conn:
+        library.upsert_tone(conn, {"id": 10, "title": "T", "gear": "amp",
+                                   "username": "a"})
+        library.upsert_model(conn, {
+            "id": 1, "tone_id": 10, "model_url": "u", "name": "A.nam",
+            "architecture": "SlimmableContainer", "local_path": str(model),
+        })
+        conn.execute(
+            "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'now', 'now')",
+            ("legacy", "", json.dumps({
+                "model": "data/tones/10-x/A.nam",
+                "gain": 1.0, "master": 1.0,
+            })),
+        )
+        conn.commit()
+    library.chain_set({"slots": []})
+
+    plan = library.local_uninstall_models_plan([1])
+    assert plan["preset_names"] == ["legacy"]
+    with pytest.raises(ValueError, match="referenced by presets"):
         library.local_uninstall_models([1])

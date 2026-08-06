@@ -76,15 +76,18 @@ def test_metadata_table_description_has_section_label():
 
 
 def test_preset_metadata_table_colors_parameter():
-    """Dirty status uses warn, route values use value."""
+    """Dirty status uses warn, canonical Slot values use value."""
     colors = {"section": "#222222", "field": "#333333", "value": "#444444",
               "warn": "#555555"}
-    preset = {"name": "p", "chain": {}, "updated_at": "2026-01-01T00:00:00"}
-    resolved = {"model": "/x/amp.nam", "ir": "/y/cab.wav",
+    preset = {"name": "p", "chain": {"slots": [
+        {"path": "/x/amp.nam"}, {"path": "/y/cab.wav"},
+    ]}, "updated_at": "2026-01-01T00:00:00"}
+    resolved = {"slots": [{"path": "/x/amp.nam"}, {"path": "/y/cab.wav"}],
                 "gain": 0.8, "master": 1.0, "quality": 1.0}
     table = preset_metadata_table(preset, resolved, dirty=True, colors=colors)
     assert _cell_color(table, 1, "SAVED · DIRTY") == "#555555"  # dirty → warn
-    assert _cell_color(table, 1, "external") == "#444444"       # route → value
+    assert _cell_color(table, 1, "amp.nam") == "#444444"         # slot → value
+    assert _cell_color(table, 1, "cab.wav") == "#444444"         # slot → value
     assert _cell_color(table, 0, "CONTROLS") == "#222222"
     clean = preset_metadata_table(preset, resolved, colors=colors)
     assert _cell_color(clean, 1, "SAVED") == "#444444"          # saved → value
@@ -109,6 +112,38 @@ def test_theme_colors_reads_app_variables():
             assert lower["warn"] == app.theme_variables["warning"].lower()
 
     run(scenario())
+
+
+def test_theme_colors_normalizes_textual_ansi_names_for_rich():
+    class App:
+        theme_variables = {
+            "primary": "ansi_blue",
+            "accent": "ansi_bright_yellow",
+            "field": "auto 60%",
+            "foreground": "ansi_white",
+            "success": "ansi_green",
+            "warning": "ansi_red",
+        }
+
+        @staticmethod
+        def get_css_variables():
+            return App.theme_variables
+
+    colors = theme_colors(App())
+
+    assert colors == {
+        "header": "blue",
+        "section": "bright_yellow",
+        "field": "white",
+        "value": "green",
+        "warn": "red",
+    }
+
+    table = metadata_table(
+        {"id": 1, "title": "Plexi", "username": "alice"},
+        colors=colors,
+    )
+    assert "ansi_" not in str(table.header_style)
 
 
 def test_detail_pane_rerenders_on_theme_change():

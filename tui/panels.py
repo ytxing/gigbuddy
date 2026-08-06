@@ -39,6 +39,8 @@ from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      set_border_hint_layout)  # noqa: E402
 from .library_panel import VerifiedAuthor
 from .selection import NonSelectableStatic  # noqa: E402
+from .mutations import (ViewAnchor, focused_widget_key,
+                        view_context)  # noqa: E402
 from .view_controls import ViewTabStrip  # noqa: E402
 
 
@@ -60,6 +62,29 @@ def _single_line(text: str) -> str:
     保留原始换行（多行可读性更好），不做此处理。
     """
     return " ".join(str(text).split())
+
+
+_CHAIN_REPLACEMENT_OPERATIONS = frozenset({
+    "chain", "preset-load", "undo", "redo",
+})
+_LIBRARY_STATE_OPERATIONS = frozenset({
+    "install", "uninstall", "import", "batch",
+})
+
+
+def _mutation_operations(event) -> set[str]:
+    operations = getattr(event, "operations", None)
+    if not operations:
+        operation = getattr(event, "operation", None)
+        operations = (operation,) if operation else ()
+    return {str(operation) for operation in operations if operation}
+
+
+def _mutation_keys(event) -> set[str]:
+    keys = getattr(event, "keys", None)
+    if keys is None:
+        keys = getattr(event, "object_keys", ())
+    return {str(key) for key in (keys or ())}
 
 
 class NodeWidget(Static):
@@ -509,24 +534,38 @@ class ChainParams(Static):
     can_focus = True
     FOCUS_ON_CLICK = False  # 点击 token 不抢节点焦点；仅单击值区域进编辑时聚焦
 
-    # 编辑态拦截全局绑定（g/G/m/M/q/Q 步进、space/s/l 播放、d 删除、↑/↓ 切换）
+    # Parameter bindings belong to this focus scope. When a value is being
+    # edited, the same bindings are intentionally swallowed by the guard.
     BINDINGS = [
-        Binding("g", "edit_guard", "gain -", show=False),
-        Binding("G", "edit_guard", "gain +", show=False),
-        Binding("m", "edit_guard", "master -", show=False),
-        Binding("M", "edit_guard", "master +", show=False),
-        Binding("q", "edit_guard", "quality -", show=False),
-        Binding("Q", "edit_guard", "quality +", show=False),
-        Binding("space", "edit_guard", "play/pause", show=False),
-        Binding("s", "edit_guard", "stop", show=False),
-        Binding("l", "edit_guard", "loop", show=False),
-        Binding("d", "edit_guard", "delete", show=False),
-        Binding("up", "edit_guard", "prev model", show=False),
-        Binding("down", "edit_guard", "next model", show=False),
+        Binding("g", "decrease_gain", "gain -", show=False),
+        Binding("G", "increase_gain", "gain +", show=False),
+        Binding("m", "decrease_master", "master -", show=False),
+        Binding("M", "increase_master", "master +", show=False),
+        Binding("q", "decrease_quality", "quality -", show=False),
+        Binding("Q", "increase_quality", "quality +", show=False),
     ]
 
-    def action_edit_guard(self) -> None:
-        """编辑态吞掉全局步进/播放/删除/切换键（ChainParams 聚焦时才生效）。"""
+    def _step_if_not_editing(self, key: str, delta: float) -> None:
+        if self._editing is None:
+            getattr(self.app, f"action_bump_{key}")(delta)
+
+    def action_decrease_gain(self) -> None:
+        self._step_if_not_editing("gain", -self.BASE_STEPS["gain"])
+
+    def action_increase_gain(self) -> None:
+        self._step_if_not_editing("gain", self.BASE_STEPS["gain"])
+
+    def action_decrease_master(self) -> None:
+        self._step_if_not_editing("master", -self.BASE_STEPS["master"])
+
+    def action_increase_master(self) -> None:
+        self._step_if_not_editing("master", self.BASE_STEPS["master"])
+
+    def action_decrease_quality(self) -> None:
+        self._step_if_not_editing("quality", -self.BASE_STEPS["quality"])
+
+    def action_increase_quality(self) -> None:
+        self._step_if_not_editing("quality", self.BASE_STEPS["quality"])
 
     # Parameter-specific base steps and the single long-press cadence from the
     # frozen UI spec. Long press deliberately has no second acceleration tier.
@@ -1004,11 +1043,13 @@ class ChainSlotWidget(Static):
     ]
 
     def __init__(self, index: int, snapshot: SlotSnapshot,
-                 *, title: str | None = None, gear: str | None = None) -> None:
+                 *, title: str | None = None, gear: str | None = None,
+                 quality_unsupported: bool = False) -> None:
         self.index = index
         self.snapshot = snapshot
         self.title = title
         self.gear = gear
+        self.quality_unsupported = quality_unsupported
         self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
         super().__init__(classes="chain-slot")
 
@@ -1069,10 +1110,11 @@ class ChainSlotWidget(Static):
         self.refresh()
 
     def set_snapshot(self, snapshot: SlotSnapshot, *, title: str | None,
-                     gear: str | None) -> None:
+                     gear: str | None, quality_unsupported: bool = False) -> None:
         self.snapshot = snapshot
         self.title = title
         self.gear = gear
+        self.quality_unsupported = quality_unsupported
         self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
         self._offset = 0
         self._update_border()
@@ -1081,7 +1123,10 @@ class ChainSlotWidget(Static):
     def render(self) -> str:
         width = self._content_width()
         if self.status is SlotStatus.EMPTY:
-            return f"[dim]{self.index + 1:02d}  NONE[/]\n"
+            # Keep the same two content rows as Active/Bypass: the first row
+            # reserves the primary title position and NONE stays on row two.
+            return (f"[dim]{self.index + 1:02d}[/]\n"
+                    "[dim]NONE[/]")
 
         filename = self.filename or ""
         sequence = f"{self.index + 1:02d}  "
@@ -1100,6 +1145,8 @@ class ChainSlotWidget(Static):
             secondary += " [dim]loading…[/]"
         elif overlay is SlotOverlay.ERROR and self.snapshot.error:
             secondary += f" [b $error]{_escape(self.snapshot.error)}[/]"
+        if self.quality_unsupported:
+            secondary += " [b $warning]quality unsupported[/]"
         return f"[b]{_escape(primary)}[/]\n{secondary}"
 
     def on_click(self, event: MouseEvent) -> None:
@@ -1187,6 +1234,9 @@ class ChainPanel(Vertical):
     BINDINGS = [
         Binding("left", "legacy_view_description", "description", show=False),
         Binding("right", "legacy_view_selection", "selection", show=False),
+        Binding("space", "playback_toggle", "play/pause", show=False),
+        Binding("s", "playback_stop", "stop", show=False),
+        Binding("l", "playback_loop", "loop", show=False),
     ]
 
     # Canonical v0.2 chains recompose only their dynamic Slot list. The
@@ -1219,6 +1269,15 @@ class ChainPanel(Vertical):
         if self._legacy_mode:
             self.action_view_selection()
 
+    def action_playback_toggle(self) -> None:
+        self.app.action_playback_toggle()
+
+    def action_playback_stop(self) -> None:
+        self.app.action_playback_stop()
+
+    def action_playback_loop(self) -> None:
+        self.app.action_playback_loop()
+
     def __init__(self) -> None:
         super().__init__()
         self.border_title = "TONE CHAIN"
@@ -1228,9 +1287,12 @@ class ChainPanel(Vertical):
         self.set_class(not self._legacy_mode, "chain-panel-dynamic")
         self._state = ChainState(initial if not self._legacy_mode else {})
         self._observed_chain_fingerprint: str | None = None
-        self._slot_metadata_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._slot_metadata_cache: dict[
+            str, tuple[str | None, str | None, bool]
+        ] = {}
         self._slot_widgets: dict[int, ChainSlotWidget] = {}
         self._last_focus_slot: int | None = None
+        self._mutation_anchor: ViewAnchor | None = None
         # Legacy hint fallback: last focused fixed AMP/CAB node.
         self._last_focus_node: NodeWidget | None = None
 
@@ -1243,13 +1305,16 @@ class ChainPanel(Vertical):
     def slot_widgets(self) -> tuple[ChainSlotWidget, ...]:
         return tuple(self._slot_widgets.values())
 
-    def _slot_metadata(self, path: str | None) -> tuple[str | None, str | None]:
+    def _slot_metadata(
+            self, path: str | None
+    ) -> tuple[str | None, str | None, bool]:
         if not path:
-            return None, None
+            return None, None, False
         if path in self._slot_metadata_cache:
             return self._slot_metadata_cache[path]
         title: str | None = None
         gear: str | None = None
+        quality_unsupported = False
         try:
             title = library.tone_title_for_path(path)
         except Exception:
@@ -1257,12 +1322,19 @@ class ChainPanel(Vertical):
         try:
             models = library.local_models_by_tone(path) or []
             if models:
-                tone = library.get_tone(models[0].get("tone_id")) or {}
+                model = next(
+                    (item for item in models
+                     if item.get("local_path") == path), models[0])
+                tone = library.get_tone(model.get("tone_id")) or {}
                 title = tone.get("title") or title
                 gear = tone.get("gear") or None
+                quality_unsupported = (
+                    Path(path).suffix.lower() == ".nam"
+                    and model.get("architecture") != "SlimmableContainer"
+                )
         except Exception:
             pass
-        result = (title, str(gear) if gear else None)
+        result = (title, str(gear) if gear else None, quality_unsupported)
         self._slot_metadata_cache[path] = result
         return result
 
@@ -1297,17 +1369,44 @@ class ChainPanel(Vertical):
                 ChainSlotWidget.MoveRequested(index, -1))),
             ("⌥↓ move", lambda: send(
                 ChainSlotWidget.MoveRequested(index, +1))),
-            ("↑/↓ model", lambda: send(
+            # Keep the two directions as separate hit targets. A single
+            # combined ``↑/↓`` token cannot be equivalent to both keyboard
+            # actions when clicked.
+            ("↑ model", lambda: send(
+                ChainSlotWidget.SwitchRequested(index, -1))),
+            ("↓ model", lambda: send(
                 ChainSlotWidget.SwitchRequested(index, +1))),
             ("space play/pause", lambda: self._fire_node_message(
                 self.input_node, self.input_node.PlaybackRequested("toggle"))),
         ])
+        # The full app layout gives ChainPanel only about half the terminal
+        # width even at the supported 120-column minimum.  Keep the changing
+        # state and the two model directions readable there, while allowing
+        # the lower-priority move/playback descriptions to disappear as
+        # complete tokens.  At wider widths the complete action vocabulary is
+        # retained and the shared fitter handles compaction.
+        width = self.region.width or (self.size.width + 4)
+        if 0 < width <= 56:
+            by_label = {label: callback for label, callback in actions}
+            if index is not None:
+                return [
+                    ("⌥↑ move", by_label["⌥↑ move"]),
+                    ("⌥↓ move", by_label["⌥↓ move"]),
+                ]
+            narrow: list[tuple[str, Callable[[], None]]] = []
+            if self.state.slot_count < MAX_SLOTS:
+                narrow.append(("+", by_label["+ add"]))
+            narrow.extend([
+                ("d", by_label["d delete"]),
+                ("↑ model", by_label["↑ model"]),
+                ("↓ model", by_label["↓ model"]),
+            ])
+            return narrow
         # The generic hint fitter keeps a rightmost suffix when space is very
         # tight. ChainPanel has a different priority contract: add/delete and
         # the current Slot action must survive before move/model/playback. Keep
         # the highest-priority prefix here, then let the shared fitter shorten
         # complete labels to key-only tokens.
-        width = self.region.width or (self.size.width + 4)
         budget = max(width - 6, 1)
         selected: list[tuple[str, Callable[[], None]]] = []
         for action in actions:
@@ -1410,6 +1509,137 @@ class ChainPanel(Vertical):
     def on_mount(self) -> None:
         self._refresh_hint()
 
+    def capture_view_anchor(self) -> ViewAnchor:
+        """Capture target, focus and scroll using ordered Slot identities."""
+        focused = getattr(self.app, "focused", None)
+        if isinstance(focused, ChainSlotWidget):
+            cursor_key = f"slot:{focused.index}"
+            focused_key = cursor_key
+        elif isinstance(focused, InputNodeWidget):
+            cursor_key = "input"
+            focused_key = "input"
+        elif isinstance(focused, NodeWidget):
+            cursor_key = f"node:{focused.kind}"
+            focused_key = cursor_key
+        else:
+            cursor_key = (
+                f"slot:{self.state.target_index}"
+                if self.state.target_index is not None else None)
+            focused_key = focused_widget_key(self)
+
+        first_key = None
+        rows = []
+        if hasattr(self, "input_node"):
+            rows.append(("input", self.input_node))
+        rows.extend(
+            (f"slot:{index}", widget)
+            for index, widget in sorted(self._slot_widgets.items()))
+        if hasattr(self, "add_slot"):
+            rows.append(("chain-add-slot", self.add_slot))
+        if hasattr(self, "params"):
+            rows.append(("chain-params", self.params))
+        try:
+            top = self.content_region.y
+            first_key = next(
+                (key for key, widget in rows if widget.region.bottom > top),
+                None)
+        except Exception:
+            first_key = rows[0][0] if rows else None
+        detail_context_key = None
+        try:
+            detail = self.screen.query_one(DetailPane)
+            detail_context_key = detail._detail_context_key()
+        except Exception:
+            pass
+        screen_id, app_tab = view_context(self)
+        selection_keys = (
+            (f"slot:{self.state.target_index}",)
+            if self.state.target_index is not None else ())
+        return ViewAnchor(
+            screen_id=screen_id,
+            app_tab=app_tab,
+            view_tab_id="chain",
+            focused_widget=focused_key,
+            cursor_row_key=cursor_key,
+            cursor_column=0,
+            first_visible_row_key=first_key,
+            row_offset=0.0,
+            scroll_x=float(getattr(self, "scroll_x", 0.0)),
+            scroll_y=float(getattr(self, "scroll_y", 0.0)),
+            selection_keys=selection_keys,
+            confirmation_state=None,
+            detail_context_key=detail_context_key,
+        )
+
+    def set_mutation_anchor(self, anchor: ViewAnchor | None) -> None:
+        self._mutation_anchor = anchor
+
+    def restore_view_anchor(self, anchor: ViewAnchor | None) -> None:
+        """Restore the current Slot target and viewport after a chain refresh."""
+        if anchor is None or anchor.view_tab_id != "chain":
+            return
+        key = anchor.cursor_row_key or ""
+        target_index = None
+        if key.startswith("slot:") and key.partition(":")[2].isdigit():
+            old_index = int(key.partition(":")[2])
+            if self.state.slot_count:
+                # The process-local state already resolved reorder/delete
+                # semantics by Slot identity. Prefer that target over the
+                # captured index, which may now contain a different Slot.
+                target_index = self.state.target_index
+                if target_index is None:
+                    # Overall replacements discard process-local target
+                    # identity; retain the old visual fallback only when the
+                    # replacement left a Slot at that position.
+                    target_index = min(old_index, self.state.slot_count - 1)
+        if target_index is not None:
+            try:
+                self.state.focus_slot(target_index)
+                self._last_focus_slot = target_index
+                self._refresh_dynamic_slots()
+            except ChainStateError:
+                pass
+        try:
+            self.scroll_to(
+                x=anchor.scroll_x, y=anchor.scroll_y,
+                animate=False, immediate=True)
+        except Exception:
+            pass
+        if not anchor.focused_widget:
+            return
+        focused = getattr(self.app, "focused", None)
+        try:
+            focus_still_in_panel = focused is None or any(
+                item is self for item in focused.ancestors_with_self)
+        except Exception:
+            focus_still_in_panel = False
+        if not focus_still_in_panel:
+            return
+        target = None
+        if anchor.focused_widget.startswith("slot:"):
+            index_text = anchor.focused_widget.partition(":")[2]
+            if index_text.isdigit():
+                # A reorder can leave the old index mounted but representing
+                # another Slot, and a deletion can remove it altogether. The
+                # resolved target is the only reliable focus destination.
+                target = self._slot_widgets.get(
+                    target_index if target_index is not None
+                    else int(index_text))
+        elif anchor.focused_widget == "input":
+            target = getattr(self, "input_node", None)
+        elif anchor.focused_widget.startswith("node:"):
+            kind = anchor.focused_widget.partition(":")[2]
+            target = next(
+                (node for node in self.query(NodeWidget)
+                 if node.kind == kind), None)
+        else:
+            try:
+                target = self.query_one(f"#{anchor.focused_widget}")
+            except Exception:
+                pass
+        if target is not None:
+            target.focus()
+
     def on_resize(self, _event) -> None:
         if hasattr(self, "input_node"):
             self._refresh_hint()
@@ -1422,12 +1652,13 @@ class ChainPanel(Vertical):
                 yield self.input_node
             for snapshot in self.state.slots:
                 path = snapshot.path or snapshot.candidate
-                title, gear = self._slot_metadata(path)
+                title, gear, quality_unsupported = self._slot_metadata(path)
                 with Horizontal(
                         classes="chain-slot-row",
                         id=f"chain-slot-row-{snapshot.index}"):
                     slot = ChainSlotWidget(
-                        snapshot.index, snapshot, title=title, gear=gear)
+                        snapshot.index, snapshot, title=title, gear=gear,
+                        quality_unsupported=quality_unsupported)
                     slot.is_target = snapshot.index == self.state.target_index
                     self._slot_widgets[snapshot.index] = slot
                     yield slot
@@ -1505,8 +1736,10 @@ class ChainPanel(Vertical):
                 continue
             snapshot = self.state.slot(index)
             path = snapshot.path or snapshot.candidate
-            title, gear = self._slot_metadata(path)
-            widget.set_snapshot(snapshot, title=title, gear=gear)
+            title, gear, quality_unsupported = self._slot_metadata(path)
+            widget.set_snapshot(
+                snapshot, title=title, gear=gear,
+                quality_unsupported=quality_unsupported)
             widget.set_target(index == target)
         if hasattr(self, "add_slot"):
             self.add_slot.disabled = self.state.slot_count >= MAX_SLOTS
@@ -1519,6 +1752,25 @@ class ChainPanel(Vertical):
                 float(chain.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])),
             )
         self._refresh_hint()
+
+    def reconcile_after_mutation(self, event) -> None:
+        """Refresh chain data without moving focus or changing the target."""
+        if not getattr(self, "is_mounted", False):
+            return
+        try:
+            cfg = live.read_chain()
+            operations = _mutation_operations(event)
+            if (not self._legacy_mode and operations.intersection(
+                    _CHAIN_REPLACEMENT_OPERATIONS)):
+                # These operations replace the complete Slot array. The
+                # process-local target and bypass candidates are not portable
+                # across that boundary, even when the paths happen to match.
+                self._state.replace_chain(cfg)
+                self._observed_chain_fingerprint = chain_fingerprint(cfg)
+                self._refresh_dynamic_slots()
+            self.chain = cfg
+        except Exception:
+            return
 
     async def _recompose_dynamic(self, focus_index: int | None = None) -> None:
         await self.recompose()
@@ -1560,7 +1812,11 @@ class ChainPanel(Vertical):
             if observed != self._observed_chain_fingerprint:
                 self._state.reconcile(
                     chain,
-                    fingerprint=live.last_chain_write_fingerprint(),
+                    # Compare the file that was actually observed with the
+                    # managed write marker. Using the last write marker here
+                    # would preserve bypass candidates after an external
+                    # replacement merely because a previous TUI write exists.
+                    fingerprint=live.chain_file_fingerprint(),
                     revision=chain.get("revision"),
                 )
                 self._observed_chain_fingerprint = observed
@@ -1828,18 +2084,22 @@ class DetailPane(Vertical):
     class PackFilesInstalled(Message):
         """pack 表 i 键安装完成（二级菜单内直接下载选中的模型）。"""
 
-        def __init__(self, tone_id: int, count: int) -> None:
+        def __init__(self, tone_id: int, count: int,
+                     model_ids: list[int] | tuple[int, ...] = ()) -> None:
             super().__init__()
             self.tone_id = tone_id
             self.count = count
+            self.model_ids = tuple(model_ids)
 
     class PackFilesUninstalled(Message):
         """pack 表 u 键卸载完成（模型粒度，元数据保留）。"""
 
-        def __init__(self, tone_id: int, count: int) -> None:
+        def __init__(self, tone_id: int, count: int,
+                     model_ids: list[int] | tuple[int, ...] = ()) -> None:
             super().__init__()
             self.tone_id = tone_id
             self.count = count
+            self.model_ids = tuple(model_ids)
 
     BINDINGS = [
         Binding("left", "legacy_view_description", "description", show=False),
@@ -1857,12 +2117,25 @@ class DetailPane(Vertical):
     can_focus = True
 
     def action_back_from_creator(self) -> None:
-        """作者介绍页 Esc：回到 TOP CREATORS 表继续浏览（REQ-020）。"""
+        """Return to the surface that opened the current detail view.
+
+        The binding is shared by Description, Pack Selection and creator
+        detail so the visible ``esc back`` token has exactly the same result
+        as the keyboard action in every Detail mode.
+        """
+        if self._view_mode == "selection":
+            self._pack_table.action_close_pack()
+            return
         if (self._pack_origin == "slot"
                 and self._pack_slot_index is not None):
             self._close_slot_detail()
         elif self._pack_origin == "creators":
             self.screen.query_one("#lib-table-creators").focus()
+        elif self._view_mode == "description":
+            try:
+                self.app.query_one("LibraryPanel")._table().focus()
+            except Exception:
+                pass
 
     def _close_slot_detail(self) -> None:
         if self._pack_origin != "slot" or self._pack_slot_index is None:
@@ -1959,6 +2232,8 @@ class DetailPane(Vertical):
         # 选择=聚焦：上一次光标同步时的激活槽位路径（仅槽位变化才移动光标）。
         self._pack_synced_model: str | None = None
         self._pack_synced_ir: str | None = None
+        self._pack_refresh_anchor: dict | None = None
+        self._pack_refresh_focus = False
         # Rebuild the current rich Table with fresh theme colors on theme
         # change; markup content (title/summary/plain text) recolors itself.
         self._rerender: Callable[[], None] | None = None
@@ -1972,6 +2247,12 @@ class DetailPane(Vertical):
         # Tone-detail view mode: "description" (default) | "selection" |
         # None (model/preset/other views without the mode switch).
         self._view_mode = "description"
+        self._description_remote = False
+        # Description and Pack are two views of the same tone, not two
+        # disposable screens. Keep their scroll/cursor state keyed by the
+        # stable tone identity so switching tabs does not rebuild the user's
+        # browsing position from scratch.
+        self._detail_tab_states: dict[str, dict[str, dict]] = {}
         # How the pack view was entered — from a chain node (Esc returns
         # focus there) or by switching over from the description view (Esc
         # switches back instead).
@@ -1984,6 +2265,13 @@ class DetailPane(Vertical):
         self._creator_bio_cache: dict[str, str] = {}
         self._creator_error: str | None = None
         self._creator_loading = False
+        # Stable context for mutation reconciliation. This is deliberately
+        # separate from the rendered text so a preset can be refreshed in
+        # place after a parameter, rename, or delete mutation.
+        self._detail_preset_name: str | None = None
+        self._detail_preset_id: int | None = None
+        self._detail_model: dict | None = None
+        self._mutation_anchor: ViewAnchor | None = None
 
     def _set_marquee(self, content: str | None, *, markup: bool = False) -> None:
         """Update the shared title row with the correct parser mode.
@@ -2185,6 +2473,25 @@ class DetailPane(Vertical):
         self._pack_progress_status = ""
         self._refresh_view_tabs()
 
+    def clear_slot_target_context(self) -> None:
+        """Remove a stale target after a successful whole-chain replacement."""
+        if self._pack_slot_index is None:
+            return
+        if self._view_mode == "empty":
+            self.clear()
+            return
+        self._pack_slot_index = None
+        self._pack_slot_status = None
+        self._pack_slot_label = None
+        if self._pack_origin == "slot":
+            self._pack_origin = "description"
+        self._refresh_view_tabs()
+        if self._pack_mode:
+            self.refresh_pack_active(live.read_chain())
+        elif self._summary_mode == "tone":
+            self._set_summary(self._tone_summary(
+                self._current_tone or {}))
+
     def _set_summary(self, content: str) -> None:
         """摘要行更新；空内容时去掉行背景——未选中态不允许任何带背景的行。"""
         self._summary.content = content
@@ -2194,13 +2501,161 @@ class DetailPane(Vertical):
         """Keep the visible Description/Pack strip aligned with the view."""
         has_pack = bool(
             self._current_tone
-            and (self._pack_remote or self._pack_rows
+            and (self._description_remote or self._pack_remote or self._pack_rows
                  or self._pack_slot_index is not None)
         )
         mode = self._view_mode if self._view_mode in {
             "description", "selection"
         } else "description"
         self._view_tabs.set_view(mode, has_pack=has_pack)
+
+    def _detail_context_key(self, tone: dict | None = None) -> str:
+        """Return a stable key for the current Description/Pack pair."""
+        tone = tone or self._current_tone or {}
+        tone_id = tone.get("id")
+        if tone_id is not None:
+            return f"tone:{tone_id}"
+        return "tone:{title}:{author}".format(
+            title=tone.get("title") or "",
+            author=tone.get("username") or "",
+        )
+
+    def _detail_tab_state(self) -> dict[str, dict]:
+        return self._detail_tab_states.setdefault(
+            self._detail_context_key(), {})
+
+    def _capture_detail_tab_state(self) -> None:
+        """Capture only the active view before replacing its content."""
+        state = self._detail_tab_state()
+        if self._view_mode == "description":
+            try:
+                scroll = self.query_one("#detail-scroll", VerticalScroll)
+                state["description"] = {
+                    "scroll_x": scroll.scroll_x,
+                    "scroll_y": scroll.scroll_y,
+                    "focused": scroll.has_focus or self._body.has_focus,
+                }
+            except Exception:
+                return
+        elif self._view_mode == "selection" and self._pack_mode:
+            state["selection"] = {
+                "tone": dict(self._pack_tone or self._current_tone or {}),
+                "models": [dict(model) for model in self._pack_rows.values()],
+                "remote": self._pack_remote,
+                "kind": self._pack_kind,
+                "slot_index": self._pack_slot_index,
+                "slot_status": self._pack_slot_status,
+                "slot_label": self._pack_slot_label,
+                "origin": self._pack_origin,
+                "chain": dict(self._pack_chain),
+                "anchor": self._capture_pack_anchor(),
+            }
+
+    def _restore_detail_description_state(self) -> None:
+        saved = self._detail_tab_state().get("description")
+        if not saved:
+            return
+        try:
+            scroll = self.query_one("#detail-scroll", VerticalScroll)
+            scroll.scroll_to(
+                x=saved.get("scroll_x", scroll.scroll_x),
+                y=saved.get("scroll_y", scroll.scroll_y),
+                animate=False,
+            )
+            if saved.get("focused"):
+                scroll.focus()
+        except Exception:
+            pass
+
+    def capture_view_anchor(self) -> ViewAnchor:
+        """Capture Description or Pack using stable model and tone identities."""
+        screen_id, app_tab = view_context(self)
+        if self._view_mode == "selection" and self._pack_mode:
+            state = self._capture_pack_anchor()
+            view_tab_id = "selection"
+            cursor_row_key = state.get("key")
+            cursor_column = int(state.get("column", 0))
+            first_visible_key = state.get("first_key")
+            row_offset = float(state.get("row_offset", 0.0))
+            scroll_x = float(state.get("scroll_x", 0.0))
+            scroll_y = float(state.get("scroll_y", 0.0))
+            selection_keys = tuple(sorted(self._pack_picked))
+            confirmation_state = {
+                "uninstall_confirmed": self._pack_uninstall_confirmed,
+                "uninstall_target": self._pack_uninstall_target,
+            }
+        else:
+            view_tab_id = self._view_mode or "description"
+            cursor_row_key = None
+            cursor_column = 0
+            first_visible_key = None
+            row_offset = 0.0
+            scroll_x = 0.0
+            scroll_y = 0.0
+            selection_keys = ()
+            confirmation_state = None
+            try:
+                scroll = self.query_one("#detail-scroll", VerticalScroll)
+                scroll_x = float(scroll.scroll_x)
+                scroll_y = float(scroll.scroll_y)
+            except Exception:
+                pass
+        return ViewAnchor(
+            screen_id=screen_id,
+            app_tab=app_tab,
+            view_tab_id=view_tab_id,
+            focused_widget=focused_widget_key(self),
+            cursor_row_key=cursor_row_key,
+            cursor_column=cursor_column,
+            first_visible_row_key=first_visible_key,
+            row_offset=row_offset,
+            scroll_x=scroll_x,
+            scroll_y=scroll_y,
+            selection_keys=selection_keys,
+            confirmation_state=confirmation_state,
+            detail_context_key=self._detail_context_key(),
+        )
+
+    def set_mutation_anchor(self, anchor: ViewAnchor | None) -> None:
+        self._mutation_anchor = anchor
+
+    def restore_view_anchor(self, anchor: ViewAnchor | None) -> None:
+        """Restore the active Detail view without opening or switching a view."""
+        if anchor is None:
+            return
+        if (anchor.detail_context_key
+                and self._current_tone is not None
+                and anchor.detail_context_key != self._detail_context_key()):
+            return
+        if anchor.view_tab_id == "selection" and self._pack_mode:
+            self._restore_pack_anchor({
+                "key": anchor.cursor_row_key,
+                "column": anchor.cursor_column,
+                "first_key": anchor.first_visible_row_key,
+                "row_offset": anchor.row_offset,
+                "scroll_x": anchor.scroll_x,
+                "scroll_y": anchor.scroll_y,
+                "picked": anchor.selection_keys,
+            })
+        elif anchor.view_tab_id == "description":
+            try:
+                scroll = self.query_one("#detail-scroll", VerticalScroll)
+                scroll.scroll_to(
+                    x=anchor.scroll_x, y=anchor.scroll_y,
+                    animate=False, immediate=True)
+            except Exception:
+                pass
+        if not anchor.focused_widget:
+            return
+        focused = getattr(self.app, "focused", None)
+        try:
+            focus_still_in_panel = focused is None or any(
+                item is self for item in focused.ancestors_with_self)
+            target = self.query_one(f"#{anchor.focused_widget}")
+        except Exception:
+            return
+        if focus_still_in_panel:
+            target.focus()
 
     def on_detail_view_tabs_changed(self, event: DetailViewTabs.Changed) -> None:
         self.toggle_view(-1 if event.mode == "description" else +1)
@@ -2237,11 +2692,35 @@ class DetailPane(Vertical):
         selection view needs the tone's model list; a tone without models
         stays on the description view.
         """
+        if self._view_mode not in {"description", "selection"}:
+            return
+        self._capture_detail_tab_state()
         if self._view_mode == "selection" and direction < 0:
             self._enter_description(self._current_tone,
                                     preserve_slot_context=True)
+            self._restore_detail_description_state()
         elif self._view_mode == "description" and direction > 0:
             tone = self._current_tone
+            saved = self._detail_tab_state().get("selection")
+            if saved and saved.get("models"):
+                # A remote pack may have no local models on the tone record.
+                # Once its rows have arrived, switching back from Description
+                # must restore that tab-local table instead of fetching page 1
+                # again and losing the cursor/viewport.
+                self._enter_selection(
+                    tone=tone,
+                    models=list(saved["models"]),
+                    chain=dict(saved.get("chain") or live.read_chain()),
+                    kind=saved.get("kind"),
+                    slot_index=saved.get("slot_index"),
+                    slot_status=saved.get("slot_status"),
+                    slot_label=saved.get("slot_label"),
+                    origin=saved.get("origin") or "description",
+                    focus_table=True,
+                    remote=bool(saved.get("remote")),
+                )
+                self._restore_pack_anchor(saved.get("anchor"))
+                return
             if tone and not (tone.get("models") or []):
                 # 远程/无本地模型的 tone：拉远程模型列表做 Selection 视图
                 # （未下载置灰、Enter 进安装二级页）。
@@ -2254,7 +2733,8 @@ class DetailPane(Vertical):
                                       origin=(self._pack_origin
                                               if self._pack_slot_index is not None
                                               else "description"),
-                                      focus_table=True)
+                                      focus_table=True,
+                                      remote=self._description_remote)
 
     def _mode_hint(self, *, selection: bool) -> str:
         """Return the stable action vocabulary used by both detail modes."""
@@ -2390,7 +2870,7 @@ class DetailPane(Vertical):
                 pass
 
         try:
-            await asyncio.to_thread(
+            imported = await asyncio.to_thread(
                 library.import_tone, tone_id, progress, quiet=True,
                 model_ids=model_ids)
         except Exception as e:
@@ -2400,14 +2880,33 @@ class DetailPane(Vertical):
                 self._update_pack_hint()
                 self.app.notify(f"Install failed: {e}", severity="error")
             return
+        if not imported:
+            if self._pack_operation_alive(generation, tone_id):
+                self._pack_busy = None
+                self._pack_operation_target = None
+                self._pack_progress_status = f"install failed: tone {tone_id} unavailable"
+                self._update_pack_hint()
+                self.app.notify(
+                    f"TONE3000 has no tone {tone_id}", severity="error")
+            return
+        downloaded = library.downloaded_model_ids_by_tone().get(tone_id, set())
+        actual_ids = tuple(sorted(set(model_ids).intersection(downloaded)))
+        if not actual_ids:
+            # Narrow test doubles may not populate the local model table even
+            # though import_tone returned successfully.
+            actual_ids = tuple(sorted(set(model_ids)))
+        publish = getattr(self.app, "_publish_mutation", None)
+        if callable(publish):
+            publish("install", tuple(f"model:{model_id}" for model_id in actual_ids),
+                    imported.get("revision"))
         if not self._pack_operation_alive(generation, tone_id):
             return
         self._pack_busy = None
         self._pack_operation_target = None
         self._pack_uninstall_confirmed = False
         self._pack_uninstall_target = ()
-        self.post_message(self.PackFilesInstalled(tone_id, len(model_ids)))
-        self._refresh_pack_after_change(tone_id, self._view_generation)
+        self.post_message(
+            self.PackFilesInstalled(tone_id, len(actual_ids), actual_ids))
 
     def _pack_uninstall_selected(self) -> None:
         """u：卸载选中的已下载模型（未勾选时 = 光标单行）。
@@ -2468,14 +2967,28 @@ class DetailPane(Vertical):
                 self._update_pack_hint()
                 self.app.notify(f"Uninstall failed: {e}", severity="error")
             return
+        if int(result.get("removed") or 0) <= 0:
+            if self._pack_operation_alive(generation, tone_id):
+                self._pack_busy = None
+                self._pack_operation_target = None
+                self._pack_uninstall_confirmed = False
+                self._pack_uninstall_target = ()
+                self._pack_progress_status = "no files removed"
+                self._update_pack_hint()
+            return
+        actual_ids = tuple(result.get("removed_model_ids") or model_ids)
+        publish = getattr(self.app, "_publish_mutation", None)
+        if callable(publish):
+            publish("uninstall", tuple(f"model:{model_id}" for model_id in actual_ids),
+                    result.get("revision"))
         if not self._pack_operation_alive(generation, tone_id):
             return
         self._pack_busy = None
         self._pack_operation_target = None
         self._pack_uninstall_confirmed = False
         self._pack_uninstall_target = ()
-        self.post_message(self.PackFilesUninstalled(tone_id, result["removed"]))
-        self._refresh_pack_after_change(tone_id, self._view_generation)
+        self.post_message(
+            self.PackFilesUninstalled(tone_id, result["removed"], actual_ids))
 
     def _set_pack_install_status(self, generation: int, tone_id: int,
                                  message: str) -> None:
@@ -2492,18 +3005,251 @@ class DetailPane(Vertical):
                 or not getattr(self, "_pack_mode", False)
                 or int((self._pack_tone or {}).get("id") or 0) != tone_id):
             return
+        self._pack_refresh_anchor = self._capture_pack_anchor()
+        self._pack_refresh_focus = self._pack_table.has_focus
         if getattr(self, "_pack_remote", False):
             self._pack_loading = True
             self._pack_error = False
             self._pack_progress_status = "loading…"
             self._update_pack_hint()
-            self.run_worker(partial(self._fetch_remote_models, tone_id, generation),
-                            name="remote-pack")
+            self.run_worker(
+                partial(self._fetch_remote_models, tone_id, generation),
+                name="remote-pack", exclusive=True)
         else:
             tone = library.get_tone(tone_id) or {}
+            self._pack_tone = tone
+            self._current_tone = tone
             self._fill_pack_rows(tone.get("models") or [])
             self.refresh_pack_active(live.read_chain())
+            self._restore_pack_anchor(self._pack_refresh_anchor)
+            if self._pack_refresh_focus:
+                self._pack_table.focus()
+            self._pack_refresh_anchor = None
+            self._pack_refresh_focus = False
             self._update_pack_hint()
+
+    @staticmethod
+    def _pack_row_top(table: DataTable, row_index: int) -> int:
+        """Return a pack row's content-space top, including the header."""
+        top = table.header_height if table.show_header else 0
+        for row in table.ordered_rows[:row_index]:
+            # Pack rows are single-line, but use the widget's measured height
+            # so this remains correct if a cell becomes multi-line later.
+            top += max(int(table.get_row_height(row.key)), 1)
+        return top
+
+    def _capture_pack_anchor(self) -> dict:
+        table = self._pack_table
+        rows = table.ordered_rows
+        real_rows = [row for row in rows
+                     if not str(row.key.value).startswith("__")]
+        current_key = (
+            rows[table.cursor_row].key.value
+            if 0 <= table.cursor_row < len(rows) else None)
+        current_position = next(
+            (index for index, row in enumerate(real_rows)
+             if row.key.value == current_key), None)
+        scroll_y = float(table.scroll_y)
+        first_index = None
+        first_top = None
+        top = table.header_height if table.show_header else 0
+        for index, row in enumerate(rows):
+            height = max(int(table.get_row_height(row.key)), 1)
+            if top + height > scroll_y:
+                first_index = index
+                first_top = top
+                break
+            top += height
+        if rows and first_index is None:
+            first_index = len(rows) - 1
+            first_top = self._pack_row_top(table, first_index)
+        first_row = rows[first_index] if first_index is not None else None
+        return {
+            "key": current_key,
+            "cursor_index": table.cursor_row,
+            "next_key": (
+                real_rows[current_position + 1].key.value
+                if current_position is not None
+                and current_position + 1 < len(real_rows) else None),
+            "previous_key": (
+                real_rows[current_position - 1].key.value
+                if current_position is not None and current_position > 0
+                else None),
+            "column": table.cursor_column,
+            "first_key": first_row.key.value if first_row else None,
+            "first_next_key": (
+                rows[first_index + 1].key.value
+                if first_index is not None and first_index + 1 < len(rows)
+                else None),
+            "first_previous_key": (
+                rows[first_index - 1].key.value
+                if first_index is not None and first_index > 0 else None),
+            # scroll_y and row tops share DataTable content coordinates. The
+            # offset can be negative while the header is visible at the top.
+            "row_offset": (scroll_y - first_top
+                           if first_top is not None else 0),
+            "scroll_x": table.scroll_x,
+            "scroll_y": scroll_y,
+            "picked": tuple(sorted(self._pack_picked)),
+            "focused": table.has_focus,
+        }
+
+    def _restore_pack_anchor(self, anchor: dict | None) -> None:
+        if not anchor:
+            return
+        table = self._pack_table
+        rows = table.ordered_rows
+        key = anchor.get("key")
+        row = next((i for i, item in enumerate(rows)
+                    if item.key.value == key), None)
+        if row is None:
+            for fallback_key in (anchor.get("next_key"),
+                                 anchor.get("previous_key")):
+                if fallback_key is None:
+                    continue
+                row = next((i for i, item in enumerate(rows)
+                            if item.key.value == fallback_key), None)
+                if row is not None:
+                    break
+        if row is None and rows:
+            real_rows = [i for i, item in enumerate(rows)
+                         if not str(item.key.value).startswith("__")]
+            if real_rows:
+                row = real_rows[min(max(int(anchor.get("cursor_index", 0)), 0),
+                                   len(real_rows) - 1)]
+        if row is not None:
+            table.move_cursor(
+                row=row, column=anchor.get("column", table.cursor_column),
+                animate=False, scroll=False)
+        valid_picks = set(anchor.get("picked", ())).intersection(self._pack_rows)
+        self._pack_picked = valid_picks
+        for row_key in self._pack_rows:
+            try:
+                table.update_cell(
+                    row_key, "pick",
+                    "\\[x]" if row_key in valid_picks else "\\[ ]")
+            except Exception:
+                pass
+        # A table refresh can invalidate a preset-reference confirmation even
+        # when the selected row itself still exists.
+        self._pack_uninstall_confirmed = False
+        self._pack_uninstall_target = ()
+        first_key = anchor.get("first_key")
+        first_row = next((i for i, item in enumerate(rows)
+                          if item.key.value == first_key), None)
+        if first_row is None:
+            for fallback_key in (anchor.get("first_next_key"),
+                                 anchor.get("first_previous_key")):
+                if fallback_key is None:
+                    continue
+                first_row = next((i for i, item in enumerate(rows)
+                                  if item.key.value == fallback_key), None)
+                if first_row is not None:
+                    break
+        if first_row is not None:
+            scroll_y = self._pack_row_top(table, first_row) + float(
+                anchor.get("row_offset", 0))
+        else:
+            scroll_y = anchor.get("scroll_y", table.scroll_y)
+        table.scroll_to(
+            x=anchor.get("scroll_x", table.scroll_x),
+            y=scroll_y,
+            animate=False,
+            force=True,
+        )
+
+    def _refresh_preset_detail(self, name: str) -> None:
+        """Re-render the retained Preset context without clearing the pane."""
+        if self._detail_preset_id is not None:
+            preset = library.preset_get_by_id(self._detail_preset_id)
+        else:
+            preset = library.preset_get(name)
+        if preset is None:
+            self._set_summary("[b $error]REMOVED[/] · preset unavailable")
+            self._body.update(
+                "[bold $error]This preset is no longer available.[/]")
+            return
+        name = str(preset.get("name") or name)
+        self._detail_preset_name = name
+        preset_id = preset.get("id")
+        self._detail_preset_id = (
+            preset_id if isinstance(preset_id, int) and not isinstance(preset_id, bool)
+            else None)
+        try:
+            if self._detail_preset_id is not None:
+                resolved = library.preset_resolved_chain_by_id(
+                    self._detail_preset_id)
+            else:
+                resolved = library.preset_resolved_chain(name)
+        except ValueError as exc:
+            # Keep a visible error in the existing pane rather than replacing
+            # the user's context with an empty Detail surface.
+            self._set_summary("[b $error]ERROR[/] · preset cannot be resolved")
+            self._body.update(f"[bold $error]{_escape(str(exc))}[/]")
+            return
+        self.show_preset(
+            preset,
+            resolved,
+            active=library.preset_current() == name,
+            dirty=library.preset_current() == name
+            and library.preset_is_dirty(
+                name, preset_id=self._detail_preset_id),
+        )
+
+    def _pack_mutation_affects_tone(self, event, tone_id: int) -> bool:
+        """Limit Pack row rebuilds to keys belonging to its Detail context."""
+        keys = _mutation_keys(event)
+        if not keys:
+            # Preserve compatibility with older callers that did not carry
+            # object keys; a keyed event is filtered below.
+            return True
+        model_keys = {
+            f"model:{model.get('id')}"
+            for model in self._pack_rows.values()
+            if model.get("id") is not None
+        }
+        return any(
+            str(key) == f"tone:{tone_id}" or str(key) in model_keys
+            for key in keys
+        )
+
+    def reconcile_after_mutation(self, event) -> None:
+        """Refresh the retained context in place after a committed mutation."""
+        if not getattr(self, "is_mounted", False):
+            return
+        operations = _mutation_operations(event)
+        if getattr(self, "_pack_mode", False):
+            if operations.intersection(_LIBRARY_STATE_OPERATIONS):
+                tone_id = int(
+                    (self._pack_tone or self._current_tone or {}).get("id") or 0)
+                if tone_id and self._pack_mutation_affects_tone(event, tone_id):
+                    self._refresh_pack_after_change(tone_id, self._view_generation)
+                    return
+            self.refresh_pack_active(live.read_chain())
+            return
+
+        if self._summary_mode == "preset" and (
+                self._detail_preset_name or self._detail_preset_id is not None):
+            self._refresh_preset_detail(self._detail_preset_name or "")
+            return
+
+        if (operations.intersection(_LIBRARY_STATE_OPERATIONS)
+                and self._current_tone and self._current_tone.get("id") is not None):
+            tone_id = int(self._current_tone["id"])
+            tone = library.get_tone(tone_id) or self._current_tone
+            if self._summary_mode == "model" and self._detail_model:
+                model_id = self._detail_model.get("id")
+                model = next((item for item in tone.get("models", [])
+                              if item.get("id") == model_id), None)
+                if model is not None:
+                    self.show_model(tone, model)
+            elif self._summary_mode == "tone":
+                # Description is a retained view tab. Re-render its metadata
+                # after the library state changes, but restore the tab-local
+                # scroll/focus anchor captured before replacing the body.
+                self._capture_detail_tab_state()
+                self.show(tone, remote=self._description_remote)
+                self._restore_detail_description_state()
 
     def _chain_model_id(self, tone: dict) -> int | None:
         """The live chain's model id, when that model belongs to this tone."""
@@ -2533,12 +3279,17 @@ class DetailPane(Vertical):
     def _enter_description(self, tone: dict | None, *,
                            preserve_slot_context: bool = False,
                            slot_index: int | None = None,
-                           slot_status: SlotStatus | None = None) -> None:
+                           slot_status: SlotStatus | None = None,
+                           remote: bool | None = None) -> None:
         """Description view: the two-line header carries the key metadata and
         the body shows the tone's description — the text for understanding
         how the tone is named."""
         generation = self._invalidate_view()
         tone = tone or self._current_tone or {}
+        if remote is None:
+            remote = self._description_remote
+            if preserve_slot_context:
+                remote = remote or self._pack_remote
         if preserve_slot_context:
             slot_index = self._pack_slot_index
             slot_status = self._pack_slot_status
@@ -2551,9 +3302,13 @@ class DetailPane(Vertical):
         self._pack_slot_status = slot_status
         self._pack_slot_label = slot_label
         self._pack_origin = origin
+        self._description_remote = bool(remote)
         self.border_title = "TONE DETAIL"
         self._current_tone = tone
         self._summary_mode = "tone"
+        self._detail_preset_name = None
+        self._detail_preset_id = None
+        self._detail_model = None
         self._view_mode = "description"
         self._set_marquee(self._marquee_content(
             tone, self._chain_model_id(tone)))
@@ -2616,6 +3371,7 @@ class DetailPane(Vertical):
                 pass
         self._pack_tone = tone
         self._pack_remote = remote
+        self._description_remote = remote
         self._pack_creator = None
         self._pack_kind = kind or "amp"
         self._pack_slot_index = slot_index
@@ -2630,6 +3386,9 @@ class DetailPane(Vertical):
             self._pack_origin = origin
         self._view_mode = "selection"
         self._summary_mode = "tone"
+        self._detail_preset_name = None
+        self._detail_preset_id = None
+        self._detail_model = None
         self._set_pack_mode(True)
         self._update_pack_hint()
         self._fill_pack_rows(models)
@@ -2733,6 +3492,8 @@ class DetailPane(Vertical):
         self._pack_slot_status = SlotStatus.EMPTY
         self._pack_origin = "slot"
         self._current_tone = None
+        self._description_remote = False
+        self._refresh_view_tabs()
         self._pack_rows = {}
         self._pack_path_to_key = {}
         self._pack_table.clear()
@@ -2770,6 +3531,7 @@ class DetailPane(Vertical):
         头两行），模型列表后台拉取后填入 pack 表——远程文件未下载置灰，
         Enter 一行打开安装二级页（PackInstallRequested）。"""
         tone_id = int(tone.get("id") or 0)
+        self._description_remote = True
         self._exit_pack_mode()
         self._enter_selection(tone=tone, models=[], origin="description",
                               focus_table=True, remote=True)
@@ -2779,7 +3541,7 @@ class DetailPane(Vertical):
             self._pack_progress_status = "loading…"
             self._update_pack_hint()
             self.run_worker(partial(self._fetch_remote_models, tone_id, generation),
-                            name="remote-pack")
+                            name="remote-pack", exclusive=True)
 
     def retry_remote_pack(self) -> None:
         if (self._pack_loading or not self._pack_remote
@@ -2816,6 +3578,7 @@ class DetailPane(Vertical):
                 or self._view_mode != "selection"
                 or int(self._pack_tone.get("id") or 0) != tone_id):
             return  # 视图已切走：晚到的回答不覆盖
+        ms = self._merge_remote_local_models(tone_id, ms)
         self._remote_models_cache[tone_id] = list(ms)
         self._pack_loading = False
         self._pack_error = False
@@ -2825,8 +3588,35 @@ class DetailPane(Vertical):
         self._set_marquee(self._marquee_content(
             self._current_tone or {}, first.get("id") if first else None))
         self.refresh_pack_active(live.read_chain())
-        self._pack_table.focus()
+        anchor = self._pack_refresh_anchor
+        keep_focus = self._pack_refresh_focus
+        self._restore_pack_anchor(anchor)
+        self._pack_refresh_anchor = None
+        if keep_focus:
+            self._pack_table.focus()
         self._update_pack_hint()
+
+    @staticmethod
+    def _merge_remote_local_models(tone_id: int,
+                                   models: list[dict]) -> list[dict]:
+        """Attach local paths to remote rows after a partial/full install."""
+        try:
+            local_tone = library.get_tone(tone_id) or {}
+        except Exception:
+            local_tone = {}
+        local_by_id = {
+            int(model["id"]): model
+            for model in local_tone.get("models") or []
+            if model.get("id") is not None and model.get("local_path")
+        }
+        merged = []
+        for model in models:
+            item = dict(model)
+            local = local_by_id.get(int(model["id"]))
+            if local is not None:
+                item["local_path"] = local["local_path"]
+            merged.append(item)
+        return merged
 
     def show_creator(self, username: str) -> None:
         """TOP CREATORS 作者聚焦视图（REQ-030/REQ-033）。
@@ -2838,7 +3628,12 @@ class DetailPane(Vertical):
         generation = self._invalidate_view()
         self._exit_pack_mode()
         self._current_tone = None
+        self._description_remote = False
+        self._refresh_view_tabs()
         self._summary_mode = "creator"
+        self._detail_preset_name = None
+        self._detail_preset_id = None
+        self._detail_model = None
         self._view_mode = "creator"
         self._pack_origin = "creators"
         self._pack_creator = username   # 入口即记录：晚到的旧作者回答不覆盖
@@ -3052,7 +3847,7 @@ class DetailPane(Vertical):
         if not model:
             return
         tone = self._pack_tone or self._current_tone or {}
-        if getattr(self, "_pack_remote", False) or not model.get("local_path"):
+        if not model.get("local_path"):
             # 未下载行 Enter/双击 = 打开二级菜单详情页（REQ-038）。
             # 必须传 tone dict——旧实现把 model 当 tone 传，PackInstallScreen
             # 用 model 的 id 当作 tone id 拉列表/导入，内容全错。
@@ -3081,29 +3876,35 @@ class DetailPane(Vertical):
             if self._pack_busy is not None:
                 return []
             actions = [
+                ("enter load", self._pack_table.action_select_cursor),
                 ("i install", self._pack_install_selected),
                 ("u uninstall", self._pack_uninstall_selected),
+                ("esc back", self.action_back_from_creator),
             ]
             if self._pack_error and not self._pack_loading:
                 actions.insert(0, ("r retry", self.retry_remote_pack))
             return actions
         if self._view_mode == "description":
-            return []
+            return [("esc back", self.action_back_from_creator)]
         if self._view_mode == "empty":
             return [
                 ("enter browse", self.action_browse_empty_slot),
                 ("d delete", self.action_delete_empty_slot),
                 ("esc back", self._close_slot_detail),
             ]
-        if self._view_mode == "creator" and self._creator_error:
-            return [("r retry", self.retry_creator_view)]
+        if self._view_mode == "creator":
+            actions = []
+            if self._creator_error:
+                actions.append(("r retry", self.retry_creator_view))
+            actions.append(("esc back", self.action_back_from_creator))
+            return actions
         return []
 
     def on_click(self, event: MouseEvent) -> None:
         """The right-aligned border hint is a real control: switching between
         the Description and Selection views, plus REQ-038 的 i install /
         u uninstall 批量动作 token。"""
-        if self._view_mode not in ("description", "selection", "empty"):
+        if self._view_mode not in ("description", "selection", "empty", "creator"):
             return
         border_hint_click(self, event, self._border_hint_actions())
 
@@ -3119,7 +3920,7 @@ class DetailPane(Vertical):
     def on_leave(self, event: Leave) -> None:
         set_border_hint_hover(self, None)
 
-    def show(self, t: dict) -> None:
+    def show(self, t: dict, *, remote: bool = False) -> None:
         """Library focus → Description view (the default mode).
 
         Mouse focus decides the mode: focusing the library shows the tone's
@@ -3139,7 +3940,7 @@ class DetailPane(Vertical):
         except Exception:
             pass
         self._enter_description(t, slot_index=target_index,
-                                slot_status=target_status)
+                                slot_status=target_status, remote=remote)
 
     def show_model(self, tone: dict | None, model: dict) -> None:
         """Render a chain node's current model: FILE section (name/id/arch/path)
@@ -3147,11 +3948,16 @@ class DetailPane(Vertical):
         self._invalidate_view()
         self._exit_pack_mode()
         self._view_mode = None
+        self._description_remote = False
+        self._refresh_view_tabs()
         set_border_hint_layout(self, "", [])
         self.border_title = "TONE DETAIL"
         tone = tone or {}
         self._current_tone = tone
         self._summary_mode = "model"
+        self._detail_preset_name = None
+        self._detail_preset_id = None
+        self._detail_model = dict(model)
         self._set_marquee(self._marquee_content(tone, model.get("id")))
         self._marquee.set_class(False, "detail-marquee--empty")
         filename = Path(model.get("local_path") or model.get("name") or "").name
@@ -3175,24 +3981,32 @@ class DetailPane(Vertical):
         self._exit_pack_mode()
         self._current_tone = None
         self._view_mode = None
+        self._description_remote = False
+        self._refresh_view_tabs()
         set_border_hint_layout(self, "", [])
         name = preset.get("name") or "Preset"
         self.border_title = "PRESET DETAIL"
         self._summary_mode = "preset"
+        self._detail_preset_name = name
+        preset_id = preset.get("id")
+        self._detail_preset_id = (
+            preset_id if isinstance(preset_id, int) and not isinstance(preset_id, bool)
+            else None)
+        self._detail_model = None
         self._set_marquee(name)
         self._marquee.set_class(False, "detail-marquee--empty")
         state = "ACTIVE" if active else "SAVED"
         if dirty:
             state += " · DIRTY"
         chain = preset.get("chain") or {}
-        amp_id = chain.get("model_id")
-        ir_id = chain.get("ir_model_id")
-        amp = f"#{amp_id}" if amp_id is not None else "external"
-        ir = f"#{ir_id}" if ir_id is not None else "bypass"
+        slots = chain.get("slots") if isinstance(chain.get("slots"), list) else []
+        slot_summary = " ".join(
+            f"{index + 1:02d}:{Path(str(slot.get('path'))).name if slot.get('path') else 'NONE'}"
+            for index, slot in enumerate(slots) if isinstance(slot, dict)
+        ) or "NONE"
         self._set_summary(
             f"[b $accent]{state}[/] · "
-            f"[b $success]AMP[/] {_escape(amp)} · "
-            f"[b $success]IR[/] {_escape(ir)} · "
+            f"[b $success]SLOTS[/] {_escape(slot_summary)} · "
             f"G {self._control(resolved.get('gain', 1.0))} · "
             f"M {self._control(resolved.get('master', 1.0))} · "
             f"Q {self._control(resolved.get('quality', 1.0))}"
@@ -3211,6 +4025,11 @@ class DetailPane(Vertical):
         self._exit_pack_mode()
         self._current_tone = None
         self._view_mode = None
+        self._description_remote = False
+        self._detail_preset_name = None
+        self._detail_preset_id = None
+        self._detail_model = None
+        self._refresh_view_tabs()
         set_border_hint_layout(self, "", [])
         self.border_title = "DETAIL"
         self._set_marquee(None)
@@ -3224,6 +4043,11 @@ class DetailPane(Vertical):
         self._invalidate_view()
         self._exit_pack_mode()
         self._current_tone = None
+        self._description_remote = False
+        self._detail_preset_name = None
+        self._detail_preset_id = None
+        self._detail_model = None
+        self._refresh_view_tabs()
         self._summary_mode = "empty"
         self._pack_creator = None
         self._view_mode = "description"
@@ -3499,6 +4323,8 @@ class InterfaceBar(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield MeterBar()
+        self.runtime = Static("RUNTIME ?", id="runtime-status")
+        yield self.runtime
         yield AudioActionButton("AUDIO SETTINGS", "settings", "audio-settings")
         self.mute = AudioActionButton("MUTE", "mute", "audio-mute")
         yield self.mute
@@ -3506,6 +4332,24 @@ class InterfaceBar(Horizontal):
     def set_muted(self, muted: bool) -> None:
         self.mute.set_classes("audio-action muted" if muted else "audio-action")
         self.mute.update("MUTED" if muted else "MUTE")
+
+    def set_runtime_status(self, file_revision: object,
+                           runtime_revision: int | None,
+                           status: str) -> None:
+        """Show file/runtime alignment without overstating external engines."""
+        if not isinstance(file_revision, int) or isinstance(file_revision, bool):
+            text = "FILE ? · RUNTIME UNKNOWN"
+        elif status == "rejected":
+            runtime = ("?" if runtime_revision is None
+                       else str(runtime_revision))
+            text = f"FILE {file_revision} · RUNTIME {runtime} · REJECTED"
+        elif runtime_revision is None or status == "unknown":
+            text = f"FILE {file_revision} · RUNTIME UNKNOWN"
+        elif runtime_revision == file_revision:
+            text = f"FILE {file_revision} · RUNTIME {runtime_revision} · APPLIED"
+        else:
+            text = f"FILE {file_revision} · RUNTIME {runtime_revision} · PENDING"
+        self.runtime.update(text)
 
 
 class AudioSettingsScreen(GigBuddyModal):

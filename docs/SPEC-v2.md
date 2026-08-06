@@ -1,7 +1,11 @@
 # GigBuddy v2 Spec — Decoupled Architecture
 
-Status: approved (2026-08-02, user decision)
+Status: historical baseline (approved 2026-08-02, user decision)
 Supersedes: TUI-as-all-in-one (agent embedded in Textual) — v1 approach
+
+Current v0.2 UI and chain/runtime contract supersede the protocol details in this
+document. Use `docs/ui-interaction-spec-v0.2.md` (v0.2.14) and
+`docs/adr/0001-slots-chain-protocol.md` for the active requirements.
 
 ## 1. Why
 
@@ -11,7 +15,9 @@ v1 embedded the agent (Claude Agent SDK) inside the Textual TUI. User decision: 
   downloads/favorites/author/ESR/images/…), stored locally as a durable asset.
 - The tone-library database is **open to external agents** (Claude Code + gigbuddy skill today,
   pi or anything else tomorrow) via CLI + SQLite + file handoff.
-- Agent ↔ UI round-trip via **files** (live_chain.json / level.json — existing protocol, unchanged).
+- Agent ↔ UI round-trip via **files** (`live_chain.json` / `level.json`); the
+  active v0.2 contract is versioned and includes ordered Slots, revisions, and
+  managed runtime acknowledgements.
 
 ## 2. Architecture
 
@@ -85,10 +91,15 @@ Add:
 - Chain panel + level meter + g/G/m/M hotkeys: unchanged from v1.
 Layout: left = library browser 60% | right = chain + metadata 40%; bottom = meter.
 
-## 6. Engine / protocol (unchanged)
+## 6. Engine / protocol (historical boundary)
 
-- realtime_cli: --live data/live_chain.json, --level-file data/level.json, --in/--out/--ch/--gain/--master.
-- No engine changes required in v2.
+- realtime_cli still accepts `--live data/live_chain.json` and
+  `--level-file data/level.json`, plus the audio-device flags. The active v0.2
+  implementation additionally validates ordered `slots[]`, applies complete
+  chains atomically, and supports managed prepare/runtime acknowledgement via
+  `--managed --control-file`.
+- Do not use this section as the v0.2.14 acceptance contract; see the current
+  interaction spec and ADR above.
 
 ## 7. Migration checklist
 
@@ -99,7 +110,7 @@ Layout: left = library browser 60% | right = chain + metadata 40%; bottom = mete
 | 3 | TUI: remove chat/agent, add library browser + detail pane | modify |
 | 4 | tui/agent.py, picker search | remove / adapt |
 | 5 | gigbuddy skill: query via `gigbuddy tone ...`, chain via file | update |
-| 6 | realtime_cli, live_chain.json protocol | keep |
+| 6 | realtime_cli, live_chain.json protocol | keep / update to v0.2 contract |
 
 ## 8. Open questions
 

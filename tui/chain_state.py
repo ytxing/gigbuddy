@@ -178,6 +178,8 @@ def _slot_paths(chain: Mapping[str, Any]) -> list[str | None]:
     for index, item in enumerate(raw_slots):
         if not isinstance(item, Mapping):
             raise ChainStateError(f"slot {index} must be an object")
+        if "path" not in item:
+            raise ChainStateError(f"slot {index} must contain path")
         path = item.get("path")
         if path == "":
             raise ChainStateError(f"slot {index} path must not be empty")
@@ -359,6 +361,15 @@ class ChainState:
     def clear_target(self) -> None:
         self._target = None
 
+    def reset_transient_context(self) -> None:
+        """Drop target and process-local recovery state after whole replacement."""
+        self._target = None
+        for slot in self._slots:
+            slot.candidate = None
+            slot.overlay = None
+            slot.error = None
+            slot.operation_id = None
+
     def add_slot(self) -> int:
         if len(self._slots) >= MAX_SLOTS:
             raise ChainStateError(f"a chain cannot contain more than {MAX_SLOTS} slots")
@@ -534,6 +545,31 @@ class ChainState:
         self._managed_revision = None
         self._chain_error = None
 
+    def apply_candidate(self, chain: Mapping[str, Any]) -> None:
+        """Apply a committed candidate while retaining target identity when possible.
+
+        Managed commits prepare a private candidate before the runtime/file
+        boundary.  When only parameters or input changed, preserving the
+        existing Slot objects keeps BYPASS candidates and the focused target
+        intact; a changed Slot path gets fresh objects but retains the target
+        index when that index still exists.
+        """
+        incoming = _copy_mapping(chain)
+        _validate_chain_shape(incoming)
+        paths = _slot_paths(incoming)
+        current_paths = [slot.path for slot in self._slots]
+        target_index = self.target_index
+        if paths != current_paths:
+            self._slots = [_Slot(path) for path in paths]
+            self._target = (
+                self._slots[target_index]
+                if target_index is not None and target_index < len(self._slots)
+                else None
+            )
+        self._chain = _chain_with_slots(
+            incoming, [slot.path for slot in self._slots])
+        self._chain_error = None
+
     def reconcile(self, chain: Mapping[str, Any], *, fingerprint: str | None = None,
                   revision: int | None | object = _UNSET) -> bool:
         """Reconcile one polled chain file.
@@ -577,6 +613,28 @@ class ChainState:
         self._managed_revision = None
         self._chain_error = None
         return True
+
+    def adopt_managed_chain(self, chain: Mapping[str, Any]) -> None:
+        """Accept a chain just committed by this process without polling.
+
+        The caller already mutated the private Slot objects before writing the
+        file.  Re-running the external-poll identity rules here is incorrect
+        when a test adapter or a legacy writer cannot provide a byte
+        fingerprint: a freshly bypassed ``path:null`` would become Empty and
+        the current target would be lost.  Keep Slot identity only when the
+        committed persistent paths match the state already in memory; callers
+        must use :meth:`reconcile` for an overall replacement.
+        """
+        incoming = _copy_mapping(chain)
+        _validate_chain_shape(incoming)
+        paths = _slot_paths(incoming)
+        current_paths = [slot.path for slot in self._slots]
+        if paths != current_paths:
+            raise ChainStateError(
+                "managed chain changes Slot order or paths; reconcile required"
+            )
+        self._chain = _chain_with_slots(incoming, current_paths)
+        self._chain_error = None
 
     def mark_managed_write(self, fingerprint: str | None, revision: int | None) -> None:
         """Record the exact TUI write that a later poll may preserve."""

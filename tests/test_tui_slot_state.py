@@ -283,7 +283,8 @@ def test_invalid_transaction_or_index_is_rejected_without_textual_app():
     "invalid",
     [{"slots": [{"path": "a"}], "revision": "4"},
      {"slots": [{"path": "a"}], "quality": 2.0},
-     {"slots": [{"path": "a"}], "mute": "false"}],
+     {"slots": [{"path": "a"}], "mute": "false"},
+     {"slots": [{}]}],
 )
 def test_invalid_poll_fields_keep_last_valid_state(invalid):
     state = _state("a")
@@ -293,6 +294,11 @@ def test_invalid_poll_fields_keep_last_valid_state(invalid):
     assert state.target_index == 0
     assert state.slot(0).status is SlotStatus.BYPASS
     assert state.chain_error
+
+
+def test_missing_slot_path_is_rejected_at_construction():
+    with pytest.raises(ChainStateError, match="slot 0 must contain path"):
+        ChainState({"slots": [{}]})
 
 
 def test_canonical_fingerprint_is_stable_for_key_order():

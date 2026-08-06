@@ -16,7 +16,7 @@ from tui.metadata import SelectableStatic
 from tui.panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar, DeviceChanged,
                         InterfaceBar, MeterBar, NodeWidget)
 from tui.picker import TonePickerScreen
-from tui.presets import PresetNameModal, PresetNoteModal, PresetPickerScreen
+from tui.presets import PresetNameModal, PresetNoteModal
 from tui.uninstall_screen import LocalUninstallScreen
 import library
 
@@ -26,10 +26,15 @@ def run(coro):
 
 
 def setup_preset_state(monkeypatch, tmp_path):
+    tones_dir = tmp_path / "data" / "tones"
+    tones_dir.mkdir(parents=True)
+    monkeypatch.setattr(library, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "TONES_DIR", tones_dir)
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.ROOT", tmp_path)
     monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
-    model = tmp_path / "amp.nam"
+    model = tones_dir / "amp.nam"
     model.write_bytes(b"amp")
     library.chain_set({"model": str(model), "gain": 0.8, "master": 1.0})
     return model
@@ -195,8 +200,20 @@ def test_audio_bar_keeps_only_level_settings_and_mute(monkeypatch, tmp_path):
 
             await pilot.click("#audio-mute")
             await pilot.pause()
-            assert library.chain_get()["master"] == 0.0
+            assert library.chain_get()["master"] == 1.0
+            assert library.chain_get()["mute"] is True
             assert "MUTED" in str(app.query_one("#audio-mute").content)
+
+            await pilot.click("#audio-mute")
+            await pilot.pause()
+            assert library.chain_get()["master"] == 1.0
+            assert library.chain_get()["mute"] is False
+
+            app._set_chain_param("master", 0.0)
+            await pilot.pause()
+            assert library.chain_get()["master"] == 0.0
+            assert library.chain_get()["mute"] is False
+            assert str(app.query_one("#audio-mute").content) == "MUTE"
 
     run(scenario())
 
@@ -1106,8 +1123,8 @@ def test_chain_panel_compact_layout_keeps_output_and_preset_rows(monkeypatch):
     run(scenario())
 
 
-def test_preset_picker_loads_into_chain_panel(monkeypatch):
-    """p key → picker → Enter → chain written."""
+def test_preset_command_focuses_panel_and_enter_loads(monkeypatch):
+    """The command-palette Preset action focuses the single panel surface."""
     presets = [{
         "name": "mayer-clean", "note": "Mayer 清音",
         "chain": {"model_id": 1, "model_path": "/tmp/x.nam", "ir_model_id": None,
@@ -1129,13 +1146,12 @@ def test_preset_picker_loads_into_chain_panel(monkeypatch):
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.press("p")
+            app.action_open_preset_picker()
             await pilot.pause()
-            assert isinstance(app.screen, PresetPickerScreen)
+            assert isinstance(app.focused, DataTable)
 
             await pilot.press("enter")  # load the first preset
             await pilot.pause()
-            assert not isinstance(app.screen, PresetPickerScreen)
             assert loaded == ["mayer-clean"]
 
     run(scenario())
@@ -2154,8 +2170,8 @@ def test_quit_requires_two_ctrl_c(monkeypatch):
     run(scenario())
 
 
-def test_quit_two_ctrl_c_works_from_modal(monkeypatch):
-    """Ctrl+C twice exits even while a modal screen is open."""
+def test_quit_two_ctrl_c_works_from_preset_panel(monkeypatch):
+    """Ctrl+C twice exits while the Presets panel owns focus."""
     monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: None)
     monkeypatch.setattr("tui.app.live.read_chain", lambda: {"gain": 1.0})
     monkeypatch.setattr("tui.app.live.write_chain", lambda cfg: None)
@@ -2164,9 +2180,9 @@ def test_quit_two_ctrl_c_works_from_modal(monkeypatch):
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.press("p")  # open the preset picker modal
+            app.action_open_preset_picker()
             await pilot.pause()
-            assert isinstance(app.screen, PresetPickerScreen)
+            assert isinstance(app.focused, DataTable)
 
             await pilot.press("ctrl+c", "ctrl+c")
             await pilot.pause()
