@@ -16,9 +16,8 @@ die() {
 
 step() {
   printf '==> %s\n' "$1" >> "${INSTALL_LOG:?}"
-  if [[ -t 1 && -n "$BANNER_PID" ]]; then
-    # 动画模式下：步骤只覆盖显示在动画下方的状态行，完整日志进文件
-    printf '\033[%d;1H\033[2K==> %s' "${STATUS_ROW:-9}" "$1"
+  if [[ -n "${BANNER_PID:-}" ]]; then
+    printf '==> %s\n' "$1" >>"${STATUS_FILE:?}"
   else
     printf '==> %s\n' "$1"
   fi
@@ -29,48 +28,36 @@ BANNER_PID=""
 stop_banner() {
   if [[ -n "$BANNER_PID" ]]; then
     kill "$BANNER_PID" 2>/dev/null || true
-    sleep 0.05
-    kill -9 "$BANNER_PID" 2>/dev/null || true
+    wait "$BANNER_PID" 2>/dev/null || true
     BANNER_PID=""
+    local completed_steps
+    completed_steps=$(wc -l <"${STATUS_FILE:?}")
+    printf '\033[%d;1H' "$(( ${STATUS_ROW:-9} + completed_steps ))"
   fi
-  printf '\033[r'   # 恢复全屏滚动区域
 }
 
 start_banner() {
-  if [[ -t 1 ]] && command -v python3 >/dev/null 2>&1; then
-    # 清屏后开始：动画固定占顶部，安装日志只在动画下方滚动。
-    # 终端够宽（>=112 列）时 version 与 GIGBUDDY 并排（8 行）；
-    # 否则 version 移到 GIGBUDDY 下方（11 行），避免折行错位。
+  if [[ -t 1 && "${GIGBUDDY_VERBOSE:-0}" != "1" ]] && command -v python3 >/dev/null 2>&1; then
+    # 动画进程独占终端；安装主流程只通过状态文件更新步骤文字。
     printf '\033[2J\033[H'
-    local lines cols
-    lines=$(tput lines 2>/dev/null || printf '24')
-    cols=$(tput cols 2>/dev/null || printf '80')
-    STATUS_ROW=9
-    if (( cols < 112 )); then
-      STATUS_ROW=12
+    local lines cols tty_size
+    tty_size=$(stty size </dev/tty 2>/dev/null || true)
+    read -r lines cols <<<"$tty_size"
+    if [[ ! "$lines" =~ ^[1-9][0-9]*$ || ! "$cols" =~ ^[1-9][0-9]*$ ]]; then
+      lines=$(tput lines 2>/dev/null || printf '24')
+      cols=$(tput cols 2>/dev/null || printf '80')
     fi
-    # 终端高度够放动画 + 状态行 + 日志才开动画；否则退回静态 banner
-    if (( lines >= STATUS_ROW + 3 )); then
-      printf '\033[%d;%sr\033[%d;1H' "$STATUS_ROW" "$lines" "$STATUS_ROW"
+    STATUS_ROW=9
+    # 动画 8 行 + 状态区至少 8 行；横幅 96 列，终端须更宽避免行尾折行。
+    if (( lines >= STATUS_ROW + 8 && cols > 96 )); then
       export GB_BANNER_ROW="$STATUS_ROW"
+      export GB_STATUS_FILE="$STATUS_FILE"
     # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动，
-    # 后台循环直到安装结束（stop_banner 停止）
+    # 后台持续播放，直到安装流程调用 stop_banner。
     python3 - <<'PY' &
-import math, sys, time, os
+import math, os, signal, sys, time
 
-# 布局一（宽终端，>=112 列）：GIGBUDDY 与 version 并排，8 行
-SIDE_LINES = (
-  '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████',
-  '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███',
-  ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███',
-  '▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████',
-  '▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███',
-  '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███        ▄▖  ▗   ▄▖',
-  ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████      ▌▌▛▌  ▜   ▛▌',
-  '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒      ▚▘█▌▗ ▟▖▗ █▌',
-)
-# 布局二（窄终端）：version 居中放在 GIGBUDDY 下方，11 行
-BELOW_LINES = (
+LINES = (
   '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████',
   '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███',
   ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███',
@@ -79,102 +66,106 @@ BELOW_LINES = (
   '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███',
   ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████',
   '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒',
-  '                                            ▄▖  ▗   ▄▖',
-  '                                          ▌▌▛▌  ▜   ▛▌',
-  '                                          ▚▘█▌▗ ▟▖▗ █▌',
 )
-ROW_N = int(os.environ.get('GB_BANNER_ROW', '9'))
-if ROW_N == 9:
-    LINES = SIDE_LINES            # 并排：version 在第 96 列之后
-    MAIN_W = 96
-    SILVER_ROW = 999              # 银色按列判断
-else:
-    LINES = BELOW_LINES           # 下方：version 独占底部 3 行
-    MAIN_W = 96                   # 行宽 = 96：银色只按行号（SILVER_ROW）判断
-    SILVER_ROW = 8
 W = max(len(l) for l in LINES)
 R = len(LINES)
 WAVES = 3                       # 均匀分布的明暗浪数量
-DARK = (110, 72, 8)             # 浪谷：暗金（GIGBUDDY）
-BRIGHT = (250, 195, 90)         # 浪峰：亮金（GIGBUDDY）
-VDARK = (85, 85, 95)            # 浪谷：暗银（version）
-VBRIGHT = (240, 240, 245)       # 浪峰：亮银（version）
+DARK = (110, 72, 8)             # 浪谷：暗金
+BRIGHT = (250, 195, 90)         # 浪峰：亮金
 
 def esc(c):
     return '\033[38;2;%d;%d;%dm' % c
 
 def render(phase):
     out = []
-    for r_i, row in enumerate(LINES):
-        row = row.ljust(W)
+    for row in LINES:
         seg = []
         for col, ch in enumerate(row):
             b = 0.5 + 0.5 * math.sin(2 * math.pi * WAVES * col / W - phase)
-            if r_i >= SILVER_ROW or col >= MAIN_W:
-                d, br = VDARK, VBRIGHT    # version：银色波浪
-            else:
-                d, br = DARK, BRIGHT      # GIGBUDDY：金色波浪
-            c = tuple(int(d[i] + (br[i] - d[i]) * b) for i in range(3))
+            c = tuple(int(DARK[i] + (BRIGHT[i] - DARK[i]) * b) for i in range(3))
             seg.append(esc(c) + ch)
-        out.append(''.join(seg) + '\033[0m')
+        out.append('\033[2K' + ''.join(seg) + '\033[0m')
     return '\n'.join(out)
 
-import os, signal
-_parent = os.getppid()
-signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+STATUS_ROW = int(os.environ['GB_BANNER_ROW'])
+STATUS_FILE = os.environ['GB_STATUS_FILE']
+running = True
+
+def stop(_signum, _frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGTERM, stop)
 f = 0
-try:
-    # 父进程退出（ppid 变 1）或 stdout 断开时自行结束，避免动画停不下来
-    while os.getppid() == _parent:
-        sys.stdout.write('\033[s\033[1;1H' + render(2 * math.pi * f / 32) + '\033[u')
-        sys.stdout.flush()
-        f += 1
-        time.sleep(0.1)
-except (BrokenPipeError, OSError, KeyboardInterrupt, SystemExit):
-    pass
+while running:
+    try:
+        with open(STATUS_FILE, encoding='utf-8') as status_file:
+            status = status_file.read().rstrip('\n')
+    except OSError:
+        status = ''
+    status_block = ''.join(
+        f'\033[{STATUS_ROW + index};1H\033[2K{line}'
+        for index, line in enumerate(status.splitlines())
+    )
+    # 此进程是动画期间唯一写终端的进程。
+    sys.stdout.write(
+        '\033[H'
+        + render(2 * math.pi * f / 32)
+        + status_block
+    )
+    sys.stdout.flush()
+    f += 1
+    time.sleep(0.1)
 PY
     BANNER_PID=$!
-    trap 'stop_banner' EXIT
     return
   fi
   fi
-  # 非交互终端、没有 python3、或终端太矮：静态金+银版
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████' ''
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███' ''
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███' ''
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      '▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████' ''
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      '▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███' ''
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███    ' '    ▄▖  ▗   ▄▖'
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████   ' '  ▌▌▛▌  ▜   ▛▌'
-    printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
-      '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒    ' '  ▚▘█▌▗ ▟▖▗ █▌'
+  # 非交互终端、没有 python3、或终端太矮：静态金色版
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      '▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      '▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████'
+    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+      '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒'
     printf '\n\n\n'
 }
-start_banner
 
 INSTALL_LOG="$(mktemp -t gigbuddy-install.XXXXXX)"
-trap 'rm -f "$INSTALL_LOG"' EXIT
+COMMAND_LOG="$(mktemp -t gigbuddy-command.XXXXXX)"
+STATUS_FILE="$(mktemp -t gigbuddy-status.XXXXXX)"
+
+cleanup() {
+  stop_banner
+  rm -f "$INSTALL_LOG" "$COMMAND_LOG" "$STATUS_FILE"
+}
+
+trap cleanup EXIT
+start_banner
 
 run_quiet() {
   if [[ "${GIGBUDDY_VERBOSE:-0}" == "1" ]]; then
     "$@"
     return
   fi
-  : >"$INSTALL_LOG"
-  if "$@" >"$INSTALL_LOG" 2>&1; then
+  : >"$COMMAND_LOG"
+  if "$@" >"$COMMAND_LOG" 2>&1; then
     return
   fi
   printf 'GigBuddy install failed while running:' >&2
   printf ' %q' "$@" >&2
   printf '\n' >&2
-  tail -n 40 "$INSTALL_LOG" >&2
+  tail -n 40 "$COMMAND_LOG" >&2
   return 1
 }
 
@@ -256,7 +247,6 @@ for command_name in gigbuddy gigbuddy-tui; do
 done
 
 stop_banner
-printf '\033[%d;1H\033[2K' "${STATUS_ROW:-9}"   # 清掉最后的状态行
 printf '\nGigBuddy ready\n'
 printf '  %s/gigbuddy\n' "$BIN_DIR"
 printf '  %s/gigbuddy-tui\n' "$BIN_DIR"
@@ -264,5 +254,3 @@ printf '  install: %s\n' "$INSTALL_ROOT"
 if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
   printf 'Add to PATH if needed: %s\n' "$BIN_DIR"
 fi
-printf 'Steps completed:\n'
-sed -n 's/^==> /  - /p' "$INSTALL_LOG"
