@@ -18,10 +18,14 @@ the tones you like — then play through them in realtime or render them to wav.
   (NAM)](https://www.tone3000.com/guides/neural-amp-modeler#what-is-nam), the
   community's most faithful amp-capture technology: every tone is a real amp
   through real mics, captured — not a modeled approximation.
-- **First-class NAM A2 support** — GigBuddy is built around TONE3000's **A2
-  architecture**, the next-generation NAM model format. A2's slimmable models
-  dial precision up or down on demand (quality 0–1), so the same capture runs
-  full-fidelity or lean enough for realtime play on modest hardware.
+- **First-class NAM A2 support** — GigBuddy is built around TONE3000's [A2
+  architecture](https://www.tone3000.com/blog/introducing-neural-amp-modeler-nam-architecture-2-a2),
+  the next-generation NAM model format. A2's slimmable models dial precision up
+  or down on demand (quality 0–1), and it's the technology that outplayed
+  Neural DSP, ToneX and Line 6 Proxy in TONE3000's 1,000-participant [blind
+  listening test](https://www.tone3000.com/blog/introducing-neural-amp-modeler-nam-architecture-2-a2#amp-modeler-blind-listening-test) —
+  the same capture runs full-fidelity or lean enough for realtime play on
+  modest hardware.
 - **Huge library, zero setup** — Browse TONE3000's community tone library live
   from the TUI: thousands of NAM amp captures and [cabinet
   IRs](https://www.tone3000.com/guides/neural-amp-modeler#what-s-the-difference-between-nam-and-ir-s),
