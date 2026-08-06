@@ -23,6 +23,8 @@ import sys
 import tempfile
 import urllib.request
 
+LOCAL_FONTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
 FONT_URLS = [
     # patorjk.com candidates first (the site's own layout), then the figlet.js
     # GitHub mirror that actually serves the site's fonts.
@@ -35,7 +37,13 @@ FONT_URLS = [
 
 
 def fetch_font(name: str) -> str:
-    """Download a font file (flf or tlf), return its local path."""
+    """Resolve a font file (flf or tlf): bundled scripts/fonts/ first, then
+    patorjk.com and its figlet.js mirror."""
+    for ext in (".flf", ".tlf"):
+        local = os.path.join(LOCAL_FONTS, name + ext)
+        if os.path.exists(local):
+            print(f"[fetch] bundled {local}", file=sys.stderr)
+            return local
     for tmpl in FONT_URLS:
         url = tmpl.format(name=urllib.parse.quote(name))
         try:
