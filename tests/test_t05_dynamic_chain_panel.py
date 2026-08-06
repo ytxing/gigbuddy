@@ -480,6 +480,9 @@ def test_dynamic_panel_mouse_actions_match_slot_keyboard_actions(
             slot = panel.slot_widgets[0]
             slot.focus()
             await pilot.pause()
+            hint = str(panel.border_subtitle)
+            assert "d" in hint
+            assert "enter" in hint
 
             await pilot.press("down")
             await pilot.pause()

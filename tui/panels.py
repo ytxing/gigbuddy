@@ -1380,19 +1380,12 @@ class ChainPanel(Vertical):
                 self.input_node, self.input_node.PlaybackRequested("toggle"))),
         ])
         # The full app layout gives ChainPanel only about half the terminal
-        # width even at the supported 120-column minimum.  Keep the changing
-        # state and the two model directions readable there, while allowing
-        # the lower-priority move/playback descriptions to disappear as
-        # complete tokens.  At wider widths the complete action vocabulary is
-        # retained and the shared fitter handles compaction.
+        # width even at the supported 120-column minimum. Build the hint in
+        # priority order and let the shared fitter compact complete tokens;
+        # current Slot actions must remain ahead of move/model/playback.
         width = self.region.width or (self.size.width + 4)
-        if 0 < width <= 56:
+        if 0 < width <= 56 and index is None:
             by_label = {label: callback for label, callback in actions}
-            if index is not None:
-                return [
-                    ("⌥↑ move", by_label["⌥↑ move"]),
-                    ("⌥↓ move", by_label["⌥↓ move"]),
-                ]
             narrow: list[tuple[str, Callable[[], None]]] = []
             if self.state.slot_count < MAX_SLOTS:
                 narrow.append(("+", by_label["+ add"]))
@@ -1402,11 +1395,8 @@ class ChainPanel(Vertical):
                 ("↓ model", by_label["↓ model"]),
             ])
             return narrow
-        # The generic hint fitter keeps a rightmost suffix when space is very
-        # tight. ChainPanel has a different priority contract: add/delete and
-        # the current Slot action must survive before move/model/playback. Keep
-        # the highest-priority prefix here, then let the shared fitter shorten
-        # complete labels to key-only tokens.
+        # Keep the highest-priority prefix here, then let the shared fitter
+        # shorten complete labels to key-only tokens.
         budget = max(width - 6, 1)
         selected: list[tuple[str, Callable[[], None]]] = []
         for action in actions:
