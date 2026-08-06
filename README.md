@@ -63,14 +63,14 @@ After installation, run `gigbuddy` to open the TUI and start the realtime engine
 #### First-run default presets
 
 The first time you run any `gigbuddy` subcommand (or open the TUI), the built-in
-default presets are set up automatically: it downloads the 11 models the presets
-reference (10 amp models + 1 cabinet IR, ~3.3MB, one-time) and seeds all 10
+default presets are set up automatically: it downloads the 19 models the presets
+reference (14 amp models + 5 cabinet IRs, ~5.6MB, one-time) and seeds all 14
 presets. The flow is idempotent (settings marker `default_presets_initialized`)
 and failure-safe — network/API errors print a notice, seed whatever already
 became available, and retry on the next launch. Inspect and load them with:
 
 ```bash
-gigbuddy preset list                          # 10 built-in presets (classic-guitar-*)
+gigbuddy preset list                          # 14 built-in presets (classic-guitar-*/classic-bass-*)
 gigbuddy preset load classic-guitar-plexi     # apply + engine hot-swap
 gigbuddy preset seed --replace                # manually rebuild the built-in catalog
 ```

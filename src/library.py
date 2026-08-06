@@ -897,16 +897,20 @@ def preset_load(name: str) -> dict | None:
 # Built-in catalog, resolved from exact local model ids at seed time.
 # (name, note, amp_model_id, ir_model_id|None)
 SEED_CHAINS = [
-    ("classic-guitar-plexi", "Classic Pairing · Guitar · Marshall JMP-50 Lead 1969 Plexi, crunch full rig", 418470, None),
+    ("classic-guitar-plexi", "Classic Pairing · Guitar · Marshall JMP-50 Lead 1969 Plexi, crunch full rig (amp-cab)", 418470, None),
     ("classic-guitar-jcm800", "Classic Pairing · Guitar · Marshall JCM800 2203 Modified (EL34), high gain full rig", 567060, None),
-    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 1964 Block Logo + Marshall 1960 Lead 4x12 (SM57)", 667990, 363507),
+    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 1964 Block Logo full rig (R121/R160/U87 on 1966 4x12 Alnico)", 667990, None),
     ("classic-guitar-super-reverb", "Classic Pairing · Guitar · Fender Super Reverb 1977, clean (EQ flat, Vol 3)", 379727, None),
     ("classic-guitar-deluxe-reverb", "Classic Pairing · Guitar · Fender Deluxe Reverb, Vibrato channel clean", 385845, None),
-    ("classic-guitar-twin-reverb", "Classic Pairing · Guitar · Fender Twin Reverb, Vibrato Bright clean", 418200, None),
-    ("classic-guitar-ac30", "Classic Pairing · Guitar · Vox AC30 CH cranked (master max, volume 10, treble booster)", 494010, None),
-    ("classic-guitar-hiwatt-dr103", "Classic Pairing · Guitar · Hiwatt Custom 100 DR103 1974, Volume 8", 418892, None),
-    ("classic-guitar-dumble-ods", "Classic Pairing · Guitar · Dumble ODS #102 (Robben Ford), PAB clear drive", 418380, None),
-    ("classic-guitar-mesa-badlander", "Classic Pairing · Guitar · Mesa Boogie Badlander Rectifier 100W EL34, Murder Tones crush", 564451, None),
+    ("classic-guitar-twin-reverb", "Classic Pairing · Guitar · Fender Twin Reverb (Tim R), Vibrato Bright + JBL D120 2x12 IR", 418200, 156871),
+    ("classic-guitar-ac30", "Classic Pairing · Guitar · Vox AC30 CH cranked (Dallas Rangemaster) + Celestion Blue 2x12 IR", 494010, 106589),
+    ("classic-guitar-hiwatt-dr103", "Classic Pairing · Guitar · Hiwatt Custom 100 DR103 1974 (daweed), Volume 8 + Hiwatt 4x12 Fane IR", 418892, 81156),
+    ("classic-guitar-dumble-ods", "Classic Pairing · Guitar · Dumble ODS #102 (Robben Ford), PAB clear drive + open-back 1x12 IR", 418380, 139268),
+    ("classic-guitar-mesa-badlander", "Classic Pairing · Guitar · Mesa Boogie Badlander 100W EL34 (2dor), Murder Tones crush + Mesa 4x12 OS SM57 IR", 564451, 53740),
+    ("classic-bass-gk-rb800", "Classic Pairing · Bass · Gallien-Krueger RB800 (Arlington), direct DI (Flea style, no IR)", 419198, None),
+    ("classic-bass-svt", "Classic Pairing · Bass · Ampeg SVT Classic with 6x10, Gain 10 Ultra Lo/Hi", 379990, None),
+    ("classic-bass-bassman-50", "Classic Pairing · Bass · Fender Bassman 50 1968 (Arlington), jumped channels G6 + 1970 Bassman 2x15 CTS SM57 IR", 413107, 352839),
+    ("classic-bass-ampeg-b15", "Classic Pairing · Bass · Ampeg B-15 64 Portaflex (IvanBassist), Flat EQ light comp", 381194, None),
 ]
 
 # settings 键：首次运行初始化标记（ensure_default_presets 幂等依据）。

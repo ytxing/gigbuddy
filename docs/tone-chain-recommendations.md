@@ -86,8 +86,8 @@
 
 ## 推荐组合（直接成套使用）
 
-Built-in presets are the classic guitar amp rigs, grouped as Classic Pairing · Guitar.
-首次运行 `gigbuddy` 会自动下载模型并建好全部 10 条 preset（见下节
+Built-in presets are the classic amp rigs, grouped as Classic Pairing · Guitar / Bass.
+首次运行 `gigbuddy` 会自动下载模型并建好全部 14 条 preset（见下节
 「首次运行自动初始化」）；需要手动重建时：
 
 ```bash
@@ -100,30 +100,37 @@ Built-in presets are the classic guitar amp rigs, grouped as Classic Pairing · 
 |---|---|---|---|
 | classic-guitar-plexi | Classic Pairing · Guitar — Marshall JMP-50 Lead 1969 Plexi，crunch 全 rig（@amalgamaudio verified） | 418470 | — |
 | classic-guitar-jcm800 | Classic Pairing · Guitar — Marshall JCM800 2203 Modified（EL34）高增益全 rig（@2dor verified） | 567060 | — |
-| classic-guitar-jtm45 | Classic Pairing · Guitar — Marshall JTM45 1964 Block Logo + Marshall 1960 Lead 4x12（SM57） | 667990 | 363507 |
+| classic-guitar-jtm45 | Classic Pairing · Guitar — Marshall JTM45 1964 Block Logo 全 rig（R121/R160/U87 拾 1966 4x12 Alnico） | 667990 | — |
 | classic-guitar-super-reverb | Classic Pairing · Guitar — Fender Super Reverb 1977 清音（EQ flat, Vol 3，官方 @tone3000） | 379727 | — |
 | classic-guitar-deluxe-reverb | Classic Pairing · Guitar — Fender Deluxe Reverb，Vibrato 通道清音（NAM 作者 @sdatkinson） | 385845 | — |
-| classic-guitar-twin-reverb | Classic Pairing · Guitar — Fender Twin Reverb，Vibrato Bright 清音（@timr） | 418200 | — |
-| classic-guitar-ac30 | Classic Pairing · Guitar — Vox AC30 CH 全开（master 最大，Vol 10，treble booster） | 494010 | — |
-| classic-guitar-hiwatt-dr103 | Classic Pairing · Guitar — Hiwatt Custom 100 DR103 1974，Volume 8 | 418892 | — |
-| classic-guitar-dumble-ods | Classic Pairing · Guitar — Dumble ODS #102（Robben Ford），PAB clear drive | 418380 | — |
-| classic-guitar-mesa-badlander | Classic Pairing · Guitar — Mesa Boogie Badlander Rectifier 100W EL34，Murder Tones crush（@2dor verified） | 564451 | — |
+| classic-guitar-twin-reverb | Classic Pairing · Guitar — Fender Twin Reverb（@timr），Vibrato Bright + JBL D120 2x12 IR | 418200 | 156871 |
+| classic-guitar-ac30 | Classic Pairing · Guitar — Vox AC30 CH 全开（Dallas Rangemaster）+ Celestion Blue 2x12 IR | 494010 | 106589 |
+| classic-guitar-hiwatt-dr103 | Classic Pairing · Guitar — Hiwatt Custom 100 DR103 1974（@daweed），Volume 8 + Hiwatt 4x12 Fane IR | 418892 | 81156 |
+| classic-guitar-dumble-ods | Classic Pairing · Guitar — Dumble ODS #102（Robben Ford），PAB clear drive + open-back 1x12 IR | 418380 | 139268 |
+| classic-guitar-mesa-badlander | Classic Pairing · Guitar — Mesa Boogie Badlander 100W EL34（@2dor verified），Murder Tones crush + Mesa 4x12 OS SM57 IR | 564451 | 53740 |
+| classic-bass-gk-rb800 | Classic Pairing · Bass — Gallien-Krueger RB800（@arlingtonaudio），直出 DI（Flea 风格，免 IR） | 419198 | — |
+| classic-bass-svt | Classic Pairing · Bass — Ampeg SVT Classic 带 6x10，Gain 10 Ultra Lo/Hi（官方 @tone3000） | 379990 | — |
+| classic-bass-bassman-50 | Classic Pairing · Bass — Fender Bassman 50 1968（@arlingtonaudio），jumped channels G6 + 1970 Bassman 2x15 CTS SM57 IR | 413107 | 352839 |
+| classic-bass-ampeg-b15 | Classic Pairing · Bass — Ampeg B-15 64 Portaflex（@ivanbassist），Flat EQ light comp | 381194 | — |
 
-> 注：gear=amp-cab 的音色模型自带箱体（零 IR），表内除 classic-guitar-jtm45
-> 外均无 IR；jtm45 显式挂官方 Marshall 1960 Lead 4x12 箱体 IR（363507，
-> @tone3000）。选型标准为「经典型号 + 权威音源（官方/verified/顶级 creator）+
-> 社区热度（下载/收藏）」，10 条覆盖清音 → 边缘过载 → crunch → 高 headroom →
-> 高增益完整风格链。模型文件按旋钮/麦位命名，选哪个由
-> `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
+> 注：gear=amp-cab 的 capture 自带箱体（combo 或整机麦拾，零 IR）；纯 amp /
+> DI 直录的 capture 显式挂匹配的 cab IR（品牌对应：Twin→JBL D120、AC30→
+> Celestion Blue、Hiwatt→4x12 Fane、Dumble→1x12、Badlander→Mesa 4x12 OS、
+> Bassman→2x15 CTS）。贝斯按惯例：GK 直出（作者建议免 IR）、SVT 自带 6x10、
+> B-15 自带箱体。选型标准为「经典型号 + 权威音源（官方/verified/顶级
+> creator）+ 社区热度（下载/收藏）」，14 条覆盖吉他清音 → 边缘过载 → crunch →
+> 高 headroom → 高增益与贝斯清亮/复古/驱动风格链。模型文件按旋钮/麦位命名，
+> 选哪个由 `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
 > 库内文件改名/迁移后 `preset load` 依然能解析到当前路径。
 
 ### 选型说明（v0.1.0 经典音箱重选）
 
 目录从「吉他手关联」改为「纯经典音箱」视角：吉他手标志音色依赖效果器链，
-关联不严谨；音箱型号 + capture 设置本身即可代表经典音色。10 条全部为
-Classic Pairing · Guitar 分组；音源优先官方账号（@tone3000 ×2，含 IR）与
-verified 作者（@amalgamaudio ×3、@2dor ×2），其次 NAM 项目作者
-（@sdatkinson）与顶级 creator（@slamminmofo ×2）。
+关联不严谨；音箱型号 + capture 设置本身即可代表经典音色。10 条经典吉他
+音箱 + 4 条经典贝斯音箱；音源优先官方账号（@tone3000 ×2）与 verified 作者
+（@amalgamaudio ×3、@2dor ×3），其次 NAM 项目作者（@sdatkinson）与顶级
+creator（@slamminmofo ×2、@arlingtonaudio ×2、@vulturized、@daweed、
+@ivanbassist、@timr、@wendycabs、@leomoraes、@maestrodimusica）。
 
 旧库中按旧名 seed 的 preset（band-* 7 条、classic-guitar-beano、
 classic-guitar-brian-may、classic-guitar-fender-* 等 15 条旧目录）升级后
@@ -134,9 +141,9 @@ classic-guitar-brian-may、classic-guitar-fender-* 等 15 条旧目录）升级�
 
 ## 首次运行自动初始化（default presets）
 
-首次运行 `gigbuddy`（CLI 任意子命令或 TUI 启动）会自动下载上述 10 条内置
-preset 精确引用的 **11 个模型**（10 个 amp 模型 + 1 个箱体 IR，约 3.3MB），
-并 seed 出全部 10 条 preset。这是**一次性**流程：
+首次运行 `gigbuddy`（CLI 任意子命令或 TUI 启动）会自动下载上述 14 条内置
+preset 精确引用的 **19 个模型**（14 个 amp 模型 + 5 个箱体 IR，约 5.6MB），
+并 seed 出全部 14 条 preset。这是**一次性**流程：
 
 - **幂等**：settings 表 `default_presets_initialized` 标记已写则直接跳过；
   CLI 与 TUI 共用同一标记。全部模型就绪并 seed 成功后才写标记。
