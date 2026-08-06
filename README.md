@@ -44,8 +44,10 @@ the tones you like — then play through them in realtime or render them to wav.
   IRs already wired in, so every rig sounds complete immediately.
 - **A real signal chain** — AMP + CAB nodes with gain / master / quality
   controls, live level meter, and a realtime engine you can also run headless.
-- **Offline render** — When you want a recording, not a rehearsal: export your
-  chain to a wav file in one command.
+- **Loop & compare over dry input** — Load a dry guitar or bass file into the
+  INPUT slot and loop it (space play/pause, s stop, l loop) while the realtime
+  engine renders it through the current chain — flip between tones and hear
+  exactly how each amp handles your playing, in seconds.
 - **Free & open source** — MIT-licensed core stack, pure-API data source: no
   subscriptions, no paid tone packs, no multi-gigabyte library to download.
 
