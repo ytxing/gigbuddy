@@ -135,7 +135,7 @@ class PackInstallScreen(GigBuddyModal):
                     yield NonSelectableStatic(
                         f"[b]{_escape(t.get('title') or '')}[/b]  "
                         f"[dim]@{_escape(str(t.get('username') or '?'))} · "
-                        f"{_escape(str(t.get('gear') or '?'))} · "
+                        f"{_escape(str(t.get('gear') or '?').upper())} · "
                         f"dl {t.get('downloads_count')}[/dim]{badge}",
                         id="pack-header")
                     yield MarqueeBar(id="pack-marquee")

@@ -1,6 +1,7 @@
 """Narrow T06 coverage for canonical Slot-aware DetailPane behavior."""
 
 import asyncio
+from pathlib import Path
 
 from tui.app import GigBuddyApp
 from tui.library_panel import ToneSelected
@@ -189,6 +190,26 @@ def test_canonical_local_enter_stays_in_detail_context(
             assert detail._current_tone["id"] == tone["id"]
 
     run(scenario())
+
+
+def test_description_header_resolves_model_id_from_canonical_slots(
+        monkeypatch, tmp_path):
+    """The v0.2 slots[] chain supplies the model id shown in Description."""
+    _current, first, _second, _models, tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+    relative_tone = {
+        **tone,
+        "models": [{
+            **model,
+            "local_path": str(tmp_path.joinpath(
+                Path(model["local_path"]).name).relative_to(tmp_path)),
+        } for model in tone["models"]],
+    }
+    monkeypatch.setattr("tui.panels.library.ROOT", tmp_path)
+    monkeypatch.setattr("tui.panels.live.read_chain",
+                        lambda: _chain([first]))
+
+    assert DetailPane._chain_model_id(relative_tone) == 101
 
 
 def test_empty_slot_clears_old_pack_and_brackets_switch_views(

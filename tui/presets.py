@@ -128,6 +128,14 @@ class PresetSearchInput(Input):
         if panel is not None:
             panel.action_search_escape()
 
+    def on_blur(self, _event) -> None:
+        # Search editing is a focus state, not a sticky panel mode. Without
+        # this reset, leaving the input for another pane makes the next Esc
+        # behave as if the input were still active.
+        panel = self.query_ancestor(PresetPanel)
+        if panel is not None:
+            panel._search_editing = False
+
 
 class PresetPanel(Vertical):
     """Persistent preset list under the library: browse with ↑/↓, load with Enter.

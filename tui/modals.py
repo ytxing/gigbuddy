@@ -21,7 +21,7 @@ from textual.events import Leave, MouseEvent, MouseMove
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Static, Tree
 
-from .marquee import ellipsis_window
+from .marquee import ellipsis_window, resolve_rich_style
 from .selection import ShiftSelectableScreenMixin
 
 
@@ -244,8 +244,10 @@ def set_border_hint_hover(widget, token: str | None) -> None:
         widget._hint_hover_token = None
         return
     variables = getattr(getattr(widget, "app", None), "theme_variables", {}) or {}
-    accent = str(variables.get("accent") or "#e59a3c")
-    background = str(variables.get("background") or "#1b1512")
+    accent = resolve_rich_style(
+        str(variables.get("accent") or "#e59a3c"), variables)
+    background = resolve_rich_style(
+        str(variables.get("background") or "#1b1512"), variables)
     styled = Text(label)
     styled.stylize(f"bold {background} on {accent}", *span)
     widget.border_subtitle = styled

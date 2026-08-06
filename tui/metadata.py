@@ -162,6 +162,11 @@ def _value(value, fallback: str = "-") -> str:
     return str(value)
 
 
+def _gear_value(value) -> str:
+    """Display the native gear token without changing its identity."""
+    return _value(value, "SLOT").upper()
+
+
 def _link_markup(href: str, label: str) -> str:
     """Build a link while keeping external text out of Rich tag syntax."""
     encoded_href = quote(str(href), safe=":/?&=#-_.@%")
@@ -202,7 +207,7 @@ def metadata_copy_text(tone: dict | None = None, model: dict | None = None,
         if tone3000_url(tone):
             lines.append(f"TONE3000: {tone3000_url(tone)}")
         lines.append(f"Author: @{_value(tone.get('username'), '?').lstrip('@')}")
-        lines.append(f"Type: {_value(tone.get('gear'))}")
+        lines.append(f"Type: {_gear_value(tone.get('gear'))}")
         if tone.get("tags"):
             lines.append(f"Tags: {_value(tone.get('tags'))}")
         if tone.get("description"):
@@ -300,7 +305,7 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
                     markup=True)
             else:
                 row("IDENTITY", "Author", "?")
-            row("IDENTITY", "Type", tone.get("gear"))
+            row("IDENTITY", "Type", _gear_value(tone.get("gear")))
 
         url = tone3000_url(tone)
         if url:

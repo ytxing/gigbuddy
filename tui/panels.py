@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 
 from rich.cells import cell_len
+from rich.console import Group
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -29,7 +31,8 @@ from . import live  # noqa: E402
 from .chain_state import (MAX_SLOTS, ChainState, ChainStateError,
                           SlotOverlay, SlotSnapshot, SlotStatus,
                           chain_fingerprint)  # noqa: E402
-from .marquee import (MarqueeBar, ellipsis_window, marquee_window)  # noqa: E402
+from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
+                      resolve_rich_style)  # noqa: E402
 from .metadata import (SelectableStatic, description_only, metadata_table,
                        preset_metadata_table, signed_fixed, theme_colors)  # noqa: E402
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
@@ -2346,8 +2349,6 @@ class DetailPane(Vertical):
 
     @staticmethod
     def _gear_badge(gear: str) -> str:
-        if gear == "amp-cab":
-            return "[b $primary]AMP[/] + [b $success]CAB[/]"
         style = DetailPane._GEAR_STYLES.get(gear, "$text-muted")
         return f"[b {style}]{_escape(gear.upper())}[/]"
 
@@ -3216,6 +3217,19 @@ class DetailPane(Vertical):
                 name, preset_id=self._detail_preset_id),
         )
 
+    def _show_detail_unavailable(self, object_name: str) -> None:
+        """Keep the Detail surface explicit when its object was removed."""
+        self._set_summary(
+            f"[b $error]REMOVED[/] · {object_name} unavailable")
+        variables = getattr(getattr(self, "app", None), "theme_variables", {})
+        notice = Text(
+            f"This {object_name} is no longer available.",
+            style=resolve_rich_style("bold $error", variables))
+        # Retain the last valid metadata below the explicit status so a
+        # mutation cannot turn the DetailPane into a blank surface.
+        self._body.update(Group(notice, self._body.content))
+        self._rerender = None
+
     def _pack_mutation_affects_tone(self, event, tone_id: int) -> bool:
         """Limit Pack row rebuilds to keys belonging to its Detail context."""
         keys = _mutation_keys(event)
@@ -3256,13 +3270,19 @@ class DetailPane(Vertical):
         if (operations.intersection(_LIBRARY_STATE_OPERATIONS)
                 and self._current_tone and self._current_tone.get("id") is not None):
             tone_id = int(self._current_tone["id"])
-            tone = library.get_tone(tone_id) or self._current_tone
+            stored_tone = library.get_tone(tone_id)
+            if stored_tone is None and not self._description_remote:
+                self._show_detail_unavailable("tone")
+                return
+            tone = stored_tone or self._current_tone
             if self._summary_mode == "model" and self._detail_model:
                 model_id = self._detail_model.get("id")
                 model = next((item for item in tone.get("models", [])
                               if item.get("id") == model_id), None)
                 if model is not None:
                     self.show_model(tone, model)
+                else:
+                    self._show_detail_unavailable("model")
             elif self._summary_mode == "tone":
                 # Description is a retained view tab. Re-render its metadata
                 # after the library state changes, but restore the tab-local
@@ -3271,14 +3291,41 @@ class DetailPane(Vertical):
                 self.show(tone, remote=self._description_remote)
                 self._restore_detail_description_state()
 
-    def _chain_model_id(self, tone: dict) -> int | None:
+    @staticmethod
+    def _chain_model_id(tone: dict) -> int | None:
         """The live chain's model id, when that model belongs to this tone."""
-        path = live.read_chain().get("model")
-        if not path:
-            return None
-        for m in tone.get("models") or []:
-            if m.get("local_path") == path:
-                return m.get("id")
+        chain = live.read_chain()
+        slots = chain.get("slots")
+        if isinstance(slots, list):
+            paths = [slot.get("path") for slot in slots
+                     if isinstance(slot, dict)]
+        else:
+            # Legacy reads are normalized by the protocol, but retain this
+            # fallback for direct callers and older test fixtures.
+            paths = [chain.get("model")]
+        models = tone.get("models") or []
+        for path in paths:
+            if not path:
+                continue
+            for model in models:
+                model_path = model.get("local_path")
+                if not model_path:
+                    continue
+                if str(model_path) == str(path):
+                    return model.get("id")
+                try:
+                    root = Path(library.ROOT).resolve(strict=False)
+                    chain_path = Path(str(path))
+                    model_path = Path(str(model_path))
+                    if not chain_path.is_absolute():
+                        chain_path = root / chain_path
+                    if not model_path.is_absolute():
+                        model_path = root / model_path
+                    if chain_path.resolve(strict=False) == \
+                            model_path.resolve(strict=False):
+                        return model.get("id")
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    pass
         return None
 
     def _marquee_content(self, tone: dict, model_id: int | None) -> str:

@@ -8,6 +8,7 @@ from textual.widgets._data_table import ColumnKey
 
 import library
 from tui.app import GigBuddyApp
+from tui.modals import set_border_hint_hover
 from tui.view_controls import SearchBar, TypeFilterMenu, ViewTabStrip
 
 
@@ -109,6 +110,25 @@ def test_searchbar_sort_track_does_not_move_for_long_query(monkeypatch, tmp_path
     run(scenario())
 
 
+def test_border_hint_hover_resolves_textual_ansi_theme_colors():
+    """Rich hover spans must not receive Textual-only ansi_* color names."""
+    class Widget:
+        border_subtitle = "enter detail · esc back"
+        app = type("App", (), {
+            "theme_variables": {
+                "accent": "ansi_green",
+                "background": "ansi_black",
+            }
+        })()
+
+    widget = Widget()
+    set_border_hint_hover(widget, "enter detail")
+
+    assert widget.border_subtitle.spans
+    assert all("ansi_" not in str(span.style)
+               for span in widget.border_subtitle.spans)
+
+
 def test_type_filter_is_dynamic_and_author_header_is_not_filterable(
         monkeypatch, tmp_path):
     _patch_remote(monkeypatch, tmp_path)
@@ -135,6 +155,18 @@ def test_type_filter_is_dynamic_and_author_header_is_not_filterable(
             await pilot.pause()
             assert menu.display
             assert menu.target_table_id == "lib-table-tone"
+            assert menu._options == [
+                ("ALL", "all"), ("AMP", "amp"),
+                ("OUTBOARD", "outboard")]
+
+            # The active filter must not hide the other types from the next
+            # menu open; switching AMP -> OUTBOARD must be direct.
+            menu.value = "amp"
+            await pilot.pause(0.4)
+            panel.on_data_table_header_selected(
+                DataTable.HeaderSelected(
+                    table, ColumnKey("type"), 3, Text("Type")))
+            await pilot.pause()
             assert menu._options == [
                 ("ALL", "all"), ("AMP", "amp"),
                 ("OUTBOARD", "outboard")]

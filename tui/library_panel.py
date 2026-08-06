@@ -546,6 +546,7 @@ class LibraryPanel(Vertical):
         self._type_values_by_pane: dict[str, set[str]] = {
             "pane-local": set(), "pane-tone": set(), "pane-favorites": set(),
         }
+        self._type_value_context_by_pane: dict[str, tuple] = {}
         self._users: list[str] = []
         self._tags: list[str] = []
         self._makes: list[str] = []
@@ -800,10 +801,18 @@ class LibraryPanel(Vertical):
                         max(int(table.scroll_y), 0), len(rows) - 1)
                     state["first_visible_row_key"] = rows[
                         first_index].key.value
+                    state["first_visible_successor_key"] = (
+                        rows[first_index + 1].key.value
+                        if first_index + 1 < len(rows) else None)
+                    state["first_visible_predecessor_key"] = (
+                        rows[first_index - 1].key.value
+                        if first_index > 0 else None)
                     state["row_offset"] = max(
                         0.0, float(table.scroll_y) - first_index)
                 else:
                     state["first_visible_row_key"] = None
+                    state["first_visible_successor_key"] = None
+                    state["first_visible_predecessor_key"] = None
                     state["row_offset"] = 0
             state["selection_keys"] = tuple(
                 f"local:{tone_id}" for tone_id in sorted(self._local_selected)
@@ -899,6 +908,19 @@ class LibraryPanel(Vertical):
         first_index = next(
             (index for index, row in enumerate(rows)
              if row.key.value == first_key), None)
+        if first_index is None:
+            for fallback_key in (
+                    state.get("first_visible_successor_key"),
+                    state.get("first_visible_predecessor_key")):
+                if fallback_key is None:
+                    continue
+                first_index = next(
+                    (index for index, row in enumerate(rows)
+                     if row.key.value == fallback_key),
+                    None,
+                )
+                if first_index is not None:
+                    break
         scroll_y = (
             first_index + max(float(state.get("row_offset", 0)), 0.0)
             if first_index is not None
@@ -994,6 +1016,15 @@ class LibraryPanel(Vertical):
             "lib-table-tone": "pane-tone",
             "lib-table-favorites": "pane-favorites",
         }.get(table.id or "")
+        if pane_id is not None:
+            state = self._view_states.get(pane_id, {})
+            context = (state.get("query", ""), state.get("sort", ""))
+            if self._type_value_context_by_pane.get(pane_id) != context:
+                self._type_value_context_by_pane[pane_id] = context
+                self._type_values_by_pane[pane_id] = set()
+        # Keep the type universe for the current query/sort context while
+        # discarding values from older contexts. This lets AMP -> CAB work
+        # without leaking a type from an unrelated search into the menu.
         values = (set(self._type_values_by_pane.get(pane_id, set()))
                   if pane_id else set())
         for row in table.ordered_rows:
@@ -1004,7 +1035,7 @@ class LibraryPanel(Vertical):
                 if value:
                     values.add(value)
         if pane_id is not None:
-            self._type_values_by_pane[pane_id].update(values)
+            self._type_values_by_pane[pane_id] = values
         return sorted(values, key=str.casefold)
 
     def _sync_legacy_type_options(self, table: DataTable) -> None:
@@ -1703,7 +1734,12 @@ class LibraryPanel(Vertical):
         # after the blocking state probe has returned to the event loop.
         self._reconcile_local_rows(tone_ids)
         self._apply_download_state_updates(updated)
-        self._restore_view_anchor("pane-local")
+        # The mutation coordinator captures every retained Library view. The
+        # async worker must restore every tab-local anchor after its incremental
+        # update, not only LOCAL; remote rows and TOP CREATORS may be inactive
+        # when the committed install/uninstall lands.
+        for pane_id in self._view_states:
+            self._restore_view_anchor(pane_id)
 
         active = self._active_pane
         if active == "pane-local":

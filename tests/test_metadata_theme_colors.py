@@ -75,6 +75,13 @@ def test_metadata_table_description_has_section_label():
     assert isinstance(bare, Table)
 
 
+def test_metadata_missing_gear_uses_slot_label():
+    table = metadata_table({"id": 1, "title": "Unknown", "models": []})
+    values = [cell.plain if isinstance(cell, Text) else str(cell)
+              for cell in table.columns[1].cells]
+    assert "SLOT" in values
+
+
 def test_preset_metadata_table_colors_parameter():
     """Dirty status uses warn, canonical Slot values use value."""
     colors = {"section": "#222222", "field": "#333333", "value": "#444444",
