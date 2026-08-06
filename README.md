@@ -1,16 +1,85 @@
-# GigBuddy 🎸 — Your one-stop NAM tone manager
+# GigBuddy 🎸 — Your tone, in seconds
 
 *v0.1.0-alpha.7 — 2026-08-06*
 
-Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
-a realtime NAM engine, and an SQLite tone library that external AI agents drive
-through a stable CLI. Tones come from TONE3000 (public API, anon key); rendering is
-NeuralAudio (MIT).
+A guitar tone manager that puts TONE3000's community library of **NAM amp models
+and cabinet IRs** right at your fingertips: search, audition, compare, and chain
+the tones you like — then play through them in realtime or render them to wav.
 
-**Open-source stance**: pure-API data source (zero local tone-library dependency),
-fully MIT core stack.
+![GigBuddy TUI main screen](docs/images/tui-main.png)
 
-## Architecture
+## Features
+
+- **Huge library, zero setup** — Browse TONE3000's community tone library live
+  from the TUI: thousands of NAM amp captures and cabinet IRs, searchable on
+  demand. No local database to build, nothing to manage.
+- **Instant audition** — The realtime engine hot-swaps any amp or IR in ~0.3s.
+  Select a tone and it's playing before you finish the thought — with your dry
+  input or a reference file behind it.
+- **Find the right tone fast** — Search by keywords, `@author`, `#tag`, or exact
+  `make:"..."`; filter by gear type (amp / cab / full rig); sort by downloads,
+  favorites, or recency; jump into any creator's tones from the TOP CREATORS
+  leaderboard.
+- **Compare in seconds** — Step through every capture in a tone pack with `↑/↓`
+  (same amp, different mics and knob settings), flip any node to BYPASS to hear
+  your guitar straight, and inspect full capture metadata in the detail pane.
+- **14 classic rigs out of the box** — Plexi, JCM800, Twin Reverb, AC30, Hiwatt,
+  Dumble, Mesa… plus 4 bass presets (SVT, B-15, Bassman, GK). Auto-downloaded
+  and ready on first launch.
+- **A real signal chain** — AMP + CAB nodes with gain / master / quality
+  controls, live level meter, and a realtime engine you can also run headless.
+- **Offline render** — When you want a recording, not a rehearsal: export your
+  chain to a wav file in one command.
+
+## Install (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/install.sh | bash
+```
+
+The installer creates an isolated environment under `~/.local/share/gigbuddy`,
+builds the audio engines, and exposes `gigbuddy` through `~/.local/bin`. Set
+`GIGBUDDY_HOME` or `GIGBUDDY_BIN_DIR` to use different paths.
+
+**First run**: open the TUI (`gigbuddy`) and the 14 built-in presets set
+themselves up — it downloads their 19 backing models (14 amps + 5 cabinet IRs,
+~5.6MB, one-time) and seeds the catalog. Idempotent and failure-safe: it only
+runs once, and retries on the next launch if the network drops mid-way.
+
+**Uninstall** (asks whether to keep your tones and data; keeps Homebrew
+PortAudio):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/uninstall.sh | bash
+```
+
+For a Python-only CLI install without the realtime engine:
+`uv tool install git+https://github.com/ytxing/gigbuddy.git`
+
+## Quick start
+
+```bash
+gigbuddy                      # open the TUI (starts the realtime engine)
+gigbuddy preset list          # 14 built-in presets, ready to go
+gigbuddy preset load classic-guitar-plexi   # apply + engine hot-swap
+```
+
+Inside the TUI:
+
+- **Search TONE3000** from the library browser, e.g. `super reverb @tone3000`,
+  `tag:"edge of breakup" marshall`, `make:"Two Rock Traditional Clean"`.
+- **Audition**: press enter on any tone — the engine swaps to it instantly.
+- **A/B**: `↑/↓` on the AMP or CAB node steps through the tone pack's other
+  captures; double-click a node to BYPASS it and hear your guitar straight.
+- **Presets**: `p` pick, `ctrl+s` save the current chain as a preset.
+
+## Architecture (in brief)
+
+GigBuddy is three pieces that talk through stable interfaces: a **Textual TUI**
+that browses TONE3000 and drives the chain, a **realtime engine** (PortAudio +
+NeuralAudio) that hot-swaps amps/IRs and reports levels, and a **SQLite library
++ CLI** that any tool — including AI agents — can query and write. Tones come
+from the TONE3000 public API; the core stack is fully MIT.
 
 ```
                                           ┌────────────────────────────────┐
@@ -39,112 +108,19 @@ fully MIT core stack.
                                       └──────────────────────────────────────┘
 ```
 
-- **Library DB** (`data/gigbuddy.db`): full TONE3000 metadata mirror — every search
-  field preserved. Schema: docs/library-schema.md. Query via CLI or SQLite directly.
-- **Agent ↔ UI round-trip**: files (`live_chain.json` / `level.json`) — unchanged
-  protocol. The engine hot-swaps within ~0.3s of a chain write.
-- Offline rendering (`src/render.py` + `bin/nam_cli`) remains for wav output.
+The engine watches `data/live_chain.json` and swaps model/IR atomically within
+~0.3s of a chain write; `data/level.json` feeds the level meter back. Details:
+docs/chain-schema.md.
 
-## Quick start
+## TUI tour
 
-### One-command install (macOS)
+The TUI starts the realtime engine by default. Use `gigbuddy tui --no-engine`
+when an engine is already running in another terminal.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/install.sh | bash
-```
-
-The installer creates an isolated environment under `~/.local/share/gigbuddy`,
-builds the audio engines, and exposes `gigbuddy` and `gigbuddy-tui` through
-`~/.local/bin`. Set `GIGBUDDY_HOME` or `GIGBUDDY_BIN_DIR` to use different paths.
-
-After installation, run `gigbuddy` to open the TUI and start the realtime engine. Use
-`gigbuddy tui --no-engine` when an engine is already running in another terminal.
-
-#### First-run default presets
-
-The first time you run any `gigbuddy` subcommand (or open the TUI), the built-in
-default presets are set up automatically: it downloads the 19 models the presets
-reference (14 amp models + 5 cabinet IRs, ~5.6MB, one-time) and seeds all 14
-presets. The flow is idempotent (settings marker `default_presets_initialized`)
-and failure-safe — network/API errors print a notice, seed whatever already
-became available, and retry on the next launch. Inspect and load them with:
-
-```bash
-gigbuddy preset list                          # 14 built-in presets (classic-guitar-*/classic-bass-*)
-gigbuddy preset load classic-guitar-plexi     # apply + engine hot-swap
-gigbuddy preset seed --replace                # manually rebuild the built-in catalog
-```
-
-For a Python-only CLI install, `uv tool install git+https://github.com/ytxing/gigbuddy.git`
-is also possible, but it does not build the realtime engine and is not the full
-GigBuddy installation.
-
-### Uninstall
-
-The script asks separately whether to remove downloaded tones and local data. It
-leaves Homebrew PortAudio installed.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/uninstall.sh | bash
-```
-
-For a non-interactive uninstall:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/uninstall.sh | bash -s -- --yes
-curl -fsSL https://raw.githubusercontent.com/ytxing/gigbuddy/v0.1.0-alpha.7/scripts/uninstall.sh | bash -s -- --yes --keep-data
-```
-
-```bash
-# Manual/developer setup (the installer above already does this)
-# 1. Create the local Python environment (Python 3.11+)
-python3 -m venv .venv
-.venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e '.[dev]'
-
-# 2. Fetch pinned C++ dependencies (macOS build path)
-./scripts/bootstrap_third_party.sh
-
-# 3. Build the engine (needs clang++ and Homebrew PortAudio)
-./cpp/build.sh
-
-# 4. Build the tone library from TONE3000 (the TUI also does this interactively)
-.venv/bin/gigbuddy tone search "fender super reverb"     # search TONE3000
-.venv/bin/gigbuddy tone import 19                        # download + persist metadata to DB
-.venv/bin/gigbuddy tone list                             # browse the local library
-.venv/bin/gigbuddy tone show 19                          # full metadata + local files
-
-# 5. Point the engine at a chain (file names = TONE3000 semantic model names)
-.venv/bin/gigbuddy chain set '{"model": "data/tones/19-fender-super-reverb-1977/Fender Super Reverb: EQ Flat, Volume 3, sm57.nam", "gain": 1.0, "master": 0.8}'
-.venv/bin/gigbuddy chain get
-
-# 6. Offline render (optional, when you want a wav file)
-python3 src/render.py chain.json data/dry.wav out.wav
-```
-
-## TUI (realtime tone-chain console)
-
-![GigBuddy TUI main screen](docs/images/tui-main.png)
-
-The TUI starts the realtime engine by default. Use `--no-engine` when the engine
-is already running in another terminal.
-
-```bash
-# optional terminal 1: realtime engine (hot-swap + level telemetry)
-# 省略 --in/--out 使用系统默认音频设备；设备列表与选择见 TUI AUDIO SETTINGS 面板
-./bin/realtime_cli --live data/live_chain.json --level-file data/level.json
-
-# terminal 2: TUI (Textual; omit --no-engine if terminal 1 is not running)
-.venv/bin/gigbuddy-tui --no-engine
-```
-
-TUI features (v0.1):
 - **Library browser** (left): three tabs — LOCAL (imported tones), TONE3000
   (live search + trending + sortable results with per-tab SORT/TYPE filters) and
-  TOP CREATORS (6-column leaderboard: Rank/Creator/Tones/Downloads/Fav/Models,
-  Most Tones by default with its own SORT bar; enter/double-click a creator row
-  jumps to a TONE3000 `@author` search of that creator's tones). Search syntax:
-  `@author`, `#tag`, `author:name`, `tag:name`, `make:"full device name"`.
+  TOP CREATORS (6-column leaderboard: Rank/Creator/Tones/Downloads/Fav/Models;
+  enter/double-click a creator row jumps to their `@author` search).
 - **Tone-chain panel** (right): INPUT / AMP / CAB nodes with state lamps
   (green active / red BYPASS / grey empty). `↑/↓` on AMP or CAB steps through
   the same tone folder's models; the CAB row has its own ▲/▼ arrow buttons.
@@ -154,11 +130,8 @@ TUI features (v0.1):
   (gain/master 0–10, quality 0–1). `d` unloads a slot.
 - **Detail pane** (right, under the chain): dual-mode — Description
   (metadata) ↔ Selection (pack file list, hot-swap with enter) switched by
-  `←/→` or the corner hint. Focusing an AMP/CAB node opens its pack; focusing a
-  TOP CREATORS row shows that author's profile (bio + verified badge); a
-  successful author verification is cached locally and the badge is reused in
-  every author display; remote tones show a downloadable file list whose rows
-  open the pack install screen.
+  `←/→`. Focusing a TOP CREATORS row shows that author's profile (bio +
+  verified badge, cached locally).
 - **AUDIO**: the compact bar keeps live levels + MUTE; AUDIO SETTINGS has
   input/output devices (System Default first), buffer, sample rate and latency.
 - **Dry input playback**: the INPUT row can play a dry guitar file
@@ -167,20 +140,7 @@ TUI features (v0.1):
   saves as new; `ctrl+z` undoes the last preset application.
 - **Level meter** (bottom): 0.3s refresh from the engine.
 
-Search examples:
-
-```text
-super reverb @tone3000
-author:tone3000 tag:clean super reverb
-two rock clean @coretonecaptures
-make:"Two Rock Traditional Clean" @coretonecaptures
-tag:"edge of breakup" marshall
-```
-
-Engine hot-swap (`--live`): watches `data/live_chain.json` (model/ir/gain/master),
-swaps model/IR atomically within 0.3s; `--level-file` feeds levels back as JSON.
-
-## gigbuddy CLI (agent-facing interface)
+## CLI reference (for agents & developers)
 
 ```
 gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N] [--query Q] [--json]
@@ -202,16 +162,10 @@ gigbuddy preset show <name> / delete <name>                      # inspect / rem
 
 Presets store model **logic references** (`model_id`), resolved to current paths
 at load time — library renames never break a preset. The active preset is shared
-by the CLI and TUI. TUI: `p` loads, `ctrl+s` twice confirms an active-preset
-overwrite, and `ctrl+shift+s` saves as a new name. In the PRESETS pane, use
-`space` / `a` / `d` / `esc` for select, select all, bulk delete, and clear;
-`n` / `r` / `e` create, rename, or edit the focused preset.
-
-LOCAL uses the same `space` / `a` / `d` / `esc` selection model. Uninstalling
-moves managed files to `data/.trash`, clears `models.local_path`, and retains
-tone/model metadata. Active-chain files are blocked; preset dependencies require
-an extra confirmation. The compact main AUDIO bar keeps live levels and MUTE
-visible; AUDIO SETTINGS opens input/output, buffer, sample rate, and latency.
+by the CLI and TUI. In the PRESETS pane, `space` / `a` / `d` / `esc` select,
+select all, bulk delete, and clear; `n` / `r` / `e` create, rename, or edit the
+focused preset. LOCAL uses the same selection model; uninstalling moves managed
+files to `data/.trash`, clears `models.local_path`, and retains metadata.
 
 Notes:
 - `gear` domain is `amp` / `cab` / `amp-cab` (no `ir`); IR tones are `gear=cab`, `platform=ir`.
@@ -222,6 +176,36 @@ Notes:
   download `.wav` files.
 - The gigbuddy skill (`.claude/skills/gigbuddy`) drives this CLI end to end; its
   anti-invention rules (tone ids only from real search output) apply to any agent use.
+
+## Manual / developer setup
+
+The installer above already does this; from a checkout:
+
+```bash
+# 1. Create the local Python environment (Python 3.11+)
+python3 -m venv .venv
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -e '.[dev]'
+
+# 2. Fetch pinned C++ dependencies (macOS build path)
+./scripts/bootstrap_third_party.sh
+
+# 3. Build the engine (needs clang++ and Homebrew PortAudio)
+./cpp/build.sh
+
+# 4. Explore TONE3000 (the TUI also does this interactively)
+.venv/bin/gigbuddy tone search "fender super reverb"     # search TONE3000
+.venv/bin/gigbuddy tone import 19                        # download + persist metadata to DB
+.venv/bin/gigbuddy tone list                             # browse the local library
+.venv/bin/gigbuddy tone show 19                          # full metadata + local files
+
+# 5. Point the engine at a chain (file names = TONE3000 semantic model names)
+.venv/bin/gigbuddy chain set '{"model": "data/tones/19-fender-super-reverb-1977/Fender Super Reverb: EQ Flat, Volume 3, sm57.nam", "gain": 1.0, "master": 0.8}'
+.venv/bin/gigbuddy chain get
+
+# 6. Offline render (optional, when you want a wav file)
+python3 src/render.py chain.json data/dry.wav out.wav
+```
 
 ## Directory structure
 
