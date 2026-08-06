@@ -30,7 +30,8 @@ stop_banner() {
 
 start_banner() {
   if [[ -t 1 ]] && command -v python3 >/dev/null 2>&1; then
-    # 滚动区域隔离：动画固定占顶部 8 行，安装日志只在第 9 行以下滚动
+    # 清屏后开始：动画固定占顶部 8 行，安装日志只在第 9 行以下滚动
+    printf '\033[2J\033[H'
     local lines
     lines=$(tput lines 2>/dev/null || printf '24')
     if (( lines >= 12 )); then
