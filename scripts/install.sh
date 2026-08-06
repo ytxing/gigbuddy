@@ -19,9 +19,9 @@ step() {
 
 banner() {
   if [[ -t 1 ]] && command -v python3 >/dev/null 2>&1; then
-    # 呼吸灯：字符不动，整体颜色在金色系里平滑循环（暗金→亮金→暗金）
+    # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动
     python3 - <<'PY'
-import sys, time
+import math, sys, time
 
 LINES = (
   '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████',
@@ -35,21 +35,28 @@ LINES = (
 )
 W = max(len(l) for l in LINES)
 R = len(LINES)
-CYCLE = ((120, 78, 0), (140, 92, 10), (160, 105, 12), (185, 120, 14),
-         (210, 140, 16), (230, 158, 24), (245, 180, 60), (250, 195, 90),
-         (245, 180, 60), (230, 158, 24), (210, 140, 16), (185, 120, 14),
-         (160, 105, 12), (140, 92, 10))   # 暗金→亮金→暗金 呼吸曲线
-FRAMES = 2 * len(CYCLE)                    # 两轮呼吸
+WAVES = 3                       # 均匀分布的明暗浪数量
+DARK = (110, 72, 8)             # 浪谷：暗金
+BRIGHT = (250, 195, 90)         # 浪峰：亮金
+FRAMES = 32                     # 3 个浪流动约 1.3 圈
 
 def esc(c):
     return '\033[38;2;%d;%d;%dm' % c
 
 for f in range(FRAMES):
-    c = CYCLE[f % len(CYCLE)]
-    frame = '\n'.join(esc(c) + row.ljust(W) + '\033[0m' for row in LINES)
-    sys.stdout.write(('\033[%dA\r' % R) * (1 if f else 0) + frame)
+    phase = 2 * math.pi * WAVES * f / FRAMES
+    out = []
+    for row in LINES:
+        row = row.ljust(W)
+        seg = []
+        for col, ch in enumerate(row):
+            b = 0.5 + 0.5 * math.sin(2 * math.pi * WAVES * col / W - phase)
+            c = tuple(int(DARK[i] + (BRIGHT[i] - DARK[i]) * b) for i in range(3))
+            seg.append(esc(c) + ch)
+        out.append(''.join(seg) + '\033[0m')
+    sys.stdout.write(('\033[%dA\r' % R) * (1 if f else 0) + '\n'.join(out))
     sys.stdout.flush()
-    time.sleep(0.12)
+    time.sleep(0.1)
 sys.stdout.write('\n\n\n')
 sys.stdout.flush()
 PY
