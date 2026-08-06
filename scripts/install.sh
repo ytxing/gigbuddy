@@ -49,10 +49,10 @@ start_banner() {
     if (( cols < 112 )); then
       STATUS_ROW=12
     fi
+    # 终端高度够放动画 + 状态行 + 日志才开动画；否则退回静态 banner
     if (( lines >= STATUS_ROW + 3 )); then
       printf '\033[%d;%sr\033[%d;1H' "$STATUS_ROW" "$lines" "$STATUS_ROW"
       export GB_BANNER_ROW="$STATUS_ROW"
-    fi
     # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动，
     # 后台循环直到安装结束（stop_banner 停止）
     python3 - <<'PY' &
@@ -135,8 +135,10 @@ except (BrokenPipeError, OSError, KeyboardInterrupt, SystemExit):
 PY
     BANNER_PID=$!
     trap 'stop_banner' EXIT
-  else
-    # 非交互终端或没有 python3：静态金+银版
+    return
+  fi
+  fi
+  # 非交互终端、没有 python3、或终端太矮：静态金+银版
     printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
       '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████' ''
     printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
@@ -154,7 +156,6 @@ PY
     printf '\033[38;2;184;134;11m%s\033[38;2;200;200;210m%s\033[0m\n' \
       '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒    ' '  ▚▘█▌▗ ▟▖▗ █▌'
     printf '\n\n\n'
-  fi
 }
 start_banner
 
