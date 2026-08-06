@@ -77,7 +77,7 @@
 
 | tone_id | title | gear | 作者 | 模型数 | 用途 |
 |---|---|---|---|---|---|
-| 27465 | Fender Deluxe Reverb Mix Ready | cab | vulturized | 4 | Dumble SSS / ODS #102（全站 cab 下载第一） |
+| 27465 | Fender Deluxe Reverb Mix Ready | cab | vulturized | 4 | ODS #102（全站 cab 下载第一） |
 | 51086 | Marshall 1960BV V30 and G12T75 | cab | jpisoutoftune | 55 | SIR #36、JCM800 系 |
 | 45022 | Celestion Greenback - Marshall 1960TV 4x12 SM57 | cab | outmodedelectronics | 120 | Plexi / JTM45 系 |
 | 45023 | Celestion Vintage 30 - 2002 Mesa Boogie 4x12 - SM57 | cab | outmodedelectronics | 168 | 通用备选 |
@@ -101,18 +101,18 @@ Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or
 | band-guitar-rhcp | Band Gear · Guitar — John Frusciante：Marshall Major 200 Plexi Lead 1968 全 rig | 383442 | — |
 | band-guitar-green-day | Band Gear · Guitar — Billie Joe Armstrong：Marshall 1959BJA 全 rig | 684630 | — |
 | band-guitar-slash | Band Gear · Guitar — Slash：Marshall JCM800 2203（EL34 mod）全 rig | 567060 | — |
-| band-guitar-acdc | Band Gear · Guitar — Angus Young：Marshall JMP-50 Plexi 1969 全 rig | 418470 | — |
+| band-guitar-acdc | Band Gear · Guitar — Angus Young：Marshall Plexi JMP-50 cranked 全 rig | 418470 | — |
 | band-guitar-mayer | Band Gear · Guitar — John Mayer：Dumble ODS #102 clean drive | 418380 | — |
 | band-bass-rhcp | Band Gear · Bass — Flea：Gallien-Krueger RB800 直出 | 419198 | — |
 | band-bass-svt | Band Gear · Bass — Mike Dirnt 风格：Ampeg SVT Classic 推满（Gain 10）直出 | 379990 | — |
 | classic-guitar-beano | Classic Pairing · Guitar — Eric Clapton 'Beano'：1966 Marshall Bluesbreaker 全 rig | 677999 | — |
-| classic-guitar-vox-ef86 | Classic Pairing · Guitar — Brian May：Vox AC30/4 EF86 全 rig | 383682 | — |
-| classic-guitar-vox-ac15 | Classic Pairing · Guitar — Vox AC15 edge of breakup 直出 | 413321 | — |
+| classic-guitar-brian-may | Classic Pairing · Guitar — Brian May：Vox AC30 全开 + Dallas Rangemaster treble booster | 494010 | — |
+| classic-guitar-hiwatt-dr103 | Classic Pairing · Guitar — David Gilmour：Hiwatt DR103 VOL 8 | 418892 | — |
 | classic-guitar-jtm45 | Classic Pairing · Guitar — Marshall JTM45 Block Logo + JTM-45 Greenback 2x12 | 667990 | 74211 |
 | classic-guitar-fender-super | Classic Pairing · Guitar — Fender Super Reverb 1977 全 rig | 379727 | — |
 | classic-guitar-fender-deluxe | Classic Pairing · Guitar — Fender Deluxe Reverb 全 rig | 385845 | — |
-| classic-guitar-fender-twin | Classic Pairing · Guitar — Kurt Cobain：Fender '65 Twin Reverb 全 rig | 381338 | — |
-| classic-guitar-dumble-sss | Classic Pairing · Guitar — Stevie Ray Vaughan：Dumble Steel String Singer clean | 380306 | — |
+| classic-guitar-fender-twin | Classic Pairing · Guitar — Kurt Cobain：Fender Twin Reverb（1982 Blackface，In Utero 录音 rig） | 418545 | — |
+| classic-guitar-srv-vibroverb | Classic Pairing · Guitar — Stevie Ray Vaughan：Fender Vibroverb SRV 专属设置 | 421653 | — |
 
 > 注：gear=amp-cab 的音色模型自带箱体（零 IR），表内除 classic-guitar-jtm45
 > 外均无 IR；jtm45 显式挂 JTM-45 Greenback 2x12 箱体 IR（74211）。本地没有
@@ -121,6 +121,30 @@ Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or
 > `JCM800 2203 - P5 B5 M5 T5 MV6 G5 - AZG - 700.nam`），选哪个由
 > `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
 > 库内文件改名/迁移后 `preset load` 依然能解析到当前路径。
+
+### 最终清单调整说明（v0.1.0 重选）
+
+最终版按「代表性 + 设置符合吉他手使用习惯」重选，四条 preset 变化如下
+（其余 11 条不变）：
+
+- `classic-guitar-vox-ef86` → `classic-guitar-brian-may`：Brian May 的
+  标志性音色是 Vox AC30 全开 + Dallas Rangemaster treble booster 前置，
+  改用该配置的 capture（494010），替换原来的 Vox AC30/4 EF86（383682）。
+- `classic-guitar-vox-ac15` → `classic-guitar-hiwatt-dr103`：Vox AC15
+  代表性不足，换为 Hiwatt DR103 VOL 8（418892，David Gilmour）。
+- `classic-guitar-dumble-sss` → `classic-guitar-srv-vibroverb`：SRV 更
+  具辨识度的是 Fender Vibroverb 专属设置（421653），替换 Dumble Steel
+  String Singer clean（380306）。
+- `classic-guitar-fender-twin` 名称保留，capture 从 Fender '65 Twin
+  Reverb（381338）换成 In Utero 录音 rig（1982 Blackface，418545，
+  Kurt Cobain 同款）。
+
+旧库中按旧名 seed 的 preset（`classic-guitar-vox-ef86`、
+`classic-guitar-vox-ac15`、`classic-guitar-dumble-sss`）升级后不会自动
+删除——属已知残留。运行
+`gigbuddy preset seed --replace` 会删除全部 preset 并按新清单重建目录；
+被替换 tone 的模型文件保留在 `data/tones/`（不回收，可继续在 TUI 中
+手动选用）。
 
 ## 首次运行自动初始化（default presets）
 

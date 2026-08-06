@@ -900,18 +900,18 @@ SEED_CHAINS = [
     ("band-guitar-rhcp", "Band Gear · Guitar · John Frusciante: Marshall Major 200 Plexi Lead 1968 full rig", 383442, None),
     ("band-guitar-green-day", "Band Gear · Guitar · Billie Joe Armstrong: Marshall 1959BJA full rig", 684630, None),
     ("band-guitar-slash", "Band Gear · Guitar · Slash: Marshall JCM800 2203 (EL34 mod) full rig", 567060, None),
-    ("band-guitar-acdc", "Band Gear · Guitar · Angus Young: Marshall JMP-50 Plexi 1969 full rig", 418470, None),
+    ("band-guitar-acdc", "Band Gear · Guitar · Angus Young: Marshall Plexi JMP-50 cranked full rig", 418470, None),
     ("band-guitar-mayer", "Band Gear · Guitar · John Mayer: Dumble ODS #102 clean drive", 418380, None),
     ("band-bass-rhcp", "Band Gear · Bass · Flea: Gallien-Krueger RB800 direct", 419198, None),
     ("band-bass-svt", "Band Gear · Bass · Mike Dirnt style: Ampeg SVT Classic pushed (Gain 10)", 379990, None),
     ("classic-guitar-beano", "Classic Pairing · Guitar · Eric Clapton 'Beano': 1966 Marshall Bluesbreaker full rig", 677999, None),
-    ("classic-guitar-vox-ef86", "Classic Pairing · Guitar · Brian May: Vox AC30/4 EF86 full rig", 383682, None),
-    ("classic-guitar-vox-ac15", "Classic Pairing · Guitar · Vox AC15 edge of breakup direct", 413321, None),
+    ("classic-guitar-brian-may", "Classic Pairing · Guitar · Brian May: Vox AC30 cranked + Dallas Rangemaster treble booster", 494010, None),
+    ("classic-guitar-hiwatt-dr103", "Classic Pairing · Guitar · David Gilmour: Hiwatt DR103 VOL 8", 418892, None),
     ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 Block Logo + JTM-45 Greenback 2x12", 667990, 74211),
     ("classic-guitar-fender-super", "Classic Pairing · Guitar · Fender Super Reverb 1977 full rig", 379727, None),
     ("classic-guitar-fender-deluxe", "Classic Pairing · Guitar · Fender Deluxe Reverb full rig", 385845, None),
-    ("classic-guitar-fender-twin", "Classic Pairing · Guitar · Kurt Cobain: Fender '65 Twin Reverb full rig", 381338, None),
-    ("classic-guitar-dumble-sss", "Classic Pairing · Guitar · Stevie Ray Vaughan: Dumble Steel String Singer clean", 380306, None),
+    ("classic-guitar-fender-twin", "Classic Pairing · Guitar · Kurt Cobain: Fender Twin Reverb (1982 Blackface, In Utero session rig)", 418545, None),
+    ("classic-guitar-srv-vibroverb", "Classic Pairing · Guitar · Stevie Ray Vaughan: Fender Vibroverb SRV setting", 421653, None),
 ]
 
 # settings 键：首次运行初始化标记（ensure_default_presets 幂等依据）。
