@@ -314,7 +314,7 @@ static void apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
             std::string p = inp["file"].get<std::string>();
             if (p != ctx.liveInputPath) {
                 auto wi = std::make_shared<WavInput>();
-                if (wi->load(p, sr)) {
+                if (wi->load(resolve_path(p), sr)) {
                     request_fade_and_wait(ctx);
                     std::atomic_store(&ctx.wavIn, wi);
                     ctx.liveInputPath = p;
