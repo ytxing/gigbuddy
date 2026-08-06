@@ -21,11 +21,15 @@ from tui.input_screen import InputSourceScreen  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     """Point DB + chain/level files at a tmp dir for every test."""
+    monkeypatch.setattr(library, "ROOT", tmp_path)
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr(library, "TONES_DIR", tmp_path / "tones")
+    monkeypatch.setattr(library, "TONES_DIR", tmp_path / "data" / "tones")
+    monkeypatch.setattr(live, "ROOT", tmp_path)
     monkeypatch.setattr(live, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(live, "LEVEL_FILE", tmp_path / "level.json")
+    monkeypatch.setattr(live, "TONES_DIR", tmp_path / "data" / "tones")
+    monkeypatch.setattr(live, "DRY_INPUTS_DIR", tmp_path / "data" / "dry_inputs")
     yield
 
 
@@ -37,15 +41,18 @@ def test_chain_input_defaults_to_instrument():
 
 
 def test_write_playback_toggles_state_preserving_file_and_loop():
-    live.write_chain({"model": "m.nam",
+    model = live.ROOT / "data" / "tones" / "m.nam"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"model")
+    live.write_chain({"slots": [{"path": "data/tones/m.nam"}],
                       "input": {"source": "file", "file": "data/dry_inputs/a.wav",
                                 "state": "playing", "loop": True}})
     cfg = live.write_playback(live.PLAY_PAUSED)
     assert cfg["input"]["state"] == "paused"
-    assert cfg["input"]["file"] == "data/dry_inputs/a.wav"
+    assert cfg["input"]["file"] == str(live.ROOT / "data" / "dry_inputs" / "a.wav")
     assert cfg["input"]["loop"] is True
     # REQ-035 portable：链里相对路径读取时解析为项目根下绝对
-    assert cfg["model"] == str(live.ROOT / "m.nam")
+    assert cfg["slots"] == [{"path": str(model)}]
     cfg = live.write_playback(live.PLAY_PLAYING, loop=False)
     assert cfg["input"]["state"] == "playing"
     assert cfg["input"]["loop"] is False
@@ -73,12 +80,6 @@ def test_write_playback_no_chain_returns_none():
     assert live.write_playback(live.PLAY_PLAYING) is None
 
 
-def test_write_playback_instrument_chain_gains_source_key():
-    live.write_chain({"model": "m.nam"})
-    cfg = live.write_playback(live.PLAY_PLAYING)
-    assert cfg["input"] == {"source": "instrument", "state": "playing"}
-
-
 def test_read_levels_extended_returns_playback_state():
     live.LEVEL_FILE.write_text(json.dumps(
         {"in": 0.1, "out": 0.2, "play_state": "playing", "play_pos": 12.5}))
@@ -103,18 +104,22 @@ def test_preset_load_keeps_current_input_source(tmp_path):
         library.upsert_tone(conn, tone, commit=False)
         library.upsert_model(conn, {"id": 1001, "tone_id": 19, "name": "EQ Flat.nam",
                                     "model_url": "u", "architecture": "SlimmableContainer",
-                                    "local_path": str(tmp_path / "m.nam")},
-                             commit=False)
+                                    "local_path": str(tmp_path / "data" / "tones" / "m.nam")},
+                                 commit=False)
         conn.commit()
-    (tmp_path / "m.nam").write_bytes(b"x")
-    live.write_chain({"model": str(tmp_path / "m.nam"), "gain": 0.8,
+    model = tmp_path / "data" / "tones" / "m.nam"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"x")
+    live.write_chain({"slots": [{"path": str(model)}], "gain": 0.8,
                       "input": {"source": "file", "file": "data/dry_inputs/mayer.wav",
                                 "state": "playing", "loop": True}})
     library.preset_save("t", note=None)
     cfg = library.preset_load("t")
-    assert cfg["model"] == str(tmp_path / "m.nam")
+    assert cfg["slots"] == [{"path": str(model)}]
     assert cfg["input"]["source"] == "file"
-    assert cfg["input"]["file"] == "data/dry_inputs/mayer.wav"
+    assert cfg["input"]["file"] == str(
+        tmp_path / "data" / "dry_inputs" / "mayer.wav"
+    )
     assert cfg["input"]["state"] == "playing"
 
 

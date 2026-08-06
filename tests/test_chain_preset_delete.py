@@ -1,12 +1,7 @@
-"""REQ-016 回归：preset 缺位 CAB 不得显示 bypass；d 键/提示行 delete 必须生效。
+"""REQ-016 回归：固定节点上的 d 键/提示行 delete 必须生效。
 
-bug① 根因：_set_node 对链值 null 的双义（双击 BYPASS vs 缺位）原按节点
-残留 label 判断——preset 缺位加载时节点残留旧文件名被误判 BYPASS。
-修复：以 app 的 _amp_model_backup/_ir_backup 为准（preset 加载时清空备份）。
-
-bug② 根因：链值已为 null（BYPASS 态）时 delete 被 "already empty" 守卫
-提前 return，残留的 BYPASS/内容显示永远清不掉。修复：链已 null 时删除
-语义降级为重置节点显示（节点已空态才提示 already empty）。
+Preset 的固定 AMP/CAB 缺位显示案例属于旧的 model/ir UI 契约，已由 v0.2
+canonical Slot preset 测试取代；本文件只保留仍覆盖删除路径的回归案例。
 """
 import asyncio
 from pathlib import Path
@@ -48,74 +43,6 @@ def setup_app(monkeypatch, tmp_path, *, ir: Path | None = None):
 
 def node(app, kind: str) -> NodeWidget:
     return next(n for n in app.query(NodeWidget) if n.kind == kind)
-
-
-def test_preset_without_cab_shows_empty_slot_not_bypass(monkeypatch, tmp_path):
-    """链上有 CAB 时加载 ir 缺位的 preset：节点必须回到缺位空态（NONE），
-    不得显示 BYPASS（REQ-016 bug①）。"""
-    state = setup_app(monkeypatch, tmp_path, ir=True)
-    preset_chain = {"model": state["chain"]["model"], "ir": None,
-                    "gain": 0.7, "master": 0.6, "quality": 1.0}
-
-    def fake_preset_load(name):
-        # 真实 preset_load 会 chain_set 写链文件；mock 里同步 state
-        state["chain"] = dict(preset_chain)
-        return dict(preset_chain)
-
-    monkeypatch.setattr("tui.app.library.preset_load", fake_preset_load)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            cab = node(app, "cab")
-            # 前置：链上有 CAB（节点显示文件名）
-            assert cab.label == "GB.wav", cab.label
-
-            app._apply_preset("no-cab")
-            await pilot.pause(0.2)
-
-            assert state["chain"]["ir"] is None
-            assert cab.label == "NONE", f"缺位槽不得残留旧文件名: {cab.label}"
-            assert cab.title is None
-            assert cab.bypassed is False, "缺位 ≠ BYPASS"
-            assert cab.has_class("chain-node-empty")
-
-    run(scenario())
-
-
-def test_preset_without_cab_after_bypass_shows_empty(monkeypatch, tmp_path):
-    """双击 BYPASS 后加载 ir 缺位 preset：备份作废，仍显示缺位空态。"""
-    state = setup_app(monkeypatch, tmp_path, ir=True)
-    preset_chain = {"model": state["chain"]["model"], "ir": None,
-                    "gain": 0.7, "master": 0.6, "quality": 1.0}
-
-    def fake_preset_load(name):
-        state["chain"] = dict(preset_chain)
-        return dict(preset_chain)
-
-    monkeypatch.setattr("tui.app.library.preset_load", fake_preset_load)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            cab = node(app, "cab")
-            # 双击 bypass：备份 + 链 ir=null
-            app._ir_backup = state["chain"]["ir"]
-            state["chain"]["ir"] = None
-            app.query_one(ChainPanel).chain = dict(state["chain"])
-            await pilot.pause(0.2)
-            assert cab.bypassed is True, "bypass 前置未生效"
-
-            app._apply_preset("no-cab")
-            await pilot.pause(0.2)
-
-            assert app._ir_backup is None, "preset 加载必须清 BYPASS 备份"
-            assert cab.label == "NONE"
-            assert cab.bypassed is False
-
-    run(scenario())
 
 
 def test_d_key_delete_amp_and_cab(monkeypatch, tmp_path):

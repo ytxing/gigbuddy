@@ -1,9 +1,9 @@
 # GigBuddy 音色链 DSL v0.1（Legacy）
 
-> 本文只描述离线渲染和旧版扁平链格式。当前 TUI、CLI live chain 和实时引擎
-> 使用 `slots[]` 的 v0.2.14 协议；以
+> 本文只描述历史离线 DSL 和旧版扁平链格式，供读取兼容和迁移参考。当前
+> TUI、CLI live chain 和实时引擎使用 `slots[]` 的 v0.2.14 协议；以
 > `docs/ui-interaction-spec-v0.2.md` 和 `docs/adr/0001-slots-chain-protocol.md`
-> 为准。旧 `model`/`ir` 只保留读取兼容。
+> 为准。旧 `model`/`ir` 只保留读取兼容，本文示例不得用于新写入。
 
 对齐 LLM2Fx-Tools 的"效果类型+顺序+参数"可执行链表示；MVP 先支持 amp + cab_ir 两个节点类型，效果器节点（comp/od/delay/reverb/mod）为二期预留（接 pedalboard 后启用）。
 
@@ -56,10 +56,10 @@
 - `params.mix` 默认 1.0，越界报错
 - 渲染顺序 = nodes 数组顺序（amp → cab_ir → ...）
 
-## 实时引擎扩展：input 键（干声试听，live_chain.json）
+## 旧 live chain 读取兼容：input 键（干声试听）
 
-实时引擎（`bin/realtime_cli --live`）使用的扁平链格式（非 nodes DSL）额外支持
-顶层 `input` 键，控制输入源与干声试听回放：
+旧版实时链格式（非 nodes DSL）额外支持顶层 `input` 键，便于迁移旧文件。
+v0.2 新写入必须使用 `slots[]`，控制输入源与干声试听回放：
 
 ```json
 {

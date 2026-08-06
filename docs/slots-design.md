@@ -1,7 +1,9 @@
 # 多 Slot 链架构 · 设计定稿（REQ-032）
 
-状态：定稿待审。关联：`CONTEXT.md`（词汇表）、`docs/adr/0001-slots-chain-protocol.md`（协议决策）。
-本文件是实现的唯一规格来源；与 ADR 冲突时以本文件为准（本文件更新）。
+状态：历史设计参考。当前实现的唯一规格来源是
+`docs/ui-interaction-spec-v0.2.md` v0.2.14；协议决策见
+`docs/adr/0001-slots-chain-protocol.md`。本文件中的旧布局和快捷键描述不覆盖
+当前规范。
 
 ---
 
@@ -57,7 +59,9 @@
 ### 3.3 派生规则
 
 - `slot_processing(path)`：`.nam` → `nam`；`.wav` → `ir`；其他 → `unknown`（引擎跳过并告警）
-- `slot_label(path)`：查 Model 所属 Tone 的 gear → 标签显示：`amp`→AMP、`cab`→CAB、`pedal`→PEDAL、`experimental`→EXP、**`amp-cab`→"AMP + CAB"**（两段标识，表示单 .nam 自带 cab 效果）。未知 → `SLOT`
+- `slot_label(path)`：查 Model 所属 Tone 的原生 gear → 只做 uppercase 展示；例如
+  `amp`→`AMP`、`amp-cab`→`AMP-CAB`、`outboard`→`OUTBOARD`。未知非空 gear
+  也保留原始 token 并 uppercase；只有 Empty Slot 显示 `SLOT`。
 
 ## 4. 引擎规格（cpp/realtime_cli.cpp）
 
@@ -80,7 +84,7 @@
 - 行序 = slots 数组序。
 - 空槽行：`○ NONE` 灰底（现有空态样式）。
 - INPUT 行固定在列表顶部（不入槽，不可移动/删除）。
-- 全局参数行（g·G / m·M / u·U）与提示条保持在面板底部（不变）。
+- 全局参数行（g·G / m·M / q·Q）与提示条保持在面板底部（不变）。
 
 ### 5.2 交互与键位
 
@@ -126,4 +130,4 @@
 
 1. `+` 键添加空槽（实现时查 BINDINGS 冲突，冲突则改面板按钮）——已确认。
 2. 双击 bypass 语义保留（槽位级 bypass，与删除/空槽并存）——已确认。
-3. **amp-cab 标签 = "AMP + CAB"**（两段标识）——已确认（用户拍板）。
+3. **`amp-cab` 标签 = `AMP-CAB`**（保留原生连字符，表示单 `.nam` 自带 cab 效果）。

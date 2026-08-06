@@ -12,7 +12,7 @@ from tui.app import GigBuddyApp
 from tui.install_screen import PackInstallScreen
 from tui.input_screen import InputSourceScreen
 from tui.library_panel import LibraryPanel
-from tui.panels import ChainPanel, DetailPane, InterfaceBar, NodeWidget
+from tui.panels import ChainPanel, DetailPane, InterfaceBar
 from tui.presets import PresetPanel
 
 
@@ -80,25 +80,6 @@ def test_focus_switch_flips_both_levels():
             assert library.styles.opacity == 0.8
             assert _cursor_bg(preset_table) == _theme_var(app, "primary")
             assert _cursor_bg(lib_table) == _theme_var(app, "secondary")
-
-    run(scenario())
-
-
-def test_chain_node_focus_activates_only_chain_panel():
-    """链节点聚焦只激活 ChainPanel；DetailPane 独立降级（pack 表同步降级）。"""
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test() as pilot:
-            await pilot.pause(0.3)
-            chain = app.query_one(ChainPanel)
-            detail = app.query_one(DetailPane)
-            node = next(n for n in app.query(NodeWidget) if n.kind == "amp")
-            node.focus()
-            await pilot.pause(0.1)
-
-            assert chain.styles.opacity == 1.0
-            assert detail.styles.opacity == 0.8
 
     run(scenario())
 

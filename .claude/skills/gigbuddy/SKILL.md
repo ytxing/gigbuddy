@@ -53,13 +53,14 @@ bin/gigbuddy preset delete <name>
    idempotent. After import, verify with `bin/gigbuddy tone show <id>` and record the
    real local file paths.
 
-5. **Assemble the chain** (per docs/chain-schema.md) and hand it to the engine:
+5. **Assemble the chain** (per `docs/ui-interaction-spec-v0.2.md`) and hand it to the engine:
    ```bash
-   bin/gigbuddy chain set '{"model": "data/tones/<id>-<title-slug>/<exact-basename>.nam", "ir": "...", "gain": 1.0, "master": 0.8}'
+   bin/gigbuddy chain set '{"slots": [{"path": "data/tones/<id>-<title-slug>/<exact-basename>.nam"}, {"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
    ```
-   Every `tone_id` must come from real search output and every `model_file` from real
-   import output. chain set writes `data/live_chain.json` atomically — the running
-   engine hot-swaps within ~0.3s and the TUI reflects it.
+   Every tone id must come from real search output and every file path from real
+   import output. New writes use only ordered `slots[]`; old flat `model`/`ir`
+   input is read-only compatibility. `chain set` writes `data/live_chain.json`
+   atomically — the running engine hot-swaps within ~0.3s and the TUI reflects it.
 
 6. **Optional offline render** (when the user asks for a rendered wav file):
    ```bash
@@ -75,7 +76,7 @@ bin/gigbuddy preset delete <name>
 
 触发场景：用户要"一系列 preset / 风格包 / 给我 N 个不同风格的链"（如"来 5 个风格包：清音、crunch、金属、布鲁斯、爵士"）。
 
-核心语义：`preset save <name>` **快照当前 live chain**（`data/live_chain.json` 的 model/ir/gain/master/quality；库内文件的 model/ir 存为逻辑引用 `model_id`，外部路径原样保留），不是"从参数构造链"。批量生成 = **逐风格循环**：`chain set` 写入链 → `preset save` 快照 → 下一个。`chain set` 是整体覆盖写（不是合并），每次必须给全 `model`/`ir`/`gain`/`master`。
+核心语义：`preset save <name>` **快照当前 live chain**（`data/live_chain.json` 的 `slots[]` 与 `gain/master/quality`；库内文件保留 `model_id` 逻辑引用，外部路径原样保留），不是“从参数构造链”。批量生成 = **逐风格循环**：`chain set` 写入链 → `preset save` 快照 → 下一个。`chain set` 是整体覆盖写（不是合并），每次必须给完整 `slots[]` 和链级参数。
 
 工作流：
 
@@ -98,7 +99,7 @@ bin/gigbuddy preset delete <name>
 
 4. **组装链并批量快照**（循环每个风格）：
    ```bash
-   bin/gigbuddy chain set '{"model": "data/tones/<id>-<title-slug>/<exact-basename>.nam", "ir": "...", "gain": 1.0, "master": 0.8}'
+   bin/gigbuddy chain set '{"slots": [{"path": "data/tones/<id>-<title-slug>/<exact-basename>.nam"}, {"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
    bin/gigbuddy preset save "<风格>-<特征>" --note "<分析摘要：性格/适用场景/音色特点>"
    ```
    命名建议：小写 ASCII 连字符 `<风格>-<特征>`（如 `blues-clean-70s`、`metal-modern-gain`、`jazz-clean-neck`）；同名会覆盖——批量前先 `preset list` 检查是否与既有 preset 冲突，冲突时换名或先问用户。注意 `preset save` 会把刚保存的 preset 设为 active preset（`preset current` 可见），批量保存后 active 指向最后一条——按需用 `preset load` 切回。
@@ -106,7 +107,7 @@ bin/gigbuddy preset delete <name>
 5. **验证**：
    ```bash
    bin/gigbuddy preset list                 # 全部 preset + active 标记
-   bin/gigbuddy preset show <name> --json   # 单条：model_id/路径/gain/master/note
+   bin/gigbuddy preset show <name> --json   # 单条：slots/model_id/路径/gain/master/note
    bin/gigbuddy preset load <name>          # 抽查：应用到 live chain（引擎 ~0.3s 热换）
    ```
    检查：每条 preset 的 model_id/路径来自真实输出、note 与分析结论一致、amp-cab 判断正确。
@@ -131,5 +132,5 @@ User: "给我一个 RHCP 那种清音链"
 1. `bin/gigbuddy tone search "frusciante clean" --limit 10` → pick amp tone (record id)
 2. `bin/gigbuddy tone search "v30 cab" --gear cab --limit 10` → pick cab (or skip if amp-cab)
 3. `bin/gigbuddy tone import <amp_id>` (+ `<cab_id>` if used) → note local file paths
-4. `bin/gigbuddy chain set '{"model": "...", "ir": "...", "gain": 1.0, "master": 0.8}'`
+4. `bin/gigbuddy chain set '{"slots": [{"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'`
 5. Report chain + files + confidence.

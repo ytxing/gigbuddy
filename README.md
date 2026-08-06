@@ -101,6 +101,8 @@ TUI features (v0.2):
 - **Presets**: the Presets pane owns `n` (Save As), `s` (save active), `e`
   (edit a full Slot/parameter/note draft), `r` (rename), `d` (delete),
   `enter` (load), and `ctrl+z`/`ctrl+shift+z` undo/redo preset application.
+  Preset writes are scoped to this pane; the global `ctrl+p` command palette
+  can focus the pane or open Save/Save As.
 - **Level meter** (bottom): 0.3s refresh from the engine.
 
 Search examples:
@@ -137,12 +139,13 @@ gigbuddy preset note <name> [note]                               # set / clear d
 gigbuddy preset show <name> / delete <name>                      # inspect / remove
 ```
 
-Presets store model **logic references** (`model_id`), resolved to current paths
-at load time — library renames never break a preset. The active preset is shared
-by the CLI and TUI. TUI: `p` loads, `ctrl+s` twice confirms an active-preset
-overwrite, and `ctrl+shift+s` saves as a new name. In the PRESETS pane, use
-`space` / `a` / `d` / `esc` for select, select all, bulk delete, and clear;
-`n` / `r` / `e` create, rename, or edit the focused preset.
+Presets store canonical ordered `slots[]` snapshots with model **logic
+references** (`model_id`) and paths resolved at load time — library renames
+never break a preset. Legacy flat `model`/`ir` presets are read and normalized
+in memory only; new writes contain `slots[]`. The active preset is shared by
+the CLI and TUI. In the PRESETS pane, use `space` / `a` / `d` / `esc` for
+select, select all, bulk delete, and clear; `n` / `r` / `e` create, rename, or
+edit the focused preset.
 
 LOCAL uses the same `space` / `a` / `d` / `esc` selection model. Uninstalling
 moves managed files to `data/.trash`, clears `models.local_path`, and retains

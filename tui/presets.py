@@ -939,6 +939,10 @@ class PresetNameModal(GigBuddyModal):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         name = event.value.strip()
         if not name:
+            box = self.query_one(ModalBox)
+            set_border_hint_layout(
+                box, "name required",
+                [token for token, _action in self._border_hint_actions()])
             return
         if library.preset_get(name) and self._pending_overwrite != name:
             self._pending_overwrite = name
@@ -953,8 +957,7 @@ class PresetNameModal(GigBuddyModal):
 
     def _confirm(self) -> None:
         inp = self.query_one("#preset-save-input", Input)
-        if inp.value.strip():
-            self.on_input_submitted(Input.Submitted(inp, inp.value))
+        self.on_input_submitted(Input.Submitted(inp, inp.value))
 
     # ---- clickable border hints --------------------------------------------
 

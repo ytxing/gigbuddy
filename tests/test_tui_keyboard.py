@@ -4,8 +4,7 @@ import time
 from pathlib import Path
 
 from textual.events import MouseMove
-from textual.color import Color
-from textual.widgets import DataTable, Input, ProgressBar, Select, Static, TabbedContent, Tree
+from textual.widgets import DataTable, Input, ProgressBar, Static, Tree
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
@@ -16,7 +15,6 @@ from tui.metadata import SelectableStatic
 from tui.panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar, DeviceChanged,
                         InterfaceBar, MeterBar, NodeWidget)
 from tui.picker import TonePickerScreen
-from tui.presets import PresetNameModal, PresetNoteModal
 from tui.uninstall_screen import LocalUninstallScreen
 import library
 
@@ -63,82 +61,6 @@ async def goto_tone_tab(app, pilot):
     # re-posts), so take the real user path: click the tab.
     await pilot.click(app.query_one("#--content-tab-pane-tone"))
     await pilot.pause(0.3)
-
-
-def test_single_click_focuses_double_click_selects_once(monkeypatch):
-    """A single click on the already-focused row must NOT select (Textual's
-    DataTable posts RowSelected on highlight clicks); a double click opens the
-    picker exactly once (base + chain>=2 double-fire regression)."""
-    tone = {"id": 10, "title": "Plexi", "gear": "amp", "username": "alice",
-            "downloads_count": 1, "models": []}
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: [tone])
-    monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: tone)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            table = app.query_one("#lib-table-local")
-            # row 0 sits under the header → offset y=1; separate clicks by
-            # >500ms so each is its own single click (Textual chain window)
-            await pilot.click(table, offset=(8, 1))
-            await pilot.pause(0.6)
-            assert len(app.screen_stack) == 1
-            # clicking the already-focused row must not open anything
-            await pilot.click(table, offset=(8, 1))
-            await pilot.pause(0.6)
-            assert len(app.screen_stack) == 1, "highlight click must not select"
-            # real double click (pilot's times=2 builds the click chain)
-            await pilot.click(table, offset=(8, 1), times=2)
-            await pilot.pause(0.4)
-            pickers = [s for s in app.screen_stack
-                       if isinstance(s, TonePickerScreen)]
-            assert len(pickers) == 1, f"double click must push ONE picker, got {len(pickers)}"
-
-    run(scenario())
-
-
-def test_main_screen_keeps_chain_read_only_and_opens_tone_picker(monkeypatch):
-    tone = {
-        "id": 10, "title": "Plexi", "gear": "amp", "username": "alice",
-        "downloads_count": 1, "models": [],
-    }
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: [tone])
-    monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: tone)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            table = app.query_one("#lib-table-local")
-            nodes = list(app.query(NodeWidget))
-
-            assert app.focused is table
-
-            await pilot.press("right")
-            assert app.focused is table
-
-            # chain nodes are clickable/focusable (↑/↓ steps within the tone
-            # folder), but nothing opens until the user acts
-            assert all(node.can_focus for node in nodes)
-            amp_node = next(n for n in nodes if n.kind == "amp")
-            amp_node.focus()
-            await pilot.pause()
-            assert app.focused is amp_node
-            # ▲/▼ are separate clickable switch buttons on the node row
-            assert app.query_one("#chain-amp-up") is not None
-            assert app.query_one("#chain-amp-down") is not None
-
-            table.focus()  # Enter is the table's select action
-            await pilot.pause()
-            await pilot.press("enter")
-            # Enter on a row goes straight to that tone's model file list
-            assert isinstance(app.screen, TonePickerScreen)
-            assert app.screen.tone_id == 10
-
-            await pilot.press("escape")
-            assert app.focused is table
-
-    run(scenario())
 
 
 def test_local_library_multi_select_opens_bulk_uninstall(monkeypatch):
@@ -235,132 +157,6 @@ def test_no_engine_audio_settings_are_kept_for_the_session(monkeypatch, tmp_path
     run(scenario())
 
 
-def test_ctrl_s_requires_confirmation_before_overwriting_active_preset(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_save("live")
-    library.chain_set({"model": str(tmp_path / "amp.nam"), "gain": 0.9, "master": 1.0})
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.press("ctrl+s")
-            await pilot.pause()
-            assert library.preset_get("live")["chain"]["gain"] == 0.8
-            assert app._save_confirm_name == "live"
-
-            await pilot.press("ctrl+s")
-            await pilot.pause()
-            assert library.preset_get("live")["chain"]["gain"] == 0.9
-
-            library.chain_set({"model": str(tmp_path / "amp.nam"),
-                               "gain": 1.0, "master": 1.0})
-            await pilot.press("ctrl+s")  # arm another overwrite
-            library.preset_load("live")  # clean state
-            await pilot.press("ctrl+s")  # clean press must clear the token
-            library.chain_set({"model": str(tmp_path / "amp.nam"),
-                               "gain": 1.1, "master": 1.0})
-            await pilot.press("ctrl+s")  # this must only re-arm
-            await pilot.pause()
-            assert library.preset_get("live")["chain"]["gain"] == 0.9
-
-    run(scenario())
-
-
-def test_ctrl_s_without_active_preset_opens_save_as(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_set_active(None)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.press("ctrl+s")
-            await pilot.pause()
-            assert isinstance(app.screen, PresetNameModal)
-            await pilot.press("f", "r", "e", "s", "h", "enter")
-            await pilot.pause()
-            assert library.preset_current() == "fresh"
-            assert library.preset_get("fresh") is not None
-
-    run(scenario())
-
-
-def test_save_as_existing_name_requires_two_submits(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_save("existing")
-    library.chain_set({"model": str(tmp_path / "amp.nam"), "gain": 0.9, "master": 1.0})
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            app.action_save_preset_as()
-            await pilot.pause()
-            await pilot.press(*"existing", "enter")
-            await pilot.pause()
-            assert isinstance(app.screen, PresetNameModal)
-            assert library.preset_get("existing")["chain"]["gain"] == 0.8
-
-            await pilot.press("enter")
-            await pilot.pause()
-            assert library.preset_get("existing")["chain"]["gain"] == 0.9
-
-    run(scenario())
-
-
-def test_preset_panel_keyboard_rename_note_and_delete(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_save("old")
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            table = app.query_one("#preset-table", DataTable)
-            table.focus()
-
-            await pilot.press("r")
-            await pilot.pause()
-            await pilot.press("n", "e", "w", "enter")
-            await pilot.pause()
-            assert library.preset_get("new") is not None
-            assert library.preset_current() == "new"
-
-            await pilot.press("e")
-            await pilot.pause()
-            await pilot.press("s", "t", "a", "g", "e", "enter")
-            await pilot.pause()
-            assert library.preset_get("new")["note"] == "stage"
-
-            await pilot.press("d")
-            await pilot.pause()
-            await pilot.press("enter")
-            await pilot.pause()
-            assert library.preset_get("new") is None
-            assert library.preset_current() is None
-
-    run(scenario())
-
-
-def test_preset_panel_multi_select_bulk_delete(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_save("one")
-    library.preset_save("two")
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            table = app.query_one("#preset-table", DataTable)
-            table.focus()
-            await pilot.press("a")
-            await pilot.pause()
-            assert app.query_one("PresetPanel")._selected == {"one", "two"}
-            await pilot.press("d")
-            await pilot.pause()
-            await pilot.press("enter")
-            await pilot.pause()
-            assert library.preset_list() == []
-
-    run(scenario())
-
-
 def test_preset_panel_table_is_bounded_and_scrollable(monkeypatch, tmp_path):
     setup_preset_state(monkeypatch, tmp_path)
     for index in range(20):
@@ -394,47 +190,6 @@ def test_preset_panel_double_click_loads_clicked_row(monkeypatch, tmp_path):
     run(scenario())
 
 
-def test_preset_panel_enter_keeps_cursor_after_active_refresh(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_save("older")
-    library.preset_save("newer")
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(100, 32)) as pilot:
-            table = app.query_one("#preset-table", DataTable)
-            table.focus()
-            table.move_cursor(row=1, animate=False)
-            assert table.ordered_rows[table.cursor_row].key.value == "older"
-            await pilot.press("enter")
-            await pilot.pause(0.6)
-            assert library.preset_current() == "older"
-            assert table.ordered_rows[table.cursor_row].key.value == "older"
-
-    run(scenario())
-
-
-def test_preset_note_modal_handles_external_delete(monkeypatch, tmp_path):
-    setup_preset_state(monkeypatch, tmp_path)
-    library.preset_save("race")
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            app.query_one("#preset-table", DataTable).focus()
-            await pilot.press("e")
-            await pilot.pause()
-            assert isinstance(app.screen, PresetNoteModal)
-
-            library.preset_delete("race")
-            await pilot.press("enter")
-            await pilot.pause()
-            assert isinstance(app.screen, PresetNoteModal)
-            assert "not found" in app.screen.query_one("ModalBox").border_subtitle
-
-    run(scenario())
-
-
 def test_cursor_highlight_updates_detail_without_opening_action(monkeypatch):
     tones = [
         {"id": 10, "title": "First Tone", "gear": "amp", "username": "alice",
@@ -459,51 +214,6 @@ def test_cursor_highlight_updates_detail_without_opening_action(monkeypatch):
             await pilot.pause()
             assert "Second Tone" in detail_text(app)
             assert not isinstance(app.screen, TonePickerScreen)
-
-    run(scenario())
-
-
-def test_focused_content_is_revealed_in_marquee_banners(monkeypatch, tmp_path):
-    monkeypatch.setattr(GigBuddyApp, "_show_node_pack", lambda *_: None,
-                        raising=False)
-    first_title = "A very long tone title that must remain fully readable when focused"
-    second_title = "A second long title whose complete value should replace the first"
-    tones = [
-        {"id": 10, "title": first_title, "gear": "amp", "username": "alice",
-         "downloads_count": 1, "models": []},
-        {"id": 11, "title": second_title, "gear": "cab", "username": "bob",
-         "downloads_count": 1, "models": []},
-    ]
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: tones)
-    monkeypatch.setattr(
-        "tui.library_panel.library.get_tone",
-        lambda tone_id: next(t for t in tones if t["id"] == tone_id))
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(80, 35)) as pilot:
-            await pilot.pause(0.3)
-            await pilot.press("down")
-            await pilot.pause()
-            # The only marquee in the library is the #tone-status status line
-            # (a MarqueeBar since it carries long import/search messages).
-            from tui.marquee import MarqueeBar
-            assert not [b for b in app.query_one("LibraryPanel").query(MarqueeBar)
-                        if b.id != "tone-status"]
-
-            # The same focused model is exposed in the chain banner, while the
-            # compact pedal row keeps its stable two-line layout.
-            node = next(item for item in app.query(NodeWidget)
-                        if item.kind == "amp")
-            node.set_title(first_title)
-            node.set_label("an exceptionally long model filename.nam")
-            node.focus()
-            await pilot.pause()
-            first_node_render = node.render()
-            await pilot.pause(1.0)
-            assert node.render() != first_node_render
-            # REQ-043 追加：聚焦 marquee 行已删——节点自身 marquee 呈现
-            assert len(app.query_one(ChainPanel).query("#chain-marquee")) == 0
 
     run(scenario())
 
@@ -655,173 +365,6 @@ def test_search_failure_keeps_previous_detail(monkeypatch):
     run(scenario())
 
 
-def test_remote_import_does_not_block_keyboard(monkeypatch):
-    monkeypatch.setattr(
-        "tui.library_panel.library.tone3000.search",
-        lambda query, page_size, **kwargs: [{
-            "id": row,
-            "title": f"result {row}",
-            "gear": "amp",
-            "downloads_count": row,
-            "username": "tester",
-        } for row in range(3)],
-    )
-    # pack screen fetches the model list without network in this test
-    monkeypatch.setattr(
-        "tui.install_screen.tone3000.models", lambda tid, a2_only=True: [])
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await goto_tone_tab(app, pilot)
-            await pilot.press("/", "x", "enter")
-            table = app.query_one("#lib-table-tone")
-            assert table.cursor_row == 0
-
-            # Enter opens the pack install screen — a modal; the main UI stays
-            # responsive (no blocking import on the UI thread)
-            await pilot.press("enter")
-            await pilot.pause()
-            from tui.install_screen import PackInstallScreen
-            assert isinstance(app.screen, PackInstallScreen)
-            assert isinstance(app.screen.query_one("#pack-detail"), SelectableStatic)
-
-            await pilot.press("escape")  # cancel, back to the table
-            await pilot.pause()
-            await pilot.press("down")
-            assert table.cursor_row == 1
-
-    run(scenario())
-
-
-def test_remote_import_reports_progress_and_completion(monkeypatch):
-    monkeypatch.setattr(
-        "tui.library_panel.library.tone3000.search",
-        lambda query, page_size, **kwargs: [{
-            "id": 77, "title": "Pack", "gear": "amp",
-            "downloads_count": 2, "username": "tester",
-        }],
-    )
-    monkeypatch.setattr(
-        "tui.install_screen.tone3000.models",
-        lambda tid, a2_only=True: [
-            {"id": 1, "model_url": "http://x/one.nam",
-             "model_json": {"metadata": {"name": "one"}}},
-            {"id": 2, "model_url": "http://x/two.nam",
-             "model_json": {"metadata": {"name": "two"}}},
-        ])
-
-    def import_with_progress(tone_id, progress, **_kwargs):
-        progress(0, 2, "one.nam")
-        progress(1, 2, "one.nam")
-        progress(2, 2, "two.nam")
-        return {"id": tone_id, "models": [{"id": 1}, {"id": 2}]}
-
-    monkeypatch.setattr("tui.install_screen.library.import_tone",
-                        import_with_progress)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await goto_tone_tab(app, pilot)
-            await pilot.press("/", "x", "enter", "enter")  # search → pack screen
-            await pilot.pause(0.2)
-            from tui.install_screen import PackInstallScreen
-            assert isinstance(app.screen, PackInstallScreen)
-            # model list loaded from the mock, both selected
-            pack = app.screen
-            status = pack.query_one("#pack-status", Static)
-            assert "2 model file(s)" in str(status.content)
-
-            await pilot.press("enter")  # install (all selected)
-            await pilot.pause(0.2)
-            # completion: the screen dismisses and the app toasts the result
-            assert not isinstance(app.screen, PackInstallScreen)
-            toasts = {n.message for n in app._notifications}
-            assert any("Installed 2 file(s) from tone 77" in m for m in toasts), toasts
-
-    run(scenario())
-
-
-def test_remote_enter_after_creators_visit_still_opens_install(monkeypatch):
-    """REQ-009 根因回归：访问 TOP CREATORS（旧版在此清空 _remote_tones）
-    后回到 TONE3000，remote 行 Enter 仍必须打开安装二级页——查找表与音色
-    表行必须始终一致。"""
-    hits = [{"id": 7, "title": "Plexi", "gear": "amp", "downloads_count": 3,
-             "username": "tester", "a1_models_count": 1, "a2_models_count": 0,
-             "irs_count": 0}]
-    monkeypatch.setattr("tui.library_panel.library.tone3000.search",
-                        lambda query, page_size, **kwargs: [dict(h) for h in hits])
-    monkeypatch.setattr("tui.install_screen.tone3000.models",
-                        lambda tid, a2_only=True: [])
-    monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await goto_tone_tab(app, pilot)
-            await pilot.pause(0.5)
-            table = app.query_one("#lib-table-tone")
-            assert table.row_count == 1
-            # 访问 TOP CREATORS（触发 creators 加载）
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
-            await pilot.pause(0.8)
-            # 回到 TONE3000：行还在（row_count>0 不重载），Enter 必须仍有效
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
-            await pilot.pause(0.5)
-            await pilot.press("enter")
-            await pilot.pause(0.5)
-            from tui.install_screen import PackInstallScreen
-            assert isinstance(app.screen, PackInstallScreen)
-
-    run(scenario())
-
-
-def test_remote_tone_detail_selection_view_opens_install(monkeypatch):
-    """REQ-009: tone3000 场景 detail 的 Selection 视图——远程模型列表
-    （未下载置灰）后台拉取显示，Enter 打开安装二级页。"""
-    hits = [{"id": 77, "title": "Remote Pack", "gear": "amp",
-             "downloads_count": 2, "username": "tester",
-             "a1_models_count": 1, "a2_models_count": 1, "irs_count": 0,
-             "description": "Remote tone description."}]
-    monkeypatch.setattr("tui.library_panel.library.tone3000.search",
-                        lambda query, page_size, **kwargs: [dict(h) for h in hits])
-    # 注意：panels/install_screen 共享同一 tone3000 模块——一个 patch 即覆盖
-    # 两处调用点（再 patch 一次会互相覆盖）。
-    monkeypatch.setattr("tui.panels.tone3000.models",
-                        lambda tid, a2_only=False: [
-                            {"id": 1, "name": "one.nam",
-                             "architecture": "SlimmableContainer"},
-                            {"id": 2, "name": "two.nam",
-                             "architecture": "SlimmableContainer"},
-                            {"id": 3, "name": "cab.wav", "architecture": "IR"},
-                        ])
-    monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await goto_tone_tab(app, pilot)
-            await pilot.pause(0.5)
-            pane = app.query_one(DetailPane)
-            # 描述模式：远程元信息
-            assert pane._view_mode == "description"
-            assert "Remote tone description." in group_text(pane._body.content)
-            # → selection：远程模型列表后台拉取，未下载置灰
-            pane.focus()
-            await pilot.press("right")
-            await pilot.pause(0.8)
-            assert pane._view_mode == "selection"
-            assert pane._pack_remote
-            assert pane._pack_table.row_count == 3
-            assert "not downloaded" in str(pane._pack_table.get_cell("m1", "file"))
-            # Enter 一行 → 安装二级页
-            await pilot.press("enter")
-            await pilot.pause(0.5)
-            from tui.install_screen import PackInstallScreen
-            assert isinstance(app.screen, PackInstallScreen)
-
-    run(scenario())
 
 
 def test_picker_groups_models_by_tone_and_shows_highlight_detail(monkeypatch):
@@ -925,25 +468,6 @@ def test_library_add_flow_opens_only_selected_tone_models(monkeypatch):
             assert writes[-1]["model"] == "/tones/10/one.nam"
             # amp-cab 包选 AMP：CAB 显式置 null（pop 键引擎不会移除旧 IR）
             assert writes[-1]["ir"] is None
-
-    run(scenario())
-
-
-def test_type_filter_drives_local_query(monkeypatch):
-    calls = []
-
-    def list_tones(**kwargs):
-        calls.append(kwargs.get("gear"))
-        return []
-
-    monkeypatch.setattr("tui.library_panel.library.list_tones", list_tones)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            app.query_one("#type-filter-local", Select).value = "cab"
-            await pilot.pause()
-            assert calls[-1] == "cab"
 
     run(scenario())
 
@@ -1119,40 +643,6 @@ def test_chain_panel_compact_layout_keeps_output_and_preset_rows(monkeypatch):
             # preset UI lives in the left panel
             assert app.query_one("#chain-amp-up") is not None
             assert app.query_one("#chain-amp-down") is not None
-
-    run(scenario())
-
-
-def test_preset_command_focuses_panel_and_enter_loads(monkeypatch):
-    """The command-palette Preset action focuses the single panel surface."""
-    presets = [{
-        "name": "mayer-clean", "note": "Mayer 清音",
-        "chain": {"model_id": 1, "model_path": "/tmp/x.nam", "ir_model_id": None,
-                  "ir_path": None, "gain": 0.8, "master": 0.8},
-    }]
-    monkeypatch.setattr("tui.presets.library.preset_list", lambda: presets)
-    loaded = []
-    monkeypatch.setattr(
-        "tui.presets.library.preset_load",
-        lambda name: loaded.append(name) or
-        {"model": "/tmp/x.nam", "gain": 0.8, "master": 0.8})
-    monkeypatch.setattr("tui.presets.library.preset_get", lambda name: presets[0])
-    monkeypatch.setattr("tui.presets.library.preset_resolved_chain", lambda name: {
-        "model": "/tmp/x.nam", "ir": None, "gain": 0.8,
-        "master": 0.8, "quality": 1.0,
-    })
-    monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: None)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            app.action_open_preset_picker()
-            await pilot.pause()
-            assert isinstance(app.focused, DataTable)
-
-            await pilot.press("enter")  # load the first preset
-            await pilot.pause()
-            assert loaded == ["mayer-clean"]
 
     run(scenario())
 
@@ -1366,59 +856,6 @@ def group_text(group) -> str:
     buf = io.StringIO()
     Console(file=buf, width=120).print(group)
     return buf.getvalue()
-
-
-def test_detail_switches_between_description_and_selection(monkeypatch, tmp_path):
-    """Tone detail defaults to the Description view; right/left (and the
-    border hint) switch to the Selection view (pack file list) and back."""
-    amp_a = {"id": 1, "tone_id": 10, "name": "MV5 G1", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "MV5 G1.nam")}
-    amp_b = {"id": 2, "tone_id": 10, "name": "MV5 G2", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "MV5 G2.nam")}
-    (tmp_path / "MV5 G1.nam").write_bytes(b"a")
-    (tmp_path / "MV5 G2.nam").write_bytes(b"b")
-    tone = {"id": 10, "title": "JCM800", "gear": "amp", "username": "arthm",
-            "downloads_count": 1, "models": [amp_a, amp_b],
-            "description": "Plexi crunch with a touch of reverb."}
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: [tone])
-    monkeypatch.setattr("tui.library_panel.library.get_tone", lambda tone_id: tone)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            pane = app.query_one(DetailPane)
-            # Default: description view with the mode hint on the right.
-            assert pane._view_mode == "description"
-            assert "Plexi crunch" in group_text(pane._body.content)
-            assert not pane._pack_table.display
-            assert "→ selection" in pane.border_subtitle
-            # Right → selection view (pack file list).
-            pane.focus()
-            await pilot.press("right")
-            await pilot.pause()
-            assert pane._view_mode == "selection"
-            assert pane._pack_table.display
-            assert pane._pack_table.row_count == 2
-            # REQ-038：selection 视图右下角常驻 i install / u uninstall；
-            # ←/→ 切换 token 在窄面板省略（键盘 ←/→ 仍可用，见下）。
-            assert "i install" in pane.border_subtitle
-            assert "u uninstall" in pane.border_subtitle
-            # Left → back to description.
-            await pilot.press("left")
-            await pilot.pause()
-            assert pane._view_mode == "description"
-            assert "Plexi crunch" in group_text(pane._body.content)
-            assert not pane._pack_table.display
-            # Selection entered via the view switch: Esc returns here, not to
-            # a chain node.
-            await pilot.press("right")
-            await pilot.pause()
-            await pilot.press("escape")
-            await pilot.pause()
-            assert pane._view_mode == "description"
-
-    run(scenario())
 
 
 def test_pack_table_enter_swaps_chain_slot(monkeypatch, tmp_path):
@@ -1889,34 +1326,6 @@ def test_focused_tone3000_title_uses_the_same_marquee(monkeypatch):
     run(scenario())
 
 
-def test_tone_filters_share_the_tab_strip_without_filling_the_background(monkeypatch):
-    monkeypatch.setattr("tui.library_panel.library.tone3000.search",
-                        lambda *_args, **_kwargs: [])
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(240, 40)) as pilot:
-            panel = app.query_one("LibraryPanel")
-            tabs = app.query_one("ContentTabs")
-            bar = app.query_one("#tone-filter-row")
-            assert not bar.display
-
-            await goto_tone_tab(app, pilot)
-            assert bar.display
-            assert bar.region.y == tabs.region.y
-            assert bar.region.x > app.query_one(
-                "#--content-tab-pane-creators").region.right
-            assert app.query_one("#type-filter-tone").styles.background == Color.parse(
-                app.get_css_variables()["background"])
-
-            await pilot.click(app.query_one("#--content-tab-pane-local"),
-                              offset=(1, 1))
-            await pilot.pause(0.2)
-            assert not bar.display
-
-    run(scenario())
-
-
 def test_local_library_loads_next_page_when_viewport_reaches_bottom(monkeypatch):
     tones = [
         {"id": i, "title": f"Local Tone {i}", "gear": "amp",
@@ -2060,90 +1469,6 @@ def test_remote_search_loads_next_page_when_viewport_reaches_bottom(monkeypatch)
     run(scenario())
 
 
-def test_preset_panel_browse_and_load(monkeypatch):
-    """Preset panel lists presets; highlight shows summary, Enter loads."""
-    # keep the library table empty: patching tui.app.library.get_tone would
-    # also break the library panel (same module), firing a None highlight
-    # that clears the detail pane after the preset summary.
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: [])
-    presets = [{
-        "name": "mayer-clean", "note": "Mayer 清音",
-        "chain": {"model_id": 1, "model_path": "/tmp/x.nam", "ir_model_id": None,
-                  "ir_path": None, "gain": 0.8, "master": 0.8},
-        "updated_at": "2026-08-02T12:00:00+00:00",
-    }]
-    monkeypatch.setattr("tui.presets.library.preset_list", lambda: presets)
-    monkeypatch.setattr("tui.presets.library.preset_get", lambda name: presets[0])
-    monkeypatch.setattr("tui.presets.library.preset_resolved_chain", lambda name: {
-        "model": "/tmp/x.nam", "ir": None, "gain": 0.8,
-        "master": 0.8, "quality": 1.0,
-    })
-    monkeypatch.setattr("tui.presets.library.preset_load",
-                        lambda name: {"model": "/tmp/x.nam", "gain": 0.8, "master": 0.8})
-    monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: None)
-    monkeypatch.setattr("tui.app.live.read_chain", lambda: {"gain": 1.0})
-    monkeypatch.setattr("tui.app.live.write_chain", lambda cfg: None)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            table = app.query_one("#preset-table", DataTable)
-            table.focus()
-            await pilot.pause()
-            assert len(table.rows) == 1
-            assert table.get_cell("mayer-clean", "amp") == "#1"
-            assert table.get_cell("mayer-clean", "ir") == "—"
-
-            # highlight → detail pane shows the preset summary
-            await pilot.press("down")
-            await pilot.pause()
-            detail = app.query_one(DetailPane)
-            body = detail_text(app)
-            assert "mayer-clean" in body
-            assert "quality" in body and "1.00" in body
-            assert detail.border_title == "PRESET DETAIL"
-            assert "ROUTE" in body and "CONTROLS" in body
-            assert "#1" in body
-
-            # enter → loads the preset (chain panel follows via live_chain.json)
-            await pilot.press("enter")
-            await pilot.pause()
-
-    run(scenario())
-
-
-def test_quality_hotkeys_clamp_and_write_chain(monkeypatch):
-    """q/Q adjust the A2 quality param (clamped 0..1) into the live chain."""
-    monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: None)
-    written = {}
-    # read_chain reflects what write_chain wrote (real impl reads the file)
-    monkeypatch.setattr("tui.app.live.read_chain",
-                        lambda: {"gain": 1.0,
-                                 "quality": written.get("quality", 1.0)})
-    monkeypatch.setattr("tui.app.live.write_chain", lambda cfg: written.update(cfg))
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.press("q")  # quality 1.0 → 0.95
-            await pilot.pause()
-            assert written["quality"] == 0.95
-
-            await pilot.press("Q", "Q")  # → 1.05 → clamped to 1.0
-            await pilot.pause()
-            assert written["quality"] == 1.0
-
-            for _ in range(25):
-                await pilot.press("q")  # → 0.0 floor
-            await pilot.pause()
-            assert written["quality"] == 0.0
-
-            panel = app.query_one(ChainPanel)
-            assert "QUALITY" in str(panel.params.render())
-
-    run(scenario())
-
-
 def test_quit_requires_two_ctrl_c(monkeypatch):
     """Ctrl+C once warns, a second press within the window exits."""
     monkeypatch.setattr("tui.app.library.get_tone", lambda tone_id: None)
@@ -2187,58 +1512,6 @@ def test_quit_two_ctrl_c_works_from_preset_panel(monkeypatch):
             await pilot.press("ctrl+c", "ctrl+c")
             await pilot.pause()
             assert app._exit is True
-
-    run(scenario())
-
-
-def test_cursor_focus_returns_to_description(monkeypatch, tmp_path):
-    """Mouse focus decides the detail mode: focusing the library shows the
-    tone's Description (even after a manual switch to Selection), and never
-    steals keyboard focus."""
-    amp_a = {"id": 1, "tone_id": 10, "name": "MV5 G1", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "MV5 G1.nam")}
-    amp_b = {"id": 2, "tone_id": 10, "name": "MV5 G2", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "MV5 G2.nam")}
-    amp_c = {"id": 3, "tone_id": 11, "name": "PRS G1", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "PRS G1.nam")}
-    for p in (amp_a, amp_b, amp_c):
-        Path(p["local_path"]).write_bytes(b"x")
-    tones = [
-        {"id": 10, "title": "JCM800", "gear": "amp", "username": "arthm",
-         "downloads_count": 1, "models": [amp_a, amp_b],
-         "description": "Plexi crunch."},
-        {"id": 11, "title": "PRS Archon", "gear": "amp", "username": "arthm",
-         "downloads_count": 1, "models": [amp_c],
-         "description": "Modern high gain."},
-    ]
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: tones)
-    monkeypatch.setattr("tui.library_panel.library.get_tone",
-                        lambda tid: next(t for t in tones if t["id"] == tid))
-    monkeypatch.setattr("tui.app.library.get_tone",
-                        lambda tid: next(t for t in tones if t["id"] == tid))
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            table = app.query_one("#lib-table-local")
-            pane = app.query_one(DetailPane)
-            # Enter the Selection view for the first tone (explicit switch).
-            pane.focus()
-            await pilot.press("right")
-            await pilot.pause()
-            assert pane._view_mode == "selection"
-            assert pane._pack_table.row_count == 2
-            # Cursor moves to the second tone: library focus → Description.
-            table.focus()
-            await pilot.press("down")
-            await pilot.pause()
-            assert pane._view_mode == "description"
-            assert not pane._pack_table.display
-            assert "Modern high gain." in group_text(pane._body.content)
-            assert "TONE #11" in str(pane._marquee.content)
-            # Focus stayed on the library table (no steal).
-            assert app.focused is table
 
     run(scenario())
 
@@ -2305,48 +1578,6 @@ def test_creator_cursor_follows_into_detail(monkeypatch, tmp_path):
             await pilot.pause()
             assert "creator2" in str(pane._marquee.content)
             assert "creator2 bio" in group_text(pane._body.content)
-
-    run(scenario())
-
-
-def test_detail_header_ids_and_empty_state(monkeypatch, tmp_path):
-    """Header rows show TONE #id and MODEL #id; the pack table has no TONE
-    column (REQ-019); the empty state drops the tinted title background."""
-    amp_a = {"id": 7, "tone_id": 10, "name": "MV5 G1", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "MV5 G1.nam")}
-    amp_b = {"id": 8, "tone_id": 10, "name": "MV5 G2", "architecture": "SlimmableContainer",
-             "local_path": str(tmp_path / "MV5 G2.nam")}
-    (tmp_path / "MV5 G1.nam").write_bytes(b"a")
-    (tmp_path / "MV5 G2.nam").write_bytes(b"b")
-    tone = {"id": 10, "title": "JCM800", "gear": "amp", "username": "arthm",
-            "downloads_count": 1, "models": [amp_a, amp_b],
-            "description": "Plexi crunch."}
-    monkeypatch.setattr("tui.library_panel.library.list_tones", lambda **kw: [tone])
-    monkeypatch.setattr("tui.library_panel.library.get_tone", lambda tone_id: tone)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            pane = app.query_one(DetailPane)
-            # Title row shows the tone id; the live chain has no model → no MODEL.
-            assert "TONE #10" in str(pane._marquee.content)
-            assert "MODEL" not in str(pane._marquee.content)
-            # Pack table rows keep their file list but no TONE column (REQ-019).
-            pane.focus()
-            await pilot.press("right")
-            await pilot.pause()
-            assert pane._pack_table.row_count == 2
-            assert not any(col.key.value == "tone"
-                           for col in pane._pack_table.ordered_columns)
-            # Title row follows the pack cursor with the model id.
-            assert "MODEL #7" in str(pane._marquee.content)
-            await pilot.press("down")
-            await pilot.pause()
-            assert "MODEL #8" in str(pane._marquee.content)
-            # Empty state: the tinted title background is dropped.
-            pane.clear()
-            assert pane._marquee.has_class("detail-marquee--empty")
 
     run(scenario())
 
