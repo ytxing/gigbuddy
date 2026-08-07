@@ -47,7 +47,7 @@ def test_chain_params_is_single_focus_stop_without_overlays(
             await pilot.pause()
             assert app.focused is params
 
-            # Inspect the composed screen row: 1-space separators, three
+            # Inspect the composed screen row: 3-space separators, three
             # parameters, no overlay duplicate (GGAIN/MMASTER/QQUALITY were
             # the old overlay misalignment).
             screen_row = app.screen._compositor.render_strips()[
@@ -55,7 +55,7 @@ def test_chain_params_is_single_focus_stop_without_overlays(
             visible = screen_row[
                 params.content_region.x:params.content_region.right]
             assert visible.startswith(
-                "GAIN   1.00 g · G MASTER   1.00 m · M "
+                "GAIN   1.00 g · G   MASTER   1.00 m · M   "
                 "QUALITY   1.00 q · Q")
             assert all(
                 duplicate not in visible

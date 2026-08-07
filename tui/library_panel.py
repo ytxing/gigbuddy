@@ -160,6 +160,9 @@ class LibraryTable(ClickSelectTable):
         self._marquee_original_cell = None
         self._marquee_offset = 0
         self._marquee_timer = None
+        # Title 列可用内容宽（不含两侧 padding）。随表格宽度自适应：
+        # 窄表格压缩列宽，让 _clip 的 … 与 marquee 尾部始终可见。
+        self._title_cell_limit = 54
 
     def clear(self, columns: bool = False):
         self._clear_title_marquee()
@@ -167,6 +170,35 @@ class LibraryTable(ClickSelectTable):
 
     def on_blur(self, event) -> None:
         self._clear_title_marquee()
+
+    def _fit_title_column(self) -> None:
+        """Resize the Title column to the table's usable width (bounded).
+
+        The other columns keep their declared widths and scroll out of view on
+        narrow panes; the Title column must not overflow the table, otherwise
+        its trailing ellipsis and the marquee tail get cropped by the renderer.
+        """
+        title = next((c for c in self.ordered_columns
+                      if c.key.value == "title"), None)
+        if title is None:
+            return
+        inner = max(self.content_region.width - 2 * self.cell_padding, 1)
+        limit = max(min(inner, 54), 20)
+        if limit == self._title_cell_limit:
+            return
+        self._title_cell_limit = limit
+        title.width = limit
+        self._require_update_dimensions = True
+        panel = self.screen.query_one(LibraryPanel)
+        for row in self.ordered_rows:
+            tone = panel._tone_for_key(row.key.value)
+            if tone:
+                cells = panel._row_cells(tone, table=self)
+                self.update_cell(row.key, "title", cells[0], update_width=False)
+        self.refresh()
+
+    def on_resize(self, event) -> None:
+        self._fit_title_column()
 
     def _stop_title_timer(self) -> None:
         if self._marquee_timer is not None:
@@ -198,8 +230,11 @@ class LibraryTable(ClickSelectTable):
              if column.key.value == "title"),
             None,
         )
-        return max(column.content_width if column is not None else 0,
-                   TITLE_CELL_LIMIT)
+        # 窗口宽 = min(内容宽, 列可用宽)，至少 TITLE_CELL_LIMIT（除非列更窄）：
+        # 列随表格缩放变窄时，marquee 窗口同步收缩，尾部不会被渲染裁剪。
+        limit = getattr(self, "_title_cell_limit", TITLE_CELL_LIMIT)
+        return min(max(column.content_width if column is not None else 0,
+                       TITLE_CELL_LIMIT), limit)
 
     @staticmethod
     def _title_scroll_parts(tone: dict) -> tuple[str, str | None, str]:
@@ -435,7 +470,9 @@ class LibraryPanel(Vertical):
             table.add_column("Sel", key="pick", width=5)
         if rank:
             table.add_column("Rank", key="rank", width=5)
-        table.add_column("Title", key="title", width=56)
+        # 54 = 表格可用宽 - 2 侧 padding：单元格内容（含 marker）不超过它，
+        # 尾部 … 与 marquee 窗口才不会被列渲染裁剪。
+        table.add_column("Title", key="title", width=54)
         table.add_column("Type", key="type")
         table.add_column("Author", key="author")
         table.add_column("DL", key="downloads")
@@ -2390,18 +2427,22 @@ class LibraryPanel(Vertical):
 
     # ---- shared row rendering ---------------------------------------------
 
-    def _row_cells(self, t: dict) -> list[str]:
-        title = _clip(t.get("title") or "")
+    def _row_cells(self, t: dict, table: DataTable | None = None) -> list[str]:
+        title = str(t.get("title") or "")
         matched_model_ids = t.get("matched_model_ids") or ()
         if matched_model_ids:
-            title = f"{title} [dim]· model #{', #'.join(str(i) for i in matched_model_ids)}[/]"
+            title = f"{title} · model #{', #'.join(str(i) for i in matched_model_ids)}"
         state = t.get("download_state")
-        if state == "all":
-            title = f"[bold $success]✓[/] {title}"
-        elif state == "partial":
-            title = f"[bold $warning]◐[/] {title}"
-        elif state == "none":
-            title = f"[dim]○[/] {title}"
+        marker_plain = {"all": "✓ ", "partial": "◐ ", "none": "○ "}.get(state, "")
+        # 先拼完整标题（含 model 后缀）再截断，marker 宽度一并计入：
+        # 总宽不超过列宽，尾部 … 与后缀不会被表格渲染裁剪掉。列宽随表格
+        # 缩放自适应（LibraryTable._title_cell_limit），此处同步使用。
+        limit = getattr(table or self._table(), "_title_cell_limit", 54)
+        title = _clip(title, max(limit - cell_len(marker_plain), 1))
+        marker_markup = {"all": "[bold $success]✓[/] ",
+                         "partial": "[bold $warning]◐[/] ",
+                         "none": "[dim]○[/] "}.get(state, "")
+        title = f"{marker_markup}{escape(title)}"
         # Files is the complete model set; the Arch column above explains its
         # A1/A2/Custom/IR composition instead of hiding non-A2 files.
         total = t.get("models_count") or t.get("a2_models_count") or 0

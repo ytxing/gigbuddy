@@ -566,7 +566,7 @@ class ChainParams(Static):
         for index, (label, value, hint, decrease, increase) in enumerate(
                 self._controls):
             if index:
-                offset += 1
+                offset += 3
             prefix = f"{label}  {value} "
             value_start = offset + len(label) + 2
             self._value_spans.append((index, value_start, value_start + len(value)))
@@ -622,7 +622,7 @@ class ChainParams(Static):
         parts: list[str] = []
         for index in range(len(self._controls)):
             if index:
-                parts.append(" ")
+                parts.append("   ")
             parts.append(self._parameter_markup(index, hovered))
         self.update("".join(parts))
 

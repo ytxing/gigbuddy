@@ -58,6 +58,13 @@ def _canonical_tone(row: dict) -> dict:
         return row
     if row.get("format") in (None, "") and row.get("platform") not in (None, ""):
         row["format"] = row["platform"]
+    # 标签/设备名语义上是无序集合，两条 API 路径（search RPC 聚合 vs
+    # tone_by_id 的 in 查询）返回顺序不同——统一按名称排序，让详情
+    # 异步刷新前后的顺序恒定一致。
+    for key in ("tags", "makes"):
+        value = row.get(key)
+        if isinstance(value, list):
+            row[key] = sorted(value, key=str)
     return row
 
 
