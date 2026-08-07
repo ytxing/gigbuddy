@@ -622,9 +622,9 @@ make_nam(const std::string& path, NeuralAudio::NeuralModelLoader& loader,
         return nullptr;
     }
     try {
-        // Pass a canonical lowercase extension so .NAM remains supported even
-        // though NeuralAudio's loader compares the extension literally.
-        auto* raw = loader.CreateFromStream(stream, std::filesystem::path("model.nam"));
+        // NeuralAudio compares this argument with the extension token `.nam`,
+        // not with a filename such as `model.nam`.
+        auto* raw = loader.CreateFromStream(stream, std::filesystem::path(".nam"));
         if (!raw) {
             error = "NAM loader rejected the file";
             return nullptr;
@@ -814,8 +814,19 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
         return false;
     }
     if (matchesPreflight) {
-        next = std::move(ctx.managedPreparedChain);
-        ctx.managedPreparedTransactionId.clear();
+        if (chainChanged) {
+            next = std::move(ctx.managedPreparedChain);
+            ctx.managedPreparedTransactionId.clear();
+        } else {
+            // 参数/revision-only 更新：链结构（signature）未变时复用当前运行
+            // 节点，避免换入全新模型实例产生 DSP 状态归零的可闻咔哒（v0.1.1
+            // 语义，与下方参数-only else 分支同一路径）。预加载链作废。
+            ctx.managedPreparedChain.reset();
+            ctx.managedPreparedTransactionId.clear();
+            next = std::make_shared<PreparedChain>(*current);
+            next->quality = quality;
+            next->revision = revision;
+        }
     } else if (chainChanged) {
         if (!build_prepared_chain(slots, quality, revision, loader,
                                   sr, next, error)) {

@@ -1,5 +1,7 @@
 # 构建产物与运行时数据
-bin/
+bin/*
+!bin/
+!bin/gigbuddy
 data/
 __pycache__/
 *.pyc

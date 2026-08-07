@@ -403,6 +403,15 @@ class ChainState:
             operation_id=deleted.operation_id,
         )
 
+    def clear_slots(self) -> int:
+        """Remove every Slot and clear the process-local target context."""
+        count = len(self._slots)
+        if count:
+            self._mark_local_mutation()
+            self._slots.clear()
+        self._target = None
+        return count
+
     def move_slot(self, index: int, direction: int) -> bool:
         """Swap one item with its immediate neighbour.
 

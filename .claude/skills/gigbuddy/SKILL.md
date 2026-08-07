@@ -16,6 +16,7 @@ bin/gigbuddy tone list [--gear ...] [--query ...] [--limit N]
 bin/gigbuddy tone show <id> [--json] # full metadata incl. description (local library)
 bin/gigbuddy chain get / set '<json>'   # data/live_chain.json (engine hot-swaps, UI follows)
 bin/gigbuddy preset list [--json]    # named chain snapshots (manage below)
+bin/gigbuddy preset bootstrap       # download starter models and seed catalog
 bin/gigbuddy preset save <name> [--note "..."]   # snapshot the CURRENT live chain
 bin/gigbuddy preset load <name>      # apply a preset to the live chain
 bin/gigbuddy preset show <name> [--json] | preset current | preset rename <old> <new>
@@ -66,8 +67,9 @@ bin/gigbuddy preset delete <name>
    ```bash
    python3 src/render.py <chain.json> <dry.wav> <out.wav>
    ```
-   Default dry input is `data/dry_nam_input.wav` (NAM official MIT asset); if absent,
-   ask the user or synthesize with `scripts/gen_test_wav.py`.
+   Use an installed file under `data/dry_inputs/`, for example
+   `data/dry_inputs/Mayer - Guitar.wav`; if no downloaded file is available,
+   synthesize `data/dry_inputs/dry-test.wav` with `scripts/gen_test_wav.py`.
 
 7. **Report**: chain JSON, local file paths, confidence annotations
    (confirmed = from real search/import output).

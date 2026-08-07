@@ -218,7 +218,7 @@ def test_edit_coexists_with_click_and_long_press(monkeypatch, tmp_path):
             params = panel.params
             G_x = params._spans[1][1] + 1  # G token
 
-            # 编辑应用后：单击 token 仍使用 gain 的 0.1 基础步长
+            # 编辑应用后：单击 token 使用 gain 的 0.05 鼠标步长
             await pilot.click(params, offset=(value_x(params, 0), 0))
             await pilot.pause(0.1)
             await clear_and_type(pilot, params, "0.55")
@@ -226,7 +226,7 @@ def test_edit_coexists_with_click_and_long_press(monkeypatch, tmp_path):
             await pilot.pause(0.2)
             await pilot.click(params, offset=(G_x, 0))
             await pilot.pause(0.2)
-            assert writes[-1]["gain"] == 0.65, writes[-1]
+            assert writes[-1]["gain"] == 0.60, writes[-1]
 
             # 编辑态中点击 token：取消编辑，不步进
             await pilot.click(params, offset=(value_x(params, 0), 0))
@@ -236,7 +236,7 @@ def test_edit_coexists_with_click_and_long_press(monkeypatch, tmp_path):
             await pilot.click(params, offset=(G_x, 0))
             await pilot.pause(0.2)
             assert len(writes) == n, "编辑态点击不得步进"
-            assert state["chain"]["gain"] == 0.65
+            assert state["chain"]["gain"] == 0.60
 
     run(scenario())
 

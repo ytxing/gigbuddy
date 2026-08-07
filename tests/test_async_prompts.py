@@ -67,7 +67,9 @@ def test_status_row_fits_auto_width_column_on_narrow_pane(monkeypatch, tmp_path)
         # library panel is narrow enough to exercise the auto-width row.
         async with app.run_test(size=(80, 32)) as pilot:
             await pilot.pause(0.3)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            # v0.2 的 tab 切换权威是 ViewTabStrip；ContentTabs 已被移出
+            # 焦点循环，click 不再切换 active pane。
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(0.5)  # load still in flight
             table = app.query_one("#lib-table-creators", DataTable)
             rendered = _rendered_lines(table)
@@ -89,23 +91,24 @@ def test_tone_subtitle_loading_shows_complete_word():
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
             panel = app.query_one(LibraryPanel)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            panel.activate_view_tab("pane-tone")
             await pilot.pause(0.2)
             panel._remote_tones = {}
             panel._tone_total = None
             panel._tone_has_more = False
             panel._update_tone_subtitle(loading=True)
             assert panel.border_subtitle.startswith("loading…")
-            assert panel.border_subtitle.rstrip().endswith("enter detail")
+            assert " ".join(panel.border_subtitle.split()) == (
+                "loading… · enter detail · [ / ] select tab")
             # The non-loading state keeps the informative form.
             # REQ-038：enter 打开二级菜单详情页，提示使用 enter detail。
             panel._update_tone_subtitle()
             assert " ".join(panel.border_subtitle.split()) == (
-                "0 · all loaded · enter detail")
+                "0 · all loaded · enter detail · [ / ] select tab")
             panel._tone_has_more = True
             panel._update_tone_subtitle()
             assert " ".join(panel.border_subtitle.split()) == (
-                "0 · ↓ more · enter detail")
+                "0 · ↓ more · enter detail · [ / ] select tab")
     run(scenario())
 
 
@@ -115,16 +118,17 @@ def test_creator_subtitle_loading_shows_complete_word():
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
             panel = app.query_one(LibraryPanel)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            panel.activate_view_tab("pane-creators")
             await pilot.pause(0.2)
             panel._creator_tones = {}
             panel._update_creator_subtitle(loading=True)
             assert panel.border_subtitle.startswith("loading…")
-            assert panel.border_subtitle.rstrip().endswith("enter search")
+            assert " ".join(panel.border_subtitle.split()) == (
+                "loading… · enter search · [ / ] select tab")
             panel._creator_has_more = True
             panel._update_creator_subtitle()
             assert " ".join(panel.border_subtitle.split()) == (
-                "0 · ↓ more · enter search")
+                "0 · ↓ more · enter search · [ / ] select tab")
     run(scenario())
 
 

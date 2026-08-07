@@ -7,7 +7,7 @@ REQ-011：搜索/换排序/刷新等"操作一下"后，detail 不得清成空�
 """
 import asyncio
 
-from textual.widgets import DataTable
+from textual.widgets import DataTable, TabPane
 
 from tui.app import GigBuddyApp
 from tui.library_panel import LibraryPanel
@@ -53,33 +53,49 @@ def _detail_empty(app) -> bool:
 
 
 def test_tone3000_highlight_drives_detail_and_enter(monkeypatch):
-    """TONE3000 行高亮 → detail 显示该行 tone；Enter 开远程详情。"""
+    """TONE3000 行高亮 → detail 显示该行 tone；Enter 开远程 PACK。"""
     hits = _hits()
     monkeypatch.setattr("tui.library_panel.library.tone3000.search",
                         lambda query, page_size, **kwargs: [dict(h) for h in hits])
     monkeypatch.setattr("tui.library_panel.library.tone3000.top_favorites",
                         lambda n: [dict(h) for h in hits])
+    monkeypatch.setattr(
+        "tui.panels.tone3000.models",
+        lambda tone_id, a2_only=False: [{
+            "id": 9101,
+            "tone_id": tone_id,
+            "name": "Remote 1.nam",
+            "architecture": "SlimmableContainer",
+        }])
     monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
+    notifications = []
+    monkeypatch.setattr(
+        "tui.app.GigBuddyApp.notify",
+        lambda self, message, **_kwargs: notifications.append(str(message)),
+    )
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(1.0)
             assert "Remote 0" in _detail_text(app)
             # ↓ 光标 → detail 跟随
             await pilot.press("down")
             await pilot.pause()
             assert "Remote 1" in _detail_text(app)
-            # v0.2.14: Enter first opens Remote Description; an uninstalled
-            # model row in Remote Pack is the Pack Install entry point.
+            # Library Enter opens the remote PACK and attempts its first model.
             await pilot.press("enter")
-            await pilot.pause(0.5)
+            await pilot.pause(0.8)
             pane = app.query_one(DetailPane)
             assert app.screen.id == "_default"
-            assert pane._view_mode == "description"
+            assert pane._view_mode == "selection"
+            assert pane._pack_mode
             assert pane._description_remote
+            assert pane._pack_remote
+            assert "m9101" in pane._pack_rows
+            assert any("not downloaded" in message for message in notifications)
 
     run(scenario())
 
@@ -92,13 +108,27 @@ def test_sort_roundtrip_keeps_detail_and_enter(monkeypatch):
                         lambda query, page_size, **kwargs: [dict(h) for h in hits])
     monkeypatch.setattr("tui.library_panel.library.tone3000.top_favorites",
                         lambda n: [dict(h) for h in hits])
+    monkeypatch.setattr(
+        "tui.panels.tone3000.models",
+        lambda tone_id, a2_only=False: [{
+            "id": 9201,
+            "tone_id": tone_id,
+            "name": "Remote.nam",
+            "architecture": "SlimmableContainer",
+        }])
     monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
+    # 详情异步合并（tone_by_id）会真实请求网络并覆盖 mock 标题，导致
+    # "Remote 0" 断言偶发失败：返回与搜索行一致的详情，稳定 title。
+    monkeypatch.setattr(
+        "library.tone3000.tone_by_id",
+        lambda tid, with_models=False: {
+            **hits[tid - 100], "tags": [], "makes": []})
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(1.0)
             sort_select = app.query_one("#sort-filter")
             # 切 favorites（新鲜加载）
@@ -114,7 +144,7 @@ def test_sort_roundtrip_keeps_detail_and_enter(monkeypatch):
             await pilot.pause(0.5)
             pane = app.query_one(DetailPane)
             assert app.screen.id == "_default"
-            assert pane._view_mode == "description"
+            assert pane._view_mode == "selection"
             assert pane._description_remote
 
     run(scenario())
@@ -138,7 +168,7 @@ def test_search_keeps_detail_until_results_land(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(1.0)
             assert "Remote 0" in _detail_text(app)
             # 发起新搜索，在落定前检查：detail 不清空
@@ -175,7 +205,7 @@ def test_status_row_enter_retries_failed_search(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(1.0)
             table = app.query_one("#lib-table-tone", DataTable)
             assert table.ordered_rows[0].key.value == "__status__", \
@@ -207,7 +237,7 @@ def test_creators_row_shows_remote_real_count(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.5)
             table = app.query_one("#lib-table-creators")
             assert table.get_cell("creator:tester", "tones") == "48"
@@ -216,9 +246,9 @@ def test_creators_row_shows_remote_real_count(monkeypatch):
             assert table.get_cell("creator:tester", "favorites") == "9"
             assert table.get_cell("creator:tester", "models") == "70"
             # Cache restore must keep the same official values.
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(1.0)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             assert table.get_cell("creator:tester", "tones") == "48"
 
@@ -249,7 +279,7 @@ def test_creators_sort_select_reorders(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.5)
             # SORT 条在 creators tab 显示，默认 Most Tones
             bar = app.query_one("#creators-search-bar")
@@ -301,7 +331,7 @@ def test_creator_bio_normalized_for_banner(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             pane = app.query_one(DetailPane)
             # REQ-030 聚焦视图：无第二行摘要（bio 在正文多行保留换行）
@@ -336,7 +366,7 @@ def test_creator_values_do_not_change_after_render(monkeypatch):
             app = GigBuddyApp(spawn_engine=False)
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause(0.5)
-                await pilot.click(app.query_one("#--content-tab-pane-creators"))
+                app.query_one(LibraryPanel).activate_view_tab("pane-creators")
                 await pilot.pause(0.5)
                 table = app.query_one("#lib-table-creators")
                 before = tuple(table.get_cell("creator:alice", key) for key in
@@ -374,7 +404,7 @@ def test_creator_search_bar_docks_properly(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             bar = app.query_one("#creators-search-bar")
             # SearchBar 是固定一行，不占大块空白、不挤压标签栏。
@@ -382,10 +412,15 @@ def test_creator_search_bar_docks_properly(monkeypatch):
             assert bar.display
             select = app.query_one("#sort-filter-creators")
             assert select.display
-            # 其他 tab 时该条隐藏（不串场）
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            # 其他 tab 时该条隐藏（不串场）。v0.2 里 SearchBar.display
+            # 恒 True，可见性由所属 TabPane 控制（非 active 的 pane
+            # display:none，子控件 region 归零）。
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(1.0)
-            assert not bar.display
+            pane = next(a for a in bar.ancestors
+                        if isinstance(a, TabPane))
+            assert not pane.display
+            assert bar.region.width == 0
 
     run(scenario())
 
@@ -421,7 +456,7 @@ def test_creator_enter_jumps_to_author_search(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             table = app.query_one("#lib-table-creators")
             assert table.row_count == 1
@@ -473,7 +508,7 @@ def test_creator_focus_view_bio_in_body_and_verified(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             pane = app.query_one(DetailPane)
             # 无第二行摘要、无 Enter 提示
@@ -539,7 +574,7 @@ def test_creators_row_focus_and_profile_page(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             pane = app.query_one(DetailPane)
             table = app.query_one("#lib-table-creators")
@@ -561,7 +596,7 @@ def test_creators_row_focus_and_profile_page(monkeypatch):
             assert app.query_one("#tone-search").value == "@bob"
             # v0.2.14：view tab 独立保存 anchor，往返后恢复原 cursor
             # （bob），而不是重置到第 0 行。
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             assert app.query_one("#lib-table-creators").cursor_row == 1
             assert "bob" in str(pane._marquee.content)
@@ -587,10 +622,10 @@ def test_creator_sort_select_width_matches_tone3000(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(0.5)
             tone_w = app.query_one("#sort-filter").region.width
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             creator_w = app.query_one("#sort-filter-creators").region.width
             assert creator_w == tone_w, f"creators SORT 宽 {creator_w} != tone {tone_w}"
@@ -620,7 +655,7 @@ def test_creator_load_more_keeps_exact_values_and_cursor(monkeypatch):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.5)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(1.0)
             table = app.query_one("#lib-table-creators")
             assert table.ordered_rows[0].key.value == "creator:alice"

@@ -206,7 +206,7 @@ def test_dot_reset_after_manual_edit_path_consistency(monkeypatch, tmp_path):
             await pilot.pause(0.15)
             await pilot.click(params, offset=(params._spans[1][1] + 1, 0))  # G
             await pilot.pause(0.15)
-            assert writes[-1]["gain"] == 1.1
+            assert writes[-1]["gain"] == 1.5
             await pilot.click(params, offset=(dot_x(params, 0), 0))
             await pilot.pause(0.15)
             assert writes[-1]["gain"] == CHAIN_PARAMETER_DEFAULTS["gain"]

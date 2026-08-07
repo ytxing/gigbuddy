@@ -13,6 +13,7 @@ import time
 from textual.widgets import TabbedContent
 
 import library
+from tui.library_panel import LibraryPanel
 from tui.app import GigBuddyApp
 
 
@@ -53,11 +54,11 @@ def test_slow_tone_load_does_not_yank_back(monkeypatch, tmp_path):
             tabs = app.query_one(TabbedContent)
             # 1. Go to TONE3000; the 0.1s tick sees the switch and starts the
             #    slow reload worker.
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert tabs.active == "pane-tone"
             # 2. Leave for LOCAL while the load is still in flight.
-            await pilot.click(app.query_one("#--content-tab-pane-local"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-local")
             await pilot.pause(0.3)
             # 3. Let the slow search finish. It must not pull the UI back.
             await pilot.pause(1.8)
@@ -90,7 +91,7 @@ def test_slow_load_stays_when_still_on_tone_tab(monkeypatch, tmp_path):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             await pilot.pause(1.8)  # let the load finish in place
             assert app.query_one(TabbedContent).active == "pane-tone"
@@ -133,7 +134,7 @@ def test_creator_load_more_keeps_cursor_and_viewport(monkeypatch, tmp_path):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(0.4)   # tick starts the first page load
             await pilot.pause(0.6)   # first page lands
             table = app.query_one("#lib-table-creators")
@@ -178,7 +179,7 @@ def test_creator_scroll_bottom_preserves_viewport_anchor(monkeypatch, tmp_path):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
             await pilot.pause(0.4)
             await pilot.pause(0.6)   # first page lands
             table = app.query_one("#lib-table-creators")
@@ -192,4 +193,49 @@ def test_creator_scroll_bottom_preserves_viewport_anchor(monkeypatch, tmp_path):
             assert table.row_count == 200
             assert table.scroll_y == old_bottom, "viewport moved during append"
             assert calls["n"] == 2, "append must not recursively load another page"
+    run(scenario())
+
+
+def test_tone_load_more_does_not_restore_stale_cursor(monkeypatch, tmp_path):
+    """A cursor move made while page two is loading must survive the append."""
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
+
+    calls = {"n": 0}
+
+    def paged_search(_query, *, page_number, page_size, **_kwargs):
+        calls["n"] += 1
+        if page_number == 2:
+            time.sleep(1.0)
+        start = (page_number - 1) * page_size
+        return [
+            {"id": start + i, "title": f"Tone {start + i}",
+             "gear": "amp", "downloads_count": i,
+             "username": "tester", "total_count": 80}
+            for i in range(page_size)
+        ]
+
+    monkeypatch.setattr(library.tone3000, "search", paged_search)
+    monkeypatch.setattr("tui.library_panel.library.mark_download_state",
+                        lambda hits: hits)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            panel = app.query_one("LibraryPanel")
+            panel.activate_view_tab("pane-tone")
+            await pilot.pause(0.5)
+            table = app.query_one("#lib-table-tone")
+            table.focus()
+            table.move_cursor(row=35, animate=False)
+            await pilot.pause(0.1)
+            table.move_cursor(row=38, animate=False)
+            await pilot.pause(1.2)
+
+            assert calls["n"] == 2
+            assert table.row_count == 80
+            assert table.ordered_rows[table.cursor_row].key.value == "remote:38"
+
     run(scenario())

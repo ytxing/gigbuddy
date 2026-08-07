@@ -3,13 +3,13 @@
 import asyncio
 
 from rich.text import Text
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Select
 from textual.widgets._data_table import ColumnKey
 
 import library
 from tui.app import GigBuddyApp
 from tui.modals import set_border_hint_hover
-from tui.view_controls import SearchBar, TypeFilterMenu, ViewTabStrip
+from tui.view_controls import SearchBar, ViewTabStrip
 
 
 def run(coro):
@@ -66,19 +66,21 @@ def test_view_tabs_are_one_focus_stop_and_brackets_switch(monkeypatch, tmp_path)
             assert app.focused is strip
             await pilot.press("]")
             await pilot.pause()
-            assert app.query_one("TabbedContent").active == "pane-favorites"
-            await pilot.press("]")
-            await pilot.pause()
             assert app.query_one("TabbedContent").active == "pane-creators"
 
-            await pilot.press("[")
-            await pilot.pause()
-            assert app.query_one("TabbedContent").active == "pane-favorites"
             await pilot.press("[")
             await pilot.pause()
             assert app.query_one("TabbedContent").active == "pane-tone"
 
     run(scenario())
+
+
+def test_view_tab_strip_uses_border_separator_and_underlined_active_tab():
+    strip = ViewTabStrip(
+        "TONE DETAIL", [("description", "DESCRIPTION"), ("selection", "PACK")]
+    )
+
+    assert strip.render().plain == "TONE DETAIL  ──  DESCRIPTION / PACK"
 
 
 def test_searchbar_sort_track_does_not_move_for_long_query(monkeypatch, tmp_path):
@@ -104,7 +106,8 @@ def test_searchbar_sort_track_does_not_move_for_long_query(monkeypatch, tmp_path
                      bar.region.height, sort.region.x, sort.region.width)
             assert after == before
             assert bar.region.height == 1
-            assert sort.region.x + sort.region.width == \
+            type_select = app.query_one("#type-filter-tone-search", Select)
+            assert type_select.region.x + type_select.region.width == \
                 bar.region.x + bar.region.width
 
     run(scenario())
@@ -129,7 +132,7 @@ def test_border_hint_hover_resolves_textual_ansi_theme_colors():
                for span in widget.border_subtitle.spans)
 
 
-def test_type_filter_is_dynamic_and_author_header_is_not_filterable(
+def test_type_filter_is_inline_and_table_headers_are_not_filterable(
         monkeypatch, tmp_path):
     _patch_remote(monkeypatch, tmp_path)
 
@@ -141,35 +144,27 @@ def test_type_filter_is_dynamic_and_author_header_is_not_filterable(
             panel.activate_view_tab("pane-tone")
             await pilot.pause(0.3)
             table = app.query_one("#lib-table-tone", DataTable)
-            menu = app.query_one(TypeFilterMenu)
+            type_select = app.query_one("#type-filter-tone-search", Select)
+
+            assert type_select._options == [
+                ("ALL", "all"), ("AMP", "amp"),
+                ("OUTBOARD", "outboard")]
 
             panel.on_data_table_header_selected(
                 DataTable.HeaderSelected(
                     table, ColumnKey("author"), 8, Text("Author")))
             await pilot.pause()
-            assert not menu.display
+            assert type_select.value == "all"
 
             panel.on_data_table_header_selected(
                 DataTable.HeaderSelected(
                     table, ColumnKey("type"), 3, Text("Type")))
             await pilot.pause()
-            assert menu.display
-            assert menu.target_table_id == "lib-table-tone"
-            assert menu._options == [
-                ("ALL", "all"), ("AMP", "amp"),
-                ("OUTBOARD", "outboard")]
+            assert type_select.value == "all"
 
-            # The active filter must not hide the other types from the next
-            # menu open; switching AMP -> OUTBOARD must be direct.
-            menu.value = "amp"
+            type_select.value = "amp"
             await pilot.pause(0.4)
-            panel.on_data_table_header_selected(
-                DataTable.HeaderSelected(
-                    table, ColumnKey("type"), 3, Text("Type")))
-            await pilot.pause()
-            assert menu._options == [
-                ("ALL", "all"), ("AMP", "amp"),
-                ("OUTBOARD", "outboard")]
+            assert panel._type_filters["pane-tone"] == "amp"
 
     run(scenario())
 

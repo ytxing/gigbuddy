@@ -38,6 +38,55 @@ __version__ = "0.1.0"
 
 ROOT = Path(__file__).resolve().parent.parent
 
+_IR_SUFFIXES = frozenset({".wav", ".wave", ".flac", ".aif", ".aiff"})
+_NAM_SUFFIXES = frozenset({".nam", ".aida-x", ".aa-snapshot", ".proteus"})
+_IR_GEAR_TOKENS = frozenset({"cab", "space", "ir"})
+
+
+def model_is_ir(model: dict | None, tone: dict | None = None) -> bool:
+    """Classify a local/remote model as an IR without trusting one field.
+
+    Older library rows can have a null architecture, while TONE3000 CAB rows
+    often expose no architecture at all.  The file/URL suffix is authoritative
+    when present; the parent tone is the final fallback for architecture-less
+    CAB/IR rows.  WaveNet, SlimmableContainer, and other NAM architectures stay
+    on the AMP side.
+    """
+    model = model if isinstance(model, dict) else {}
+    tone = tone if isinstance(tone, dict) else {}
+    model_format = str(model.get("format") or "").strip().casefold()
+    if model_format:
+        return model_format == "ir"
+
+    architecture = str(
+        model.get("architecture_version") or model.get("architecture") or ""
+    ).strip().casefold()
+    if architecture == "ir":
+        return True
+    canonical_tone_format = str(
+        (tone or {}).get("format") or ""
+    ).strip().casefold()
+    if canonical_tone_format:
+        return canonical_tone_format == "ir"
+    if str((tone or {}).get("platform") or "").strip().casefold() == "ir":
+        return True
+    if architecture in {
+        "1", "2", "custom", "a1", "a2", "wavenet",
+        "wave", "slimmablecontainer",
+    }:
+        return False
+    for key in ("local_path", "name", "model_url", "url"):
+        raw = str(model.get(key) or "").strip()
+        if not raw:
+            continue
+        source = raw.split("?", 1)[0].casefold()
+        suffix = Path(source).suffix
+        if suffix in _IR_SUFFIXES:
+            return True
+        if suffix in _NAM_SUFFIXES:
+            return False
+    return str(tone.get("gear") or "").strip().casefold() in _IR_GEAR_TOKENS
+
 
 def _to_rel_path(path: str) -> str:
     """存储用（REQ-035 portable）：项目根内的路径 → 相对根（data/...）；
@@ -98,7 +147,7 @@ _IMPORT_LOCKS_GUARD = threading.Lock()
 
 # All 23 TONE3000 search fields (minus search-level `total_count`) + 2 local columns.
 TONE_COLUMNS = [
-    "id", "title", "description", "tags", "gear", "makes", "platform",
+    "id", "title", "description", "tags", "gear", "makes", "format", "platform",
     "downloads_count", "favorites_count", "a1_models_count", "a2_models_count",
     "custom_models_count", "username", "avatar_url", "user_id", "images",
     "model_name", "created_at", "updated_at", "published_at",
@@ -115,7 +164,8 @@ CREATE TABLE IF NOT EXISTS tones (
     tags                TEXT,          -- JSON array
     gear                TEXT,
     makes               TEXT,          -- JSON array
-    platform            TEXT,
+    format              TEXT,
+    platform            TEXT,          -- deprecated TONE3000 alias
     downloads_count     INTEGER,
     favorites_count     INTEGER,
     a1_models_count     INTEGER,
@@ -140,7 +190,8 @@ CREATE TABLE IF NOT EXISTS models (
     tone_id      INTEGER NOT NULL REFERENCES tones(id),
     model_url    TEXT,
     name         TEXT,          -- TONE3000 models.name（网页/zip 下载文件名，语义命名）
-    architecture TEXT,
+    architecture TEXT,                -- legacy backend token
+    architecture_version TEXT,        -- canonical TONE3000 architecture
     local_path   TEXT
 );
 CREATE TABLE IF NOT EXISTS presets (
@@ -182,11 +233,20 @@ def connect() -> sqlite3.Connection:
     # CREATE TABLE IF NOT EXISTS does not evolve an existing database. The
     # semantic filename column was added after the first schema, so make that
     # one additive upgrade safe for users with an older local library.
+    tone_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(tones)").fetchall()
+    }
+    if "format" not in tone_columns:
+        conn.execute("ALTER TABLE tones ADD COLUMN format TEXT")
+        conn.commit()
     model_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(models)").fetchall()
     }
     if "name" not in model_columns:
         conn.execute("ALTER TABLE models ADD COLUMN name TEXT")
+        conn.commit()
+    if "architecture_version" not in model_columns:
+        conn.execute("ALTER TABLE models ADD COLUMN architecture_version TEXT")
         conn.commit()
     return conn
 
@@ -238,14 +298,19 @@ def upsert_model(conn: sqlite3.Connection, m: dict, *, commit: bool = True) -> N
     m = dict(m)
     if m.get("local_path"):
         m["local_path"] = _to_rel_path(m["local_path"])
-    sql = ("INSERT INTO models (id, tone_id, model_url, name, architecture, local_path) "
-           "VALUES (:id, :tone_id, :model_url, :name, :architecture, :local_path) "
+    sql = ("INSERT INTO models (id, tone_id, model_url, name, architecture, "
+           "architecture_version, local_path) "
+           "VALUES (:id, :tone_id, :model_url, :name, :architecture, "
+           ":architecture_version, :local_path) "
            "ON CONFLICT(id) DO UPDATE SET tone_id=excluded.tone_id, "
            "model_url=excluded.model_url, name=excluded.name, "
-           "architecture=excluded.architecture, local_path=excluded.local_path")
+           "architecture=excluded.architecture, "
+           "architecture_version=excluded.architecture_version, "
+           "local_path=excluded.local_path")
     # Keep direct/older callers source-compatible while the name column is
     # optional for records created before TONE3000 exposed semantic filenames.
-    params = {**m, "name": m.get("name")}
+    params = {**m, "name": m.get("name"),
+              "architecture_version": m.get("architecture_version")}
     conn.execute(sql, params)
     if commit:
         conn.commit()
@@ -260,7 +325,7 @@ def list_tones(gear: str | None = None, limit: int | None = None,
                tags: Sequence[str] | None = None,
                makes: Sequence[str] | None = None,
                model_ids: Sequence[int] | None = None,
-               offset: int = 0) -> list[dict]:
+               offset: int = 0, sort_by: str = "downloads") -> list[dict]:
     """List library tones. has_files=True keeps only tones with downloaded files
     (metadata-only rows don't count as "local" — the UI treats them as remote)."""
     author_values = list(authors or ())
@@ -278,8 +343,17 @@ def list_tones(gear: str | None = None, limit: int | None = None,
             where.append("EXISTS (SELECT 1 FROM models m "
                          "WHERE m.tone_id = tones.id AND m.local_path IS NOT NULL)")
         if gear:
-            where.append("gear = ?")
-            args.append(gear)
+            gear_token = str(gear).strip().casefold()
+            if gear_token == "full-rig":
+                gear_token = "amp-cab"
+            if gear_token == "ir":
+                where.append(
+                    "(LOWER(COALESCE(format, platform, '')) = 'ir' OR "
+                    "(gear IN ('cab', 'space', 'ir') AND "
+                    "COALESCE(format, platform) IS NULL))")
+            else:
+                where.append("gear = ?")
+                args.append(gear_token)
         if author_values:
             marks = ",".join("?" for _ in author_values)
             where.append(f"username IN ({marks})")
@@ -306,7 +380,13 @@ def list_tones(gear: str | None = None, limit: int | None = None,
             args += [pat, pat, pat]
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY downloads_count DESC"
+        order_by = {
+            "title": "LOWER(COALESCE(title, '')) ASC, id ASC",
+            "added-desc": "COALESCE(imported_at, '') DESC, id DESC",
+            "added-asc": "COALESCE(imported_at, '') ASC, id ASC",
+            "downloads": "downloads_count DESC",
+        }.get(str(sort_by), "downloads_count DESC")
+        sql += f" ORDER BY {order_by}"
         if limit:
             sql += " LIMIT ?"
             args.append(limit)
@@ -322,21 +402,43 @@ def list_tones(gear: str | None = None, limit: int | None = None,
 def list_local_models(kind: str = "amp", limit: int = 2000) -> list[dict]:
     """Downloaded model files with metadata (for pickers).
 
-    kind="amp" → non-IR models (.nam); kind="ir" → IR wavs. The kind filter is
-    applied in SQL *before* the LIMIT — filtering afterwards would silently
-    drop whole low-download tones (e.g. the Dookie Mod pack) from the picker.
+    kind="amp" → non-IR models (.nam); kind="ir" → IR wavs. Classification is
+    applied before the returned-row limit so architecture-less legacy IR rows
+    cannot consume the AMP page and disappear from the picker.
     """
-    arch = "m.architecture = 'IR'" if kind == "ir" else "m.architecture IS NOT 'IR'"
+    want_ir = kind == "ir"
+    max_rows = max(0, int(limit))
+    if max_rows == 0:
+        return []
     with connect() as conn:
         rows = conn.execute(
             f"SELECT m.id, m.tone_id, m.model_url, m.name, m.architecture, "
+            "m.architecture_version, "
             "m.local_path, t.title, t.username, t.gear, t.description, "
-            "t.tags, t.makes "
+            "t.tags, t.makes, t.format, t.platform "
             "FROM models m JOIN tones t ON t.id = m.tone_id "
-            f"WHERE m.local_path IS NOT NULL AND {arch} "
-            "ORDER BY t.downloads_count DESC, t.id, m.id LIMIT ?",
-            (limit,)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+            "WHERE m.local_path IS NOT NULL "
+            "ORDER BY t.downloads_count DESC, t.id, m.id").fetchall()
+    models = []
+    for row in rows:
+        model = _row_to_dict(row)
+        tone = {key: model.get(key) for key in ("gear", "format", "platform")}
+        classification_model = {
+            key: model.get(key) for key in (
+                "architecture", "architecture_version", "local_path",
+                "name", "model_url", "url")
+        }
+        is_ir = model_is_ir(classification_model, tone)
+        if is_ir != want_ir:
+            continue
+        # A1 (WaveNet) 是废弃架构：AMP picker 不提供旧模型，本地库老数据
+        # 也只算下载状态，不进入浏览/使用路径。
+        if not want_ir and tone3000._is_a1_model(classification_model):
+            continue
+        models.append(model)
+        if len(models) >= max_rows:
+            break
+    return models
 
 
 def get_tone(tone_id: int) -> dict | None:
@@ -345,10 +447,15 @@ def get_tone(tone_id: int) -> dict | None:
         if not row:
             return None
         d = _row_to_dict(row)
-        d["models"] = [
-            _row_to_dict(r)
-            for r in conn.execute("SELECT * FROM models WHERE tone_id = ?", (tone_id,)).fetchall()
-        ]
+        local_models = []
+        for r in conn.execute(
+                "SELECT * FROM models WHERE tone_id = ?",
+                (tone_id,)).fetchall():
+            m = _row_to_dict(r)
+            # A1 架构的产品要求：不浏览、不使用（下载路径同样过滤）。
+            if not tone3000._is_a1_model(m):
+                local_models.append(m)
+        d["models"] = local_models
         return d
 
 
@@ -667,14 +774,14 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
     row is always complete. Returns the stored tone row (with models) or None if
     TONE3000 has no such tone. Files land in data/tones/<tone_id>-<title-slug>/ and
     keep TONE3000's semantic model name (models.name — same naming as the site's zip
-    download). IR tones (gear=cab) are recorded with architecture="IR".
+    download). IR tones (gear=cab/space) are recorded with architecture="IR".
     """
     row = tone3000.tone_by_id(tone_id)
     if not row:
         if not quiet:
             print(f"TONE3000 has no tone {tone_id}.")
         return None
-    is_ir = (row.get("gear") == "cab")
+    is_ir = model_is_ir({}, row)
     slug = tone3000.slugify(row.get("title"), 40)
     dest = TONES_DIR / f"{tone_id}-{slug}"
     staging = TONES_DIR / f".{dest.name}.import-{uuid4().hex}"
@@ -683,8 +790,11 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
         published: list[Path] = []
         try:
             _seed_import_directory(dest, staging)
+            # A pack install is model-granular.  Fetch the complete remote set
+            # so selected A1/WaveNet rows are available as well as A2 and IR.
             paths = tone3000.download(tone_id, staging, tag=slug,
-                                      a2_only=not is_ir, ext="wav" if is_ir else None,
+                                      a2_only=False,
+                                      ext="wav" if is_ir else None,
                                       return_paths=True, progress=progress, quiet=quiet,
                                       model_ids=model_ids)
             dest.mkdir(parents=True, exist_ok=True)
@@ -696,7 +806,15 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
                     upsert_model(conn, {
                         "id": m["id"], "tone_id": tone_id, "model_url": m["model_url"],
                         "name": m.get("name"),
-                        "architecture": (m["model_json"] or {}).get("architecture") or "IR",
+                        "architecture": (
+                            (m["model_json"] or {}).get("architecture")
+                            or ("IR" if Path(m.get("local_path") or "").suffix.lower()
+                                in {".wav", ".wave", ".flac", ".aif", ".aiff"}
+                                else None)
+                        ),
+                        "architecture_version": (
+                            (m["model_json"] or {}).get("architecture_version")
+                        ),
                         "local_path": m["local_path"],
                     }, commit=False)
                 conn.commit()
@@ -777,6 +895,12 @@ def _model_path(model_id: int) -> str | None:
         row = conn.execute(
             "SELECT local_path FROM models WHERE id = ?", (model_id,)).fetchone()
         return _to_abs_path(row["local_path"]) if row and row["local_path"] else None
+
+
+def _installed_model_path(model_id: int) -> str | None:
+    """Return a model path only when its database record and file agree."""
+    path = _model_path(model_id)
+    return path if path and Path(path).is_file() else None
 
 
 def _setting_get(key: str) -> str | None:
@@ -1328,6 +1452,23 @@ SEED_CHAINS = [
     ("classic-bass-ampeg-svt", "Classic Pairing · Bass · Ampeg SVT-CL clean direct", 382790, None),
 ]
 
+# The catalog stores model IDs so a preset remains tied to one exact capture.
+# Bootstrap still needs the parent tone ID in order to download a missing
+# model. These mappings were resolved from TONE3000's public ``models`` table
+# and are deliberately kept separate from the canonical preset payload.
+STARTER_MODEL_TONES = {
+    383442: 51310,
+    684630: 78832,
+    419198: 2694,
+    382795: 45809,
+    677999: 77706,
+    383682: 53601,
+    494341: 33505,
+    379720: 19,
+    382790: 45809,
+    239163: 45022,
+}
+
 
 def preset_group(name: str) -> tuple[str, str]:
     """Derive TUI grouping from the catalog name prefix; no schema fields."""
@@ -1340,14 +1481,99 @@ def preset_group(name: str) -> tuple[str, str]:
     return "Custom", "Other"
 
 
+def bootstrap_starter_presets(*, quiet: bool = False,
+                              replace: bool = False) -> dict[str, object]:
+    """Download the exact starter models required by ``SEED_CHAINS``.
+
+    ``preset_seed`` intentionally remains local-only and idempotent. This
+    boundary performs the network work needed by a fresh checkout, then seeds
+    only models that are present and valid. A failed download is reported in
+    the result instead of creating a preset that cannot be loaded.
+    """
+    grouped: dict[int, list[int]] = {}
+    unresolved: list[int] = []
+    for _name, _note, amp_model_id, ir_model_id in SEED_CHAINS:
+        for model_id in (amp_model_id, ir_model_id):
+            if model_id is None:
+                continue
+            tone_id = STARTER_MODEL_TONES.get(model_id)
+            if tone_id is None:
+                unresolved.append(model_id)
+                continue
+            grouped.setdefault(tone_id, [])
+            if model_id not in grouped[tone_id]:
+                grouped[tone_id].append(model_id)
+
+    imported: list[int] = []
+    failed: list[dict[str, object]] = []
+    for tone_id, model_ids in grouped.items():
+        missing = [
+            model_id for model_id in model_ids
+            if not _installed_model_path(model_id)
+        ]
+        if not missing:
+            continue
+        try:
+            imported_tone = import_tone(
+                tone_id, quiet=quiet, model_ids=missing)
+        except Exception as exc:
+            failed.append({"tone_id": tone_id, "model_ids": missing,
+                           "error": str(exc)})
+            continue
+        if imported_tone is None:
+            failed.append({"tone_id": tone_id, "model_ids": missing,
+                           "error": "tone not found"})
+            continue
+        unresolved_files = [
+            model_id for model_id in missing
+            if not _installed_model_path(model_id)
+        ]
+        if unresolved_files:
+            failed.append({"tone_id": tone_id, "model_ids": unresolved_files,
+                           "error": "requested model was not downloaded"})
+        else:
+            imported.append(tone_id)
+
+    written = preset_seed(replace=replace, quiet=quiet)
+    result = {
+        "imported_tone_ids": imported,
+        "presets": written,
+        "failed": failed,
+        "unresolved_model_ids": sorted(set(unresolved)),
+    }
+    if not quiet:
+        print(f"Starter assets: {len(imported)} tone(s), "
+              f"{written}/{len(SEED_CHAINS)} preset(s)")
+        if failed:
+            print(f"Starter downloads failed: {len(failed)}")
+        if unresolved:
+            print(f"Unknown starter model IDs: {sorted(set(unresolved))}")
+    return result
+
+
 def _first_local_model(tone_id: int, ir: bool = False) -> int | None:
     """First downloaded model id of a tone (amp: non-IR first; ir: IR wavs)."""
     with connect() as conn:
-        row = conn.execute(
-            "SELECT id FROM models WHERE tone_id = ? AND local_path IS NOT NULL "
-            "AND architecture = ? ORDER BY id LIMIT 1",
-            (tone_id, "IR" if ir else "SlimmableContainer")).fetchone()
-        return row["id"] if row else None
+        rows = conn.execute(
+            "SELECT m.id, m.tone_id, m.model_url, m.name, m.architecture, "
+            "m.architecture_version, m.local_path, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            "WHERE m.tone_id = ? AND m.local_path IS NOT NULL ORDER BY m.id",
+            (tone_id,)).fetchall()
+    for row in rows:
+        model = _row_to_dict(row)
+        tone = {key: model.get(key) for key in ("gear", "format", "platform")}
+        classification_model = {
+            key: model.get(key) for key in (
+                "architecture", "architecture_version", "local_path",
+                "name", "model_url", "url")
+        }
+        if model_is_ir(classification_model, tone) == ir:
+            # A1 (WaveNet) 是废弃架构：amp 默认选中不落到旧模型上。
+            if not ir and tone3000._is_a1_model(classification_model):
+                continue
+            return model["id"]
+    return None
 
 
 def local_models_by_tone(path: str) -> list[dict] | None:
@@ -1365,10 +1591,13 @@ def local_models_by_tone(path: str) -> list[dict] | None:
         if not row:
             return None
         rows = conn.execute(
-            "SELECT id, tone_id, name, architecture, local_path FROM models "
+            "SELECT id, tone_id, name, architecture, architecture_version, local_path "
+            "FROM models "
             "WHERE tone_id = ? AND local_path IS NOT NULL ORDER BY id",
             (row["tone_id"],)).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        # 链面板的兄弟模型步进同样排除 A1（WaveNet）旧文件。
+        return [m for m in (_row_to_dict(r) for r in rows)
+                if not tone3000._is_a1_model(m)]
 
 
 def downloaded_model_ids_by_tone() -> dict[int, set[int]]:
@@ -1388,8 +1617,8 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
     Each hit gains `download_state` in {"all", "partial", "none"} and
     `downloaded` (count of locally downloaded models). Tones with no local
     models are "none" without any API call; tones present locally are compared
-    id-by-id against TONE3000's current model list (amp/pedal → A2 models,
-    cab → all IRs), queried in parallel.
+    id-by-id against TONE3000's current model list (amp/pedal → A1/A2/custom
+    model files, cab/space → IR files), queried in parallel.
     """
     local = downloaded_model_ids_by_tone()
     todos = [t for t in hits if t.get("id") in local]
@@ -1402,11 +1631,16 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
                 ms = tone3000.models(t["id"], a2_only=False)
             except Exception:
                 return t["id"], "partial", set()
-            if t.get("gear") == "cab":
-                ids = {m["id"] for m in ms}
+            if model_is_ir({}, t):
+                ids = {m["id"] for m in ms if model_is_ir(m, t)}
+                if not ids:
+                    # Older API fixtures may omit both architecture and a
+                    # model URL; an IR tone still defines the whole set as IR.
+                    ids = {m["id"] for m in ms}
             else:
-                ids = {m["id"] for m in ms
-                       if m.get("architecture") == "SlimmableContainer"}
+                # Amp/pedal packs may contain both WaveNet (A1) and
+                # SlimmableContainer (A2); both are user-selectable files.
+                ids = {m["id"] for m in ms if not model_is_ir(m, t)}
             return t["id"], "all" if ids else "partial", ids
 
         with ThreadPoolExecutor(max_workers=6) as ex:
@@ -1427,7 +1661,7 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
     return hits
 
 
-def preset_seed(*, replace: bool = False) -> int:
+def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
     """Create the built-in recommendation presets from the local library.
 
     Chains whose amp/IR are not in the library are skipped with a warning
@@ -1440,21 +1674,25 @@ def preset_seed(*, replace: bool = False) -> int:
             conn.commit()
     made = 0
     for name, note, amp_id, ir_id in SEED_CHAINS:
-        if not _model_path(amp_id):
-            print(f"[preset seed] skipped {name}: model {amp_id} is not available locally")
+        amp_path = _installed_model_path(amp_id)
+        if not amp_path:
+            if not quiet:
+                print(f"[preset seed] skipped {name}: model {amp_id} is not available locally")
             continue
         chain = {
             "slots": [{"model_id": amp_id,
-                       "path": _preset_storage_path(_model_path(amp_id))}],
-            "gain": 0.8, "master": 0.8, "quality": 1.0,
+                       "path": _preset_storage_path(amp_path)}],
+            "gain": 1.0, "master": 1.0, "quality": 1.0,
         }
         if ir_id is not None:
-            if not _model_path(ir_id):
-                print(f"[preset seed] skipped {name}: IR model {ir_id} is not available locally")
+            ir_path = _installed_model_path(ir_id)
+            if not ir_path:
+                if not quiet:
+                    print(f"[preset seed] skipped {name}: IR model {ir_id} is not available locally")
                 continue
             chain["slots"].append({
                 "model_id": ir_id,
-                "path": _preset_storage_path(_model_path(ir_id)),
+                "path": _preset_storage_path(ir_path),
             })
         chain = _canonical_preset_chain(chain)
         now = datetime.now(timezone.utc).isoformat()
@@ -1467,8 +1705,9 @@ def preset_seed(*, replace: bool = False) -> int:
                 (name, note, json.dumps(chain, ensure_ascii=False), now, now))
             conn.commit()
         made += 1
-        print(f"[preset seed] {name}: amp model {amp_id}"
-              + (f" + ir model {ir_id}" if ir_id is not None else " (IR bypass)"))
+        if not quiet:
+            print(f"[preset seed] {name}: amp model {amp_id}"
+                  + (f" + ir model {ir_id}" if ir_id is not None else " (IR bypass)"))
     return made
 
 
@@ -1495,6 +1734,7 @@ def _fmt_table(tones: list[dict]) -> str:
     rows = [
         f"{t['id']:>8} | dl={t.get('downloads_count', 0):>6} fav={t.get('favorites_count', 0):>5} "
         f"a2={t.get('a2_models_count', 0):>3} | {t.get('gear', '?'):<8} | "
+        f"{(t.get('format') or t.get('platform') or '?'):<10} | "
         f"{(t.get('title') or '')[:52]:<52} | @{t.get('username') or '?'}"
         for t in tones
     ]
@@ -1506,7 +1746,7 @@ def _fmt_show(t: dict) -> str:
         f"id           {t['id']}",
         f"title        {t.get('title')}",
         f"gear         {t.get('gear')}",
-        f"platform     {t.get('platform')}",
+        f"format       {t.get('format') or t.get('platform')}",
         f"username     {t.get('username')}",
         f"downloads    {t.get('downloads_count')}   favorites {t.get('favorites_count')}",
         f"counts       a1={t.get('a1_models_count')} a2={t.get('a2_models_count')} "
@@ -1526,7 +1766,7 @@ def _fmt_show(t: dict) -> str:
     if ms:
         lines.append("models:")
         for m in ms:
-            arch = m.get("architecture") or "?"
+            arch = (m.get("architecture_version") or m.get("architecture") or "?")
             lines.append(f"  {m['id']} [{arch}] {m.get('local_path') or m.get('model_url')}")
     return "\n".join(lines)
 
@@ -1540,13 +1780,17 @@ def main(argv: list[str] | None = None) -> int:
     pt = sub.add_parser("tone", help="tone library operations")
     tsub = pt.add_subparsers(dest="tone_cmd", required=True)
     pl = tsub.add_parser("list", help="list imported tones")
-    pl.add_argument("--gear", choices=["amp", "cab", "amp-cab"], help="filter by gear type")
+    pl.add_argument("--gear", choices=["amp", "amp-cab", "pedal", "outboard",
+                                        "cab", "space", "experimental", "full-rig", "ir"],
+                    help="filter by gear type")
     pl.add_argument("--limit", type=int, help="max rows")
     pl.add_argument("--query", help="text search (title/username/description)")
     pl.add_argument("--json", action="store_true", help="JSON output")
     ps = tsub.add_parser("search", help="search TONE3000 (import with: gigbuddy tone import <id>)")
     ps.add_argument("query")
-    ps.add_argument("--gear", choices=["amp", "cab", "amp-cab"], help="filter by gear type")
+    ps.add_argument("--gear", choices=["amp", "amp-cab", "pedal", "outboard",
+                                        "cab", "space", "experimental", "full-rig", "ir"],
+                    help="filter by gear type")
     ps.add_argument("--author", action="append", help="filter by author username (repeatable)")
     ps.add_argument("--tag", action="append", help="filter by tag name (repeatable)")
     ps.add_argument("--limit", type=int, default=10)
@@ -1584,9 +1828,18 @@ def main(argv: list[str] | None = None) -> int:
     pnote.add_argument("note", nargs="?")
     pd = psub.add_parser("delete", help="delete a preset")
     pd.add_argument("name")
-    pseed = psub.add_parser("seed", help="create the built-in preset catalog")
+    pseed = psub.add_parser(
+        "seed",
+        help="download starter models and create the built-in preset catalog",
+    )
     pseed.add_argument("--replace", action="store_true",
                        help="delete every existing preset before creating the catalog")
+    pseed.add_argument("--local-only", action="store_true",
+                       help="create presets only from already-downloaded models")
+    psub.add_parser(
+        "bootstrap",
+        help="download starter models and create the built-in preset catalog",
+    )
 
     args = p.parse_args(argv)
 
@@ -1596,8 +1849,15 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(tones, ensure_ascii=False, indent=2) if args.json else
                   (_fmt_table(tones) if tones else "No imported tones yet — `gigbuddy tone search <q>` first."))
         elif args.tone_cmd == "search":
+            gear = args.gear
+            if gear == "full-rig":
+                gear_values = ["amp-cab"]
+            elif gear == "ir":
+                gear_values = ["cab", "space"]
+            else:
+                gear_values = [gear] if gear else None
             hits = tone3000.search(args.query, page_size=args.limit,
-                                   gear_filters=[args.gear] if args.gear else None,
+                                   gear_filters=gear_values,
                                    usernames=args.author, tag_names=args.tag)
             print(json.dumps(hits, ensure_ascii=False, indent=2) if args.json else _fmt_table(hits))
             if hits and not args.json:
@@ -1708,8 +1968,26 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Preset '{args.name}' not found.")
                 return 1
         elif args.preset_cmd == "seed":
-            n = preset_seed(replace=args.replace)
-            print(f"Seeded {n}/{len(SEED_CHAINS)} presets.")
+            if args.local_only:
+                n = preset_seed(replace=args.replace)
+                print(f"Seeded {n}/{len(SEED_CHAINS)} presets.")
+            else:
+                result = bootstrap_starter_presets(replace=args.replace)
+                failed = result["failed"]
+                print(f"Seeded {result['presets']}/{len(SEED_CHAINS)} presets.")
+                if failed:
+                    print("Some starter assets could not be downloaded; "
+                          "run `gigbuddy preset seed` again to retry.",
+                          file=sys.stderr)
+                    return 1
+        elif args.preset_cmd == "bootstrap":
+            result = bootstrap_starter_presets()
+            failed = result["failed"]
+            if failed:
+                print("Some starter assets could not be downloaded; "
+                      "run `gigbuddy preset bootstrap` again to retry.",
+                      file=sys.stderr)
+                return 1
     return 0
 
 

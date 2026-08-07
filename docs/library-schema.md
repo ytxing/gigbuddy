@@ -15,9 +15,10 @@ tone_tags/tags + tone_makes/makes) so they carry identical fields.
 | id (PK) | TONE3000 tone id |
 | title, description | |
 | tags | JSON array of tag names |
-| gear | `amp` / `cab` / `amp-cab` |
+| gear | `amp` / `amp-cab` / `pedal` / `outboard` / `cab` / `space` / `experimental` |
 | makes | JSON array of make names |
-| platform | `nam` / `ir` / … |
+| format | Canonical TONE3000 format: `nam`, `ir`, `aida-x`, `aa-snapshot`, or `proteus` |
+| platform | Deprecated TONE3000 alias retained for old rows; new code reads `format` first |
 | downloads_count, favorites_count | |
 | a1_models_count, a2_models_count, custom_models_count | |
 | username, avatar_url, user_id | |
@@ -42,7 +43,8 @@ rollback journal until a measured TUI/import workload justifies switching to WAL
 | tone_id (FK → tones.id) | |
 | model_url | source URL |
 | name | TONE3000 `models.name` — the site display name; **this is the download filename** |
-| architecture | `SlimmableContainer` (A2) / `WaveNet` (A1) / `IR` (no model_json) |
+| architecture_version | Canonical TONE3000 architecture: `1` (A1), `2` (A2), `custom`, or NULL for non-NAM |
+| architecture | Legacy backend token (`SlimmableContainer` / `WaveNet` / `IR`), retained for compatibility |
 | local_path (nullable) | downloaded file when imported；**存相对项目根路径**（`data/tones/...`，portable v0.1），读取时按项目根解析为绝对 |
 
 Imported assets are grouped under `data/tones/<tone-id>-<tone-title-slug>/`. Model
@@ -74,9 +76,11 @@ never break a preset; non-library paths are kept verbatim in `model_path`.
 | created_at, updated_at | ISO timestamps |
 
 Built-in chains (`gigbuddy preset seed`) use name prefixes and descriptions for
-the two categories and instrument. They reference exact local model IDs.
-`gigbuddy preset seed --replace` deletes
-all existing presets and replaces them with the built-in catalog.
+the two categories and instrument. The default seed command downloads the exact
+starter model files first, then writes preset rows that reference local model
+IDs. `gigbuddy preset seed --local-only` skips network download and only creates
+presets whose model files are already local. `gigbuddy preset seed --replace`
+deletes all existing presets and replaces them with the built-in catalog.
 
 ## settings
 

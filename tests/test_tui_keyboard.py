@@ -494,7 +494,7 @@ def test_general_search_accepts_author_query(monkeypatch):
             assert queries == ["", "alice"]
             table = app.query_one("#lib-table-tone")
             assert table.row_count == 1
-            assert table.get_cell_at((0, 7)) == "@alice"
+            assert table.get_cell("remote:8", "author") == "@alice"
 
     run(scenario())
 

@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import webbrowser
@@ -38,7 +39,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from . import live  # noqa: E402
-from .chain_state import (ChainStateError, SlotStatus,
+from .chain_state import (ChainState, ChainStateError, SlotStatus,
                           CommitReceipt, PreparedCommit, chain_fingerprint)  # noqa: E402
 import library  # noqa: E402
 import chain_protocol  # noqa: E402
@@ -55,9 +56,9 @@ from .panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar,
                      AddSlotButton, ChainSlotWidget, DeviceChanged,
                      InterfaceBar, MeterBar, NodeSwitchButton, NodeWidget)  # noqa: E402
 from .picker import TonePickerScreen  # noqa: E402
-from .presets import (PresetDeleteModal, PresetEditModal, PresetLoadConfirm,
-                      PresetNameModal, PresetNoteModal, PresetPanel,
-                      PresetRenameModal)  # noqa: E402
+from .presets import (ChainSaveModal, ClearSlotsConfirm, PresetDeleteModal,
+                      PresetEditModal, PresetLoadConfirm, PresetNameModal,
+                      PresetNoteModal, PresetPanel, PresetRenameModal)  # noqa: E402
 from .selection import ShiftSelectableScreen  # noqa: E402
 from .uninstall_screen import LocalUninstallScreen  # noqa: E402
 
@@ -468,23 +469,16 @@ class GigBuddyApp(App):
     LibraryPanel TabPane { layout: vertical; }
     LibraryPanel DataTable { height: 1fr; }
     LibraryPanel > #library-view-tabs {
-        width: 100%; height: 1; padding: 0 1;
-        background: $surface; color: $text-muted;
+        position: absolute; layer: border-tabs;
+        width: 1; height: 1; padding: 0;
+        opacity: 0;
     }
-    LibraryPanel > .legacy-filter-control {
-        display: none;
-    }
-    LibraryPanel > #type-filter-menu {
-        position: absolute; layer: type-filter;
-        display: none; width: 24; height: 1;
-        background: $surface; border: none;
-    }
-    LibraryPanel > #type-filter-menu.-expanded { display: block; }
     /* ContentTabs remains as the content switcher's compatibility mechanism;
-       its visible labels are replaced by the single-focus custom strip. */
+       its visible labels are replaced by the single-focus custom strip. Keep
+       the compatibility widget out of the compositor: an opacity-only
+       overlay would cover the active pane's SearchBar at the same y-position. */
     LibraryPanel > TabbedContent > ContentTabs {
-        position: absolute; layer: compatibility-tabs;
-        width: 100%; height: 1; opacity: 0;
+        display: none;
     }
     /* Remote download states are a persistent list legend, not a result row. */
     #tone-status {
@@ -492,7 +486,6 @@ class GigBuddyApp(App):
         color: $text-muted; content-align: left middle;
     }
     #import-progress { dock: bottom; height: 1; }
-    #type-filter-local, #type-filter-tone { width: 1; height: 1; }
     #lib-status { color: $text-muted; padding: 0 1; }
     PresetPanel > MarqueeBar, ChainPanel > MarqueeBar {
         height: 1; padding: 0 1; color: $text;
@@ -609,13 +602,6 @@ class GigBuddyApp(App):
     ChainPanel.chain-panel-dynamic .chain-params {
         dock: none;
     }
-    ChainPanel .chain-param-focus-stop {
-        position: absolute; height: 1; padding: 0; margin: 0;
-        background: transparent;
-    }
-    ChainPanel .chain-param-focus-stop:focus {
-        background: $panel-lighten-1;
-    }
     DetailPane { height: 1fr; }
     DetailPane MarqueeBar { height: 1; color: $text; }
 
@@ -723,6 +709,39 @@ class GigBuddyApp(App):
     Input:focus, Select:focus { border: round $accent; }
     Input > .input--placeholder { color: $text-disabled; }
 
+    /* SearchBar is the one-line query surface: its controls use a background
+       track with no frame, while every other Input/Select keeps the normal
+       framed control above. These app-level rules intentionally sit after the
+       global control skin so it cannot restore four-sided boxes. */
+    SearchBar > Input, SearchBar > Select {
+        background: $boost;
+        border-top: none;
+        border-right: none;
+        border-left: none;
+        border-bottom: none;
+    }
+    SearchBar > Input:focus, SearchBar > Select:focus {
+        background: $surface-lighten-1;
+        border-top: none;
+        border-right: none;
+        border-left: none;
+        border-bottom: none;
+    }
+    SearchBar > Select.-textual-compact > SelectCurrent,
+    SearchBar > Select:focus > SelectCurrent {
+        background: $surface-lighten-1;
+        border-top: none !important;
+        border-right: none !important;
+        border-left: none !important;
+        border-bottom: none !important;
+    }
+    SearchBar > Input:hover, SearchBar > Select:hover {
+        border-top: none;
+        border-right: none;
+        border-left: none;
+        border-bottom: none;
+    }
+
     /* overlays (select dropdown / command palette) share one raised
        look: lighter surface + accent border, clearly off the main background */
     SelectOverlay {
@@ -773,13 +792,23 @@ class GigBuddyApp(App):
     """
 
     COMMAND_PALETTE_BINDING = "ctrl+p"  # phosphor-style command menu
+    PARAM_HOLD_COMMIT_INTERVAL = 0.08
     BINDINGS = [
         Binding("/", "focus_search", "search"),
         Binding("t", "next_theme", "theme"),
+        # 链参数步进（v0.1.1 交互契约）：App 全局生效，任何界面位置按
+        # g/G/m/M/q/Q 都能步进；聚焦 ChainParams 时由它的 edit_guard
+        # 遮蔽成 no-op，避免编辑态误步进。
+        Binding("g", "bump_gain(-0.05)", "gain -"),
+        Binding("G", "bump_gain(+0.05)", "gain +"),
+        Binding("m", "bump_master(-0.05)", "master -"),
+        Binding("M", "bump_master(+0.05)", "master +"),
         # REQ-017: preset 应用改的是链配置（live_chain.json）——undo/redo
         # 即链配置快照的恢复/还原（ctrl+shift+z = redo；无 y 键冲突）
         Binding("ctrl+z", "undo_chain", "undo preset"),
         Binding("ctrl+shift+z", "redo_chain", "redo preset"),
+        Binding("q", "bump_quality(-0.05)", "quality -"),
+        Binding("Q", "bump_quality(+0.05)", "quality +"),
         # no single-key quit: Ctrl+C twice (from any screen/modal) exits
         Binding("ctrl+c", "request_quit", "quit (×2)", show=False,
                 priority=True),
@@ -829,6 +858,8 @@ class GigBuddyApp(App):
         self._mutation_refresh = MutationRefreshCoordinator(
             self.call_after_refresh, self._reconcile_after_mutation,
             self._capture_mutation_anchors)
+        self._remote_detail_request_id = 0
+        self._remote_detail_cache: dict[int, dict] = {}
         # Textual queries are scoped to the active Screen. Keep the persistent
         # main-surface widgets explicitly so a modal cannot hide them from the
         # mutation coordinator.
@@ -838,6 +869,15 @@ class GigBuddyApp(App):
         self._save_confirm_name: str | None = None
         self._save_confirm_at = 0.0
         self._save_confirm_chain: str | None = None
+        # Parameter holds use one background commit worker. The UI can keep
+        # rendering the local value while the managed runtime acknowledges the
+        # latest coalesced chain candidate.
+        self._param_hold_lock = threading.Lock()
+        self._param_hold_generation = 0
+        self._param_hold_pending: tuple[
+            int, str, float, bool, bool] | None = None
+        self._param_hold_worker_active = False
+        self._param_hold_last_commit_at = 0.0
         self.register_theme(GIGBUDDY_THEME)
         # Pin danger/state colors across every theme (built-in ones included)
         # before the first CSS generation picks the theme.
@@ -878,10 +918,10 @@ class GigBuddyApp(App):
 
         yield SystemCommand(title="Search TONE3000…", help="focus the library search box",
                             callback=self.action_focus_search, discover=True)
-        yield SystemCommand(title="Gain -0.1", help="decrease input gain",
-                            callback=lambda: self.action_bump_gain(-0.1))
-        yield SystemCommand(title="Gain +0.1", help="increase input gain",
-                            callback=lambda: self.action_bump_gain(0.1))
+        yield SystemCommand(title="Gain -0.05", help="decrease input gain",
+                            callback=lambda: self.action_bump_gain(-0.05))
+        yield SystemCommand(title="Gain +0.05", help="increase input gain",
+                            callback=lambda: self.action_bump_gain(0.05))
         yield SystemCommand(title="Master -0.05", help="decrease output volume",
                             callback=lambda: self.action_bump_master(-0.05))
         yield SystemCommand(title="Master +0.05", help="increase output volume",
@@ -1112,6 +1152,12 @@ class GigBuddyApp(App):
 
     def on_unmount(self) -> None:
         self._device_request_generation += 1
+        with self._param_hold_lock:
+            # In-flight file/runtime work cannot be force-killed safely, but
+            # invalidating the generation prevents late callbacks from
+            # touching widgets after the app has been unmounted.
+            self._param_hold_generation += 1
+            self._param_hold_pending = None
         if self._header_status_timer is not None:
             self._header_status_timer.stop()
             self._header_status_timer = None
@@ -1387,6 +1433,174 @@ class GigBuddyApp(App):
         self._publish_mutation(
             "chain-param", (f"chain:{key}",), cfg.get("revision"))
 
+    def begin_chain_param_hold(self, key: str) -> tuple[int, float]:
+        """Start a mouse hold and return its generation plus current value."""
+        if key not in live.CHAIN_PARAMETER_DEFAULTS:
+            raise ValueError(f"unknown chain parameter: {key}")
+        with self._param_hold_lock:
+            self._param_hold_generation += 1
+            generation = self._param_hold_generation
+            self._param_hold_pending = None
+        cfg = live.read_chain()
+        value = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+        return generation, value
+
+    def queue_chain_param_hold(self, generation: int, key: str,
+                               value: float, *, force: bool = False) -> None:
+        """Coalesce a hold value and keep at most one commit worker active."""
+        if key not in live.CHAIN_PARAMETER_DEFAULTS:
+            return
+        lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
+        value = round(max(lo, min(hi, float(value))), 2)
+        start_worker = False
+        with self._param_hold_lock:
+            if generation != self._param_hold_generation:
+                return
+            # generation, key, value, force, final
+            self._param_hold_pending = (
+                generation, key, value, force, False)
+            if not self._param_hold_worker_active:
+                self._param_hold_worker_active = True
+                start_worker = True
+        if start_worker:
+            threading.Thread(
+                target=self._drain_chain_param_hold,
+                name="chain-param-hold", daemon=True).start()
+
+    def end_chain_param_hold(self, generation: int, key: str,
+                             value: float) -> None:
+        """Queue the final hold value without waiting on the UI thread."""
+        if key not in live.CHAIN_PARAMETER_DEFAULTS:
+            return
+        lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
+        value = round(max(lo, min(hi, float(value))), 2)
+        start_worker = False
+        with self._param_hold_lock:
+            if generation != self._param_hold_generation:
+                return
+            self._param_hold_pending = (
+                generation, key, value, True, True)
+            if not self._param_hold_worker_active:
+                self._param_hold_worker_active = True
+                start_worker = True
+        if start_worker:
+            threading.Thread(
+                target=self._drain_chain_param_hold,
+                name="chain-param-hold", daemon=True).start()
+
+    def _drain_chain_param_hold(self) -> None:
+        """Serialize coalesced hold commits off the Textual event loop."""
+        with self._param_hold_lock:
+            last_commit_at = self._param_hold_last_commit_at
+        while True:
+            with self._param_hold_lock:
+                pending = self._param_hold_pending
+                if pending is None:
+                    self._param_hold_worker_active = False
+                    return
+                self._param_hold_pending = None
+
+            generation, key, value, force, final = pending
+            if not force and last_commit_at:
+                remaining = (
+                    self.PARAM_HOLD_COMMIT_INTERVAL
+                    - (time.monotonic() - last_commit_at))
+                if remaining > 0:
+                    time.sleep(remaining)
+                # Prefer the newest value that arrived during the throttle
+                # window. The final flag must travel with that newest value.
+                with self._param_hold_lock:
+                    newer = self._param_hold_pending
+                    if newer is not None:
+                        self._param_hold_pending = None
+                        generation, key, value, force, final = newer
+
+            try:
+                persisted = self._commit_chain_param_hold(key, value)
+            except Exception as exc:
+                try:
+                    self.call_from_thread(
+                        self._param_hold_failed, generation, str(exc))
+                except Exception:
+                    pass
+                with self._param_hold_lock:
+                    if generation == self._param_hold_generation:
+                        self._param_hold_pending = None
+                    self._param_hold_worker_active = False
+                return
+
+            last_commit_at = time.monotonic()
+            with self._param_hold_lock:
+                self._param_hold_last_commit_at = last_commit_at
+            try:
+                self.call_from_thread(
+                    self._param_hold_committed,
+                    generation, key, value, final, persisted)
+            except Exception:
+                pass
+
+    def _commit_chain_param_hold(self, key: str, value: float) -> dict | None:
+        """Commit one absolute parameter value from the hold worker."""
+        base_chain = live.read_chain()
+        cfg = dict(base_chain)
+        lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
+        value = round(max(lo, min(hi, value)), 2)
+        previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+        if value == previous:
+            return None
+        cfg[key] = value
+        if self._managed_engine_active():
+            # The adapter's expected chain is the file state read before the
+            # candidate edit. Passing the already-mutated cfg makes its CAS
+            # check reject every managed mouse commit as a false conflict.
+            state = ChainState(base_chain)
+            return state.commit(
+                _ManagedChainAdapter(self, expected_chain=base_chain),
+                lambda draft: draft.apply_candidate(cfg),
+            )
+        persisted = live.write_chain(cfg)
+        if isinstance(persisted, dict):
+            return persisted
+        return live.read_chain() or cfg
+
+    def _param_hold_committed(self, generation: int, key: str,
+                              value: float, final: bool,
+                              persisted: dict | None) -> None:
+        """Publish a completed hold write without refreshing every pane per tick."""
+        if generation != self._param_hold_generation:
+            return
+        if persisted is not None:
+            try:
+                committed = self._publish_chain_write(persisted)
+            except Exception as exc:
+                self._param_hold_failed(generation, str(exc))
+                return
+            if final:
+                self._publish_mutation(
+                    "chain-param", (f"chain:{key}",),
+                    committed.get("revision"))
+        try:
+            panel = self.query_one(ChainPanel)
+            panel.params._hold_commit_ack(generation, final=final)
+        except Exception:
+            pass
+
+    def _param_hold_failed(self, generation: int, error: str) -> None:
+        """Stop a failed hold and restore the last persisted display value."""
+        if generation != self._param_hold_generation:
+            return
+        with self._param_hold_lock:
+            self._param_hold_pending = None
+        try:
+            panel = self.query_one(ChainPanel)
+            panel.params.abort_param_hold(generation)
+            cfg = live.read_chain()
+            if cfg:
+                self._publish_chain_write(cfg)
+        except Exception:
+            pass
+        self.notify(f"Chain unchanged: {error}", severity="error")
+
     def action_bump_gain(self, delta: float) -> None:
         self._bump("gain", delta)
 
@@ -1564,6 +1778,20 @@ class GigBuddyApp(App):
     def action_save_preset_as(self) -> None:
         self.push_screen(PresetNameModal())
 
+    def action_open_chain_save_menu(self) -> None:
+        self.push_screen(ChainSaveModal())
+
+    def action_clear_all_slots(self) -> None:
+        panel = self.query_one(ChainPanel)
+        if panel._legacy_mode:
+            self.notify("Clear all Slots is unavailable for a legacy chain",
+                        severity="warning")
+            return
+        if not panel.state.slot_count:
+            self.notify("No Slots to clear", severity="warning")
+            return
+        self.push_screen(ClearSlotsConfirm())
+
     def on_click(self, event) -> None:
         """Click routing for the chain panel's clickable rows and switch buttons.
 
@@ -1572,6 +1800,9 @@ class GigBuddyApp(App):
         the pointer, so route by hit-testing the click coordinates here.
         """
         if event.screen_x is None:
+            return
+        panel = self.query_one(ChainPanel)
+        if panel.handle_slot_hint_click(event):
             return
         # Route by coordinates first: hit-testing can land on overlapping
         # siblings, so check the switch-button regions directly (▲ = title
@@ -1647,7 +1878,6 @@ class GigBuddyApp(App):
                 return
         # 链面板的其余空白（节点行之间的空隙、effect/params 之外的区域）：
         # 点击聚焦面板本身，←/→ 即可切换 detail 视图。
-        panel = self.query_one(ChainPanel)
         if panel.region.contains(event.screen_x, event.screen_y):
             event.stop()
             panel.focus()
@@ -1822,9 +2052,20 @@ class GigBuddyApp(App):
             self, event: ChainSlotWidget.DeleteRequested) -> None:
         self._delete_slot(event.index)
 
+    def on_chain_slot_widget_tone_requested(
+            self, event: ChainSlotWidget.ToneRequested) -> None:
+        self._browse_slot(event.index)
+
     def on_chain_slot_widget_move_requested(
             self, event: ChainSlotWidget.MoveRequested) -> None:
         self._move_slot(event.index, event.direction)
+
+    def on_clear_slots_confirm_confirmed(
+            self, _event: ClearSlotsConfirm.Confirmed) -> None:
+        self._commit_slot_mutation(
+            lambda state: state.clear_slots(),
+            "Cleared all Slots",
+        )
 
     def on_chain_panel_slot_focused(self, event: ChainPanel.SlotFocused) -> None:
         """Slot focus establishes target and updates the matching Detail view."""
@@ -1881,23 +2122,29 @@ class GigBuddyApp(App):
                 "name": Path(path).name,
                 "local_path": path,
                 "architecture": "IR" if Path(path).suffix.lower() == ".wav"
-                else "A1",
+                else "A2",
             }]
         detail.show_slot_pack(
             tone, models, panel.state.to_chain(), index, snapshot)
 
-    def _browse_empty_slot(self, index: int) -> None:
-        """Return an Empty Slot to the local Library without changing target."""
+    def _browse_slot(self, index: int) -> None:
+        """Focus a Slot and return to LOCAL so the user can choose its Tone."""
         panel = self.query_one(ChainPanel)
         try:
             panel.state.focus_slot(index)
         except ChainStateError:
             return
+        panel._last_focus_slot = index
+        panel._refresh_dynamic_slots()
         library_panel = self.query_one(LibraryPanel)
         tab = library_panel.query_one("#--content-tab-pane-local")
         tab.post_message(tab.Clicked(tab))
         library_panel.query_one("#lib-table-local").focus()
         self.notify(f"Select a tone for Slot {index + 1:02d}")
+
+    def _browse_empty_slot(self, index: int) -> None:
+        """Compatibility alias for callers that specifically target an empty Slot."""
+        self._browse_slot(index)
 
     def _show_node_pack(self, kind: str) -> None:
         """Open the focused node's tone pack (all files) in the detail pane."""
@@ -2175,9 +2422,9 @@ class GigBuddyApp(App):
             self.notify(f"{kind.upper()}: not a library model")
             return
         if kind == "cab":
-            siblings = [m for m in siblings if m["architecture"] == "IR"]
+            siblings = [m for m in siblings if library.model_is_ir(m)]
         else:
-            siblings = [m for m in siblings if m["architecture"] != "IR"]
+            siblings = [m for m in siblings if not library.model_is_ir(m)]
         if len(siblings) <= 1:
             self.notify(f"{kind.upper()}: only one model in this folder")
             return
@@ -2208,6 +2455,11 @@ class GigBuddyApp(App):
         if not event.tone:
             return
         self.push_screen(PackInstallScreen(event.tone))
+
+    def on_detail_pane_pack_expanded_requested(self, event) -> None:
+        """Expand the current PACK into the reusable large install screen."""
+        if event.tone:
+            self.push_screen(PackInstallScreen(event.tone))
 
     def on_detail_pane_pack_files_installed(self, event) -> None:
         """pack 表 i 键批量安装完成：toast + one coordinated refresh."""
@@ -2308,6 +2560,11 @@ class GigBuddyApp(App):
         self._publish_mutation("preset-save", (key,) if key else ())
         self.notify(f"Preset '{event.name}' saved")
 
+    def on_chain_save_modal_saved(self, event: ChainSaveModal.Saved) -> None:
+        key = _preset_mutation_key(getattr(event, "preset_id", None), event.name)
+        self._publish_mutation("preset-save", (key,) if key else ())
+        self.notify(f"Preset '{event.name}' saved")
+
     def on_preset_rename_modal_renamed(self, event: PresetRenameModal.Renamed) -> None:
         key = _preset_mutation_key(
             getattr(event, "preset_id", None), event.new_name)
@@ -2352,23 +2609,23 @@ class GigBuddyApp(App):
             self.notify(note)
 
     def on_tone_selected(self, event: ToneSelected) -> None:
-        """Enter on a library row: jump straight to that tone's model files.
-
-        The picker lists the exact downloaded filenames; Enter picks one into
-        the live chain, Esc backs out — no intermediate action menu.
-        """
+        """Enter/double-click on a local Library row opens its PACK view."""
+        self._remote_detail_request_id += 1
         t = library.get_tone(event.tone_id)
         if t:
             if not self.query_one(ChainPanel)._legacy_mode:
-                self.query_one(DetailPane).show(t)
+                self.query_one(DetailPane).show_library_pack(t)
                 return
-            kind = "ir" if t.get("gear") == "cab" else "amp"
+            kind = "ir" if library.model_is_ir({}, t) else "amp"
             self.push_screen(TonePickerScreen(
                 kind, tone_id=int(t["id"]), tone_type=t.get("gear") or "amp"))
 
     def on_remote_tone_selected(self, event: RemoteToneSelected) -> None:
-        """Canonical remote rows open Remote Description in DetailPane."""
-        self.query_one(DetailPane).show(event.tone, remote=True)
+        """Canonical remote rows open PACK in DetailPane."""
+        self._remote_detail_request_id += 1
+        detail = self.query_one(DetailPane)
+        detail.show_library_pack(event.tone, remote=True)
+        self._hydrate_remote_tone(event.tone, self._remote_detail_request_id)
 
     def on_link_clicked(self, event) -> None:
         """Click a metadata link (author/tag) → TONE3000 search for it."""
@@ -2392,11 +2649,44 @@ class GigBuddyApp(App):
         self.notify(f"Searched {kind}: {value}")
 
     def on_tone_highlighted(self, event: ToneHighlighted) -> None:
+        self._remote_detail_request_id += 1
+        request_id = self._remote_detail_request_id
         detail = self.query_one(DetailPane)
         if event.tone:
             detail.show(event.tone, remote=event.remote)
+            if event.remote:
+                self._hydrate_remote_tone(event.tone, request_id)
         else:
             detail.clear()
+
+    def _hydrate_remote_tone(self, tone: dict, request_id: int) -> None:
+        """Fetch complete TONE3000 metadata for a lightweight list row."""
+        try:
+            tone_id = int(tone.get("id") or 0)
+        except (TypeError, ValueError):
+            return
+        if not tone_id:
+            return
+        cached = self._remote_detail_cache.get(tone_id)
+        if cached is not None:
+            self.query_one(DetailPane).update_tone_metadata(cached)
+            return
+        self.run_worker(
+            partial(self._fetch_remote_tone, tone_id, request_id),
+            name="remote-tone-detail", exclusive=True)
+
+    async def _fetch_remote_tone(self, tone_id: int, request_id: int) -> None:
+        try:
+            tone = await asyncio.to_thread(library.tone3000.tone_by_id, tone_id)
+        except Exception:
+            return
+        if not tone:
+            return
+        self._remote_detail_cache[tone_id] = dict(tone)
+        if request_id != self._remote_detail_request_id:
+            return
+        detail = self.query_one(DetailPane)
+        detail.update_tone_metadata(tone)
 
     def on_creator_focused(self, event) -> None:
         """TOP CREATORS 行聚焦 → 作者信息 + top 音色列表（REQ-012）。"""

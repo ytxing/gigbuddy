@@ -4,6 +4,7 @@ from functools import partial
 from itertools import product
 import sys
 import threading
+import time
 from pathlib import Path
 
 from rich.cells import cell_len
@@ -33,8 +34,11 @@ from .chain_state import (MAX_SLOTS, ChainState, ChainStateError,
                           chain_fingerprint)  # noqa: E402
 from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
                       resolve_rich_style)  # noqa: E402
-from .metadata import (SelectableStatic, description_only, metadata_table,
-                       preset_metadata_table, signed_fixed, theme_colors)  # noqa: E402
+from .metadata import (SelectableStatic, architecture_label, description_only,
+                       metadata_table, model_architecture,
+                       normalize_model_architecture, preset_metadata_table,
+                       preset_slot_label, signed_fixed, theme_colors,
+                       tone_format)  # noqa: E402
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      border_hint_hit, hint_span,
@@ -79,7 +83,7 @@ def _mutation_operations(event) -> set[str]:
     operations = getattr(event, "operations", None)
     if not operations:
         operation = getattr(event, "operation", None)
-        operations = (operation,) if operation else ()
+        operations = (operation) if operation else ()
     return {str(operation) for operation in operations if operation}
 
 
@@ -436,83 +440,6 @@ class NodeSwitchButton(Static):
                          classes="chain-switch-btn")
 
 
-class ChainParamFocusStop(Static):
-    """One focus stop over a fixed parameter column in the dynamic chain."""
-
-    can_focus = True
-    ALLOW_SELECT = False
-
-    def __init__(self, parameter_index: int) -> None:
-        self.parameter_index = parameter_index
-        super().__init__(
-            id=f"chain-param-{parameter_index}",
-            classes="chain-param-focus-stop",
-        )
-
-    @property
-    def owner(self):
-        return self.parent
-
-    def set_geometry(self, start: int, end: int) -> None:
-        self.styles.offset = (start + 1, 0)
-        self.styles.width = max(1, end - start)
-        self.styles.height = 1
-
-    def _content_x(self, x: int) -> int:
-        ranges = getattr(self.owner, "_parameter_ranges", ())
-        if self.parameter_index >= len(ranges):
-            return x
-        # The stop starts one cell after the parent's local origin; the
-        # parent's direct mouse path removes that same padding cell.
-        return ranges[self.parameter_index][0] + x + 1
-
-    def on_focus(self, _event: object) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_parameter_focus(self.parameter_index)
-
-    def on_blur(self, _event: object) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_parameter_blur(self.parameter_index)
-
-    def on_mouse_down(self, event: MouseDown) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_mouse_down_content(self._content_x(event.x))
-        event.stop()
-
-    def on_mouse_up(self, event: MouseUp) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_mouse_up_content()
-        event.stop()
-
-    def on_click(self, event: MouseEvent) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_click_content(self._content_x(event.x))
-        event.stop()
-
-    def on_mouse_move(self, event: MouseMove) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_mouse_move_content(self._content_x(event.x))
-        event.stop()
-
-    def on_leave(self, _event: Leave) -> None:
-        owner = self.owner
-        if owner is not None:
-            owner._on_leave_content()
-
-    def render(self) -> str:
-        owner = self.owner
-        if owner is None or not hasattr(owner, "_controls"):
-            return ""
-        return owner._parameter_markup(
-            self.parameter_index, getattr(owner, "_hover_index", None))
-
-
 class ChainParams(Static):
     """Plain-text chain controls with clickable keyboard-hint keys.
 
@@ -520,10 +447,11 @@ class ChainParams(Static):
     halves highlight and click independently — lowercase steps down, uppercase
     steps up — so the hover shows exactly the key that will fire.
 
-    Mouse interaction uses each parameter's frozen base step. Holding a token
-    for 350ms repeats that same step every 100ms. Releasing, moving off the
-    pressed token, or leaving the widget stops the repeat. Keyboard bindings
-    (g/G/m/M/q/Q) remain equivalent to the mouse path.
+    Mouse interaction applies one base step immediately, then repeats with a
+    short ramp while the token is held. Releasing, moving off the pressed
+    token, or leaving the widget stops the repeat. The App coalesces hold
+    writes so the UI is not blocked by a file/runtime commit on every tick.
+    Keyboard bindings (g/G/m/M/q/Q) remain one base step per key event.
 
     Manual entry (REQ-021): clicking a parameter value (the number) enters
     edit mode — digits/backspace edit at the end, Enter applies through the
@@ -535,59 +463,43 @@ class ChainParams(Static):
 
     ALLOW_SELECT = False
     can_focus = True
-    FOCUS_ON_CLICK = False  # 点击 token 不抢节点焦点；仅单击值区域进编辑时聚焦
+    FOCUS_ON_CLICK = False  # 点击参数行任何位置不抢焦点；仅单击值区域进编辑时聚焦
 
-    # Parameter bindings belong to this focus scope. When a value is being
-    # edited, the same bindings are intentionally swallowed by the guard.
+    # 聚焦本 widget 时遮蔽 App 全局步进键（g/G/m/M/q/Q）与父级 ChainPanel
+    # 的播放键（space/s/l）：按键命中这里先于外层绑定，no-op 即吞掉，
+    # 避免聚焦参数行时误触发全局步进/播放。编辑态按键由 on_key 的
+    # event.stop() 吞掉，与 guard 互补。
     BINDINGS = [
-        Binding("g", "decrease_gain", "gain -", show=False),
-        Binding("G", "increase_gain", "gain +", show=False),
-        Binding("m", "decrease_master", "master -", show=False),
-        Binding("M", "increase_master", "master +", show=False),
-        Binding("q", "decrease_quality", "quality -", show=False),
-        Binding("Q", "increase_quality", "quality +", show=False),
+        Binding("g", "edit_guard", "gain -", show=False),
+        Binding("G", "edit_guard", "gain +", show=False),
+        Binding("m", "edit_guard", "master -", show=False),
+        Binding("M", "edit_guard", "master +", show=False),
+        Binding("q", "edit_guard", "quality -", show=False),
+        Binding("Q", "edit_guard", "quality +", show=False),
+        Binding("space", "edit_guard", "play/pause", show=False),
+        Binding("s", "edit_guard", "stop", show=False),
+        Binding("l", "edit_guard", "loop", show=False),
     ]
 
-    def _step_if_not_editing(self, key: str, delta: float) -> None:
-        if self._editing is None:
-            getattr(self.app, f"action_bump_{key}")(delta)
+    def action_edit_guard(self) -> None:
+        """聚焦 ChainParams 时吞掉全局步进/播放键（g/G/m/M/q/Q、space/s/l）。"""
 
-    def action_decrease_gain(self) -> None:
-        self._step_if_not_editing("gain", -self.BASE_STEPS["gain"])
-
-    def action_increase_gain(self) -> None:
-        self._step_if_not_editing("gain", self.BASE_STEPS["gain"])
-
-    def action_decrease_master(self) -> None:
-        self._step_if_not_editing("master", -self.BASE_STEPS["master"])
-
-    def action_increase_master(self) -> None:
-        self._step_if_not_editing("master", self.BASE_STEPS["master"])
-
-    def action_decrease_quality(self) -> None:
-        self._step_if_not_editing("quality", -self.BASE_STEPS["quality"])
-
-    def action_increase_quality(self) -> None:
-        self._step_if_not_editing("quality", self.BASE_STEPS["quality"])
-
-    # Parameter-specific base steps and the single long-press cadence from the
-    # frozen UI spec. Long press deliberately has no second acceleration tier.
-    BASE_STEPS = {"gain": 0.10, "master": 0.05, "quality": 0.05}
-    LONG_PRESS_DELAY = 0.35
-    LONG_REPEAT_INTERVAL = 0.10
+    # Mouse click/hold steps. Hold timing changes the cadence, never the step
+    # size, so a long press remains predictable and reversible. Keyboard
+    # bindings use the same 0.05 increments.
+    BASE_STEPS = {"gain": 0.05, "master": 0.05, "quality": 0.05}
+    HOLD_INITIAL_DELAY = 0.20
+    HOLD_STAGE_ONE_END = 0.60
+    HOLD_STAGE_TWO_END = 1.20
+    HOLD_STAGE_INTERVALS = (0.12, 0.08, 0.06)
+    HOLD_TICK = 0.025
 
     # 手动填写限制：小数 ≤ 2 位（与 signed_fixed 显示一致）、总长 ≤ 8 字符
     EDIT_MAX_DECIMALS = 2
     EDIT_MAX_LENGTH = 8
 
-    def __init__(self, *args, split_focus: bool = False, **kwargs) -> None:
-        self.split_focus = split_focus
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if split_focus:
-            self.can_focus = False
-        self._focus_stops: list[ChainParamFocusStop] = []
-        self._parameter_ranges: list[tuple[int, int]] = []
-        self._focused_parameter: int | None = None
         # 按下状态：_press_span 为按下的 token 下标（None=未按下）；
         # _long_press_active 为真时释放的合成 click 不再步进；
         # _press_cancelled 为真时（移出 token/面板）click 被丢弃。
@@ -596,6 +508,16 @@ class ChainParams(Static):
         self._repeat_timer = None
         self._long_press_active = False
         self._press_cancelled = False
+        self._param_keys = ("gain", "master", "quality")
+        # The local value is kept visible while a background hold commit is in
+        # flight. It is cleared only after the final value is acknowledged.
+        self._hold_generation: int | None = None
+        self._hold_key: str | None = None
+        self._hold_value: float | None = None
+        self._hold_direction = 0
+        self._hold_started_at = 0.0
+        self._next_repeat_at = 0.0
+        self._hold_end_sent = False
         # 手动填写（REQ-021）：_editing 为参数下标（0/1/2）或 None
         self._editing: int | None = None
         self._edit_text = ""
@@ -603,35 +525,6 @@ class ChainParams(Static):
         # _cursor_timer 每 0.5s 切换一次。
         self._cursor_visible = True
         self._cursor_timer = None
-
-    def compose(self) -> ComposeResult:
-        if self.split_focus:
-            self._focus_stops = [
-                ChainParamFocusStop(index) for index in range(3)
-            ]
-            yield from self._focus_stops
-
-    def _sync_focus_stops(self) -> None:
-        for stop in self._focus_stops:
-            if stop.parameter_index < len(self._parameter_ranges):
-                stop.set_geometry(*self._parameter_ranges[stop.parameter_index])
-                stop.refresh()
-
-    def _on_parameter_focus(self, index: int) -> None:
-        self._focused_parameter = index
-        self.refresh()
-
-    def _on_parameter_blur(self, index: int) -> None:
-        if self._editing is not None:
-            self._exit_edit()
-        if self._focused_parameter == index:
-            self._focused_parameter = None
-
-    def _focus_parameter(self, index: int) -> None:
-        if self.split_focus and index < len(self._focus_stops):
-            self._focus_stops[index].focus()
-        else:
-            self.focus()
 
     def set_values(self, gain: float, master: float, quality: float) -> None:
         controls = [
@@ -645,21 +538,35 @@ class ChainParams(Static):
              lambda step: self.app.action_bump_quality(-step),
              lambda step: self.app.action_bump_quality(+step)),
         ]
+        if self._hold_key is not None and self._hold_value is not None:
+            hold_index = self._param_keys.index(self._hold_key)
+            label, _value, hint, decrease, increase = controls[hold_index]
+            controls[hold_index] = (
+                label, signed_fixed(self._hold_value), hint,
+                decrease, increase)
+        self._controls = controls
+        self._rebuild_hit_regions()
+        # 长按进行中时 set_values（每次步进都会触发）保持按下 token 的高亮，
+        # 否则重建会清掉它；普通更新则清空悬停。
+        self._hover_index = self._press_span if self._long_press_active else None
+        self._refresh_hint(self._hover_index)
+
+    def _rebuild_hit_regions(self) -> None:
+        """Recalculate hit spans after a value changes width."""
         # (token, start, end, action) — one span per key half, so the dot
         # separates the two click targets instead of merging them.  action
         # takes the step size (always positive); the sign is baked in.
         self._spans: list[tuple[str, int, int, Callable[[float], None]]] = []
-        self._parameter_ranges = []
         # 数值区域（单击进编辑）：(参数下标, start, end)，value 文本含
         # signed_fixed 的符号空格，整段可点。
         self._value_spans: list[tuple[int, int, int]] = []
         # 分隔点（点击恢复该参数默认值，REQ-027）：(参数下标, start, end)
         self._dot_spans: list[tuple[int, int, int]] = []
         offset = 0
-        for index, (label, value, hint, decrease, increase) in enumerate(controls):
+        for index, (label, value, hint, decrease, increase) in enumerate(
+                self._controls):
             if index:
                 offset += 1
-            parameter_start = offset
             prefix = f"{label}  {value} "
             value_start = offset + len(label) + 2
             self._value_spans.append((index, value_start, value_start + len(value)))
@@ -671,13 +578,6 @@ class ChainParams(Static):
             offset += 3
             self._spans.append((hi, offset, offset + len(hi), increase))
             offset += len(hi)
-            self._parameter_ranges.append((parameter_start, offset))
-        self._controls = controls
-        self._param_keys = ("gain", "master", "quality")
-        # 长按进行中时 set_values（每次步进都会触发）保持按下 token 的高亮，
-        # 否则重建会清掉它；普通更新则清空悬停。
-        self._hover_index = self._press_span if self._long_press_active else None
-        self._refresh_hint(self._hover_index)
 
     def _parameter_markup(self, index: int, hovered: int | None) -> str:
         """Render one fixed-width parameter segment."""
@@ -725,7 +625,6 @@ class ChainParams(Static):
                 parts.append(" ")
             parts.append(self._parameter_markup(index, hovered))
         self.update("".join(parts))
-        self._sync_focus_stops()
 
     # ---- 鼠标点按/长按步进（REQ-007）----
 
@@ -735,8 +634,7 @@ class ChainParams(Static):
             (index for index, (token, start, end, _)
              in enumerate(getattr(self, "_spans", []))
              if start <= x < end),
-            None,
-        )
+            None)
 
     # ---- 手动填写数值（REQ-021）----
 
@@ -756,8 +654,7 @@ class ChainParams(Static):
             (10 + index for index, start, end
              in getattr(self, "_value_spans", [])
              if start <= x < end),
-            None,
-        )
+            None)
 
     def _dot_at(self, x: int) -> int | None:
         """局部列 x 命中的分隔点（返回 20+参数下标，供 hover 编码）"""
@@ -765,8 +662,7 @@ class ChainParams(Static):
             (20 + index for index, start, end
              in getattr(self, "_dot_spans", [])
              if start <= x < end),
-            None,
-        )
+            None)
 
     def _begin_edit(self, index: int) -> None:
         """进入编辑态：预填当前显示值，聚焦本 widget 接收键盘。"""
@@ -776,7 +672,7 @@ class ChainParams(Static):
         if self._cursor_timer is None:
             self._cursor_timer = self.set_interval(0.5, self._toggle_cursor)
         self._refresh_hint()
-        self._focus_parameter(index)
+        self.focus()
 
     def _toggle_cursor(self) -> None:
         """0.5s 闪烁：光标 ▌/空格占位切换（占位保持行宽，token 不位移）。"""
@@ -879,32 +775,112 @@ class ChainParams(Static):
                 timer.stop()
                 setattr(self, attr, None)
 
-    def _cancel_press(self) -> None:
-        """终止当前按下：停止全部定时器并丢弃随后的合成 click"""
+    def _hold_interval(self, elapsed: float) -> float:
+        if elapsed < self.HOLD_STAGE_ONE_END:
+            return self.HOLD_STAGE_INTERVALS[0]
+        if elapsed < self.HOLD_STAGE_TWO_END:
+            return self.HOLD_STAGE_INTERVALS[1]
+        return self.HOLD_STAGE_INTERVALS[2]
+
+    def _set_hold_display(self, value: float) -> None:
+        """Update the visible value and hit regions before persistence returns."""
+        if self._hold_key is None:
+            return
+        index = self._param_keys.index(self._hold_key)
+        label, _old, hint, decrease, increase = self._controls[index]
+        controls = list(self._controls)
+        controls[index] = (
+            label, signed_fixed(value), hint, decrease, increase)
+        self._controls = controls
+        self._rebuild_hit_regions()
+        self._hover_index = self._press_span
+        self._refresh_hint(self._hover_index)
+
+    def _apply_hold_step(self, *, force: bool = False) -> bool:
+        """Apply one local step and enqueue the latest absolute value."""
+        if (self._hold_generation is None or self._hold_key is None
+                or self._hold_value is None):
+            return False
+        lo, hi = self.PARAM_RANGES[self._hold_key]
+        step = self.BASE_STEPS[self._hold_key] * self._hold_direction
+        value = round(max(lo, min(hi, self._hold_value + step)), 2)
+        if value == self._hold_value:
+            self._finish_hold()
+            return False
+        self._hold_value = value
+        self._set_hold_display(value)
+        self.app.queue_chain_param_hold(
+            self._hold_generation, self._hold_key, value, force=force)
+        return True
+
+    def _finish_hold(self) -> None:
+        """Stop repeat and request one final, forced persistence flush."""
+        self._cancel_timers()
+        self._press_span = None
+        if (self._hold_generation is not None and self._hold_key is not None
+                and self._hold_value is not None and not self._hold_end_sent):
+            self._hold_end_sent = True
+            self.app.end_chain_param_hold(
+                self._hold_generation, self._hold_key, self._hold_value)
+
+    def _hold_commit_ack(self, generation: int, *, final: bool) -> None:
+        """Release the local display override after the final commit lands."""
+        if generation != self._hold_generation or not final:
+            return
+        self._hold_generation = None
+        self._hold_key = None
+        self._hold_value = None
+        self._hold_direction = 0
+        self._hold_end_sent = False
+        self._refresh_hint(self._hover_index)
+
+    def abort_param_hold(self, generation: int) -> None:
+        """Abort a failed background hold and return to persisted values."""
+        if generation != self._hold_generation:
+            return
         self._cancel_timers()
         self._press_span = None
         self._long_press_active = False
         self._press_cancelled = True
+        self._hold_generation = None
+        self._hold_key = None
+        self._hold_value = None
+        self._hold_direction = 0
+        self._hold_end_sent = False
+        self._refresh_hint()
 
-    def _begin_long_press(self) -> None:
-        self._long_press_timer = None
-        if self._press_span is None or self._press_cancelled:
-            return
-        self._long_press_active = True
-        self._step(self._press_span)
-        self._repeat_timer = self.set_interval(
-            self.LONG_REPEAT_INTERVAL, self._repeat_long_press)
+    def _cancel_press(self) -> None:
+        """终止当前按下：停止全部定时器并丢弃随后的合成 click"""
+        self._finish_hold()
+        self._press_span = None
+        self._long_press_active = False
+        self._press_cancelled = True
 
     def _repeat_long_press(self) -> None:
-        if self._press_span is not None and not self._press_cancelled:
-            self._step(self._press_span)
+        if (self._press_span is None or self._press_cancelled
+                or self._hold_generation is None):
+            return
+        now = time.monotonic()
+        if now < self._next_repeat_at:
+            return
+        if not self._apply_hold_step():
+            return
+        elapsed = now - self._hold_started_at
+        interval = self._hold_interval(elapsed)
+        # Use monotonic deadlines, but never burst several steps in one UI
+        # callback after a delayed frame. A delayed callback shifts only the
+        # next deadline instead of producing a visible jump.
+        self._next_repeat_at = max(
+            self._next_repeat_at + interval, now + self.HOLD_TICK)
 
-    def _on_mouse_down_content(self, x: int) -> None:
+    def on_mouse_down(self, event: MouseDown) -> None:
+        x = max(0, event.x - 1)  # chain-params has one cell of left padding
         if self._editing is not None:
             # 编辑态中按下任何位置：先取消编辑（不应用），并复用
             # _press_cancelled 让随后的合成 click 不步进
             self._exit_edit()
             self._press_cancelled = True
+            event.stop()
             return
         self._cancel_timers()
         self._press_cancelled = False
@@ -912,62 +888,64 @@ class ChainParams(Static):
         self._press_span = self._span_at(x)
         if self._press_span is None:
             return
+        event.stop()
+        key = self._param_keys[self._press_span // 2]
+        direction = -1 if self._press_span % 2 == 0 else 1
+        generation, current = self.app.begin_chain_param_hold(key)
+        self._hold_generation = generation
+        self._hold_key = key
+        self._hold_value = current
+        self._hold_direction = direction
+        self._hold_started_at = time.monotonic()
+        self._next_repeat_at = (
+            self._hold_started_at + self.HOLD_INITIAL_DELAY)
+        self._hold_end_sent = False
+        self._long_press_active = True
         # capture 保证按住拖出面板时仍能收到 move（移出即停止长按）；
         # mouse up 时在 on_mouse_up 里显式释放。
         self.capture_mouse()
-        self._long_press_timer = self.set_timer(
-            self.LONG_PRESS_DELAY, self._begin_long_press)
+        if self._apply_hold_step(force=True):
+            self._repeat_timer = self.set_interval(
+                self.HOLD_TICK, self._repeat_long_press)
 
-    def on_mouse_down(self, event: MouseDown) -> None:
-        x = max(0, event.x - 1)  # chain-params has one cell of left padding
-        self._on_mouse_down_content(x)
-        if self._press_span is not None or self._editing is None:
-            event.stop()
-
-    def _on_mouse_up_content(self) -> None:
-        self._cancel_timers()
-        self._press_span = None
+    def on_mouse_up(self, event: MouseUp) -> None:
+        self._finish_hold()
         self.release_mouse()
         # _long_press_active / _press_cancelled 留给紧随的合成 click 消费
 
-    def on_mouse_up(self, event: MouseUp) -> None:
-        self._on_mouse_up_content()
-        event.stop()
-
-    def _on_click_content(self, x: int) -> None:
+    def on_click(self, event: MouseEvent) -> None:
         if self._long_press_active or self._press_cancelled:
             # 长按释放 / 已取消的按下：合成 click 不再步进
             self._long_press_active = False
             self._press_cancelled = False
+            event.stop()
             return
         if self._editing is not None:
             # 编辑中点击：取消编辑（不应用）
             self._exit_edit()
+            event.stop()
             return
+        x = max(0, event.x - 1)  # chain-params has one cell of left padding
         # 分隔点：恢复参数默认值（REQ-027，走同一条写链路径）
         dot_hit = self._dot_at(x)
         if dot_hit is not None:
+            event.stop()
             key = self._param_keys[dot_hit - 20]
             self.app._set_chain_param(key, self.PARAM_DEFAULTS[key])
             return
         # 数值区域：进入手动编辑
         value_hit = self._value_at(x)
         if value_hit is not None:
+            event.stop()
             self._begin_edit(value_hit - 10)
             return
         span = self._span_at(x)
         if span is not None:
+            event.stop()
             self._step(span)
 
-    def on_click(self, event: MouseEvent) -> None:
-        x = max(0, event.x - 1)  # chain-params has one cell of left padding
-        self._on_click_content(x)
-        if (self._long_press_active or self._press_cancelled or
-                self._editing is not None or self._dot_at(x) is not None or
-                self._value_at(x) is not None or self._span_at(x) is not None):
-            event.stop()
-
-    def _on_mouse_move_content(self, x: int) -> None:
+    def on_mouse_move(self, event: MouseMove) -> None:
+        x = max(0, event.x - 1)
         if self._press_span is not None:
             # 按住期间：移出按下的 token 立即停止长按（capture 保证按住
             # 拖出仍收到 move）；停在原 token 上时不更新悬停。
@@ -985,17 +963,11 @@ class ChainParams(Static):
         self._hover_index = hovered
         self._refresh_hint(hovered)
 
-    def on_mouse_move(self, event: MouseMove) -> None:
-        self._on_mouse_move_content(max(0, event.x - 1))
-
-    def _on_leave_content(self) -> None:
+    def on_leave(self, event: Leave) -> None:
         self._cancel_press()
         if self._hover_index is not None:
             self._hover_index = None
             self._refresh_hint()
-
-    def on_leave(self, event: Leave) -> None:
-        self._on_leave_content()
 
     def on_unmount(self, event: Unmount) -> None:
         """链面板销毁时停止可能仍在跑的长按/闪烁光标定时器"""
@@ -1030,6 +1002,11 @@ class ChainSlotWidget(Static):
             super().__init__()
             self.index = index
 
+    class ToneRequested(Message):
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
     class MoveRequested(Message):
         def __init__(self, index: int, direction: int) -> None:
             super().__init__()
@@ -1041,8 +1018,8 @@ class ChainSlotWidget(Static):
         Binding("down", "switch_down", "next model", show=False),
         Binding("enter", "toggle_bypass", "bypass/restore", show=False),
         Binding("d", "delete_slot", "delete", show=False),
-        Binding("alt+up", "move_up", "move up", show=False),
-        Binding("alt+down", "move_down", "move down", show=False),
+        Binding("alt+up", "move_up", "move ↑", show=False),
+        Binding("alt+down", "move_down", "move ↓", show=False),
     ]
 
     def __init__(self, index: int, snapshot: SlotSnapshot,
@@ -1170,11 +1147,78 @@ class ChainSlotWidget(Static):
     def action_delete_slot(self) -> None:
         self.post_message(self.DeleteRequested(self.index))
 
+    def action_choose_tone(self) -> None:
+        self.post_message(self.ToneRequested(self.index))
+
     def action_move_up(self) -> None:
         self.post_message(self.MoveRequested(self.index, -1))
 
     def action_move_down(self) -> None:
         self.post_message(self.MoveRequested(self.index, +1))
+
+
+class ChainSlotRow(Horizontal):
+    """Slot frame with its actions rendered in the lower-right border hint."""
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+        self.slot: ChainSlotWidget | None = None
+        super().__init__(classes="chain-slot-row",
+                         id=f"chain-slot-row-{index}")
+
+    def bind_slot(self, slot: ChainSlotWidget) -> None:
+        self.slot = slot
+        self.refresh_hint()
+
+    def _hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
+        slot = self.slot
+        if slot is None:
+            return []
+        actions = [
+            ("delete", lambda: self._post(slot.DeleteRequested(self.index))),
+            ("tone", lambda: self._post(slot.ToneRequested(self.index))),
+        ]
+        if slot.status is not SlotStatus.EMPTY:
+            toggle = "restore" if slot.status is SlotStatus.BYPASS else "bypass"
+            actions.append(
+                (toggle, lambda: self._post(slot.ToggleRequested(self.index))))
+        actions.extend([
+            ("move ↑", lambda: self._post(slot.MoveRequested(self.index, -1))),
+            ("↓", lambda: self._post(slot.MoveRequested(self.index, +1))),
+        ])
+        return actions
+
+    def _post(self, message: Message) -> None:
+        if self.slot is None:
+            return
+        message.set_sender(self.slot)
+        self.slot.post_message(message)
+
+    def refresh_hint(self) -> None:
+        set_border_hint_layout(
+            self, "", [token for token, _action in self._hint_actions()])
+
+    def handle_hint_click(self, event: MouseEvent) -> bool:
+        return border_hint_click(self, event, self._hint_actions())
+
+    def on_mount(self) -> None:
+        self.refresh_hint()
+
+    def on_resize(self, _event) -> None:
+        self.refresh_hint()
+
+    def on_click(self, event: MouseEvent) -> None:
+        self.handle_hint_click(event)
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        set_border_hint_hover(
+            self,
+            border_hint_action_token(
+                self, event.screen_x, event.screen_y,
+                [token for token, _action in self._hint_actions()]))
+
+    def on_leave(self, _event: Leave) -> None:
+        set_border_hint_hover(self, None)
 
 
 class ChainSlotAction(Static):
@@ -1294,6 +1338,7 @@ class ChainPanel(Vertical):
             str, tuple[str | None, str | None, bool]
         ] = {}
         self._slot_widgets: dict[int, ChainSlotWidget] = {}
+        self._slot_rows: dict[int, ChainSlotRow] = {}
         self._last_focus_slot: int | None = None
         self._mutation_anchor: ViewAnchor | None = None
         # Legacy hint fallback: last focused fixed AMP/CAB node.
@@ -1333,7 +1378,7 @@ class ChainPanel(Vertical):
                 gear = tone.get("gear") or None
                 quality_unsupported = (
                     Path(path).suffix.lower() == ".nam"
-                    and model.get("architecture") != "SlimmableContainer"
+                    and model_architecture(model, tone=tone) != "A2"
                 )
         except Exception:
             pass
@@ -1347,73 +1392,15 @@ class ChainPanel(Vertical):
         The state prefix is rebuilt separately so a changing target/count can
         grow to the left without moving the stable action suffix's right edge.
         """
-        index = self._last_focus_slot
-        if index is None:
-            index = self.state.target_index
-
-        def send(message: Message) -> None:
-            slot = self._slot_widgets.get(index) if index is not None else None
-            if slot is None:
-                self.app.notify("Add or select a target slot", severity="warning")
-                return
-            message.set_sender(slot)
-            slot.post_message(message)
-
         actions: list[tuple[str, Callable[[], None]]] = []
-        if self.state.slot_count < MAX_SLOTS:
-            actions.append((
-                "+ add", lambda: self.post_message(AddSlotButton.Requested())))
         actions.extend([
-            ("d delete", lambda: send(
-                ChainSlotWidget.DeleteRequested(index))),
-            ("enter bypass/restore", lambda: send(
-                ChainSlotWidget.ToggleRequested(index))),
-            ("⌥↑ move", lambda: send(
-                ChainSlotWidget.MoveRequested(index, -1))),
-            ("⌥↓ move", lambda: send(
-                ChainSlotWidget.MoveRequested(index, +1))),
-            # Keep the two directions as separate hit targets. A single
-            # combined ``↑/↓`` token cannot be equivalent to both keyboard
-            # actions when clicked.
-            ("↑ model", lambda: send(
-                ChainSlotWidget.SwitchRequested(index, -1))),
-            ("↓ model", lambda: send(
-                ChainSlotWidget.SwitchRequested(index, +1))),
-            ("space play/pause", lambda: self._fire_node_message(
-                self.input_node, self.input_node.PlaybackRequested("toggle"))),
+            ("save", self.app.action_open_chain_save_menu),
+            ("clear all slots", self.app.action_clear_all_slots),
         ])
-        # The full app layout gives ChainPanel only about half the terminal
-        # width even at the supported 120-column minimum. Build the hint in
-        # priority order and let the shared fitter compact complete tokens;
-        # current Slot actions must remain ahead of move/model/playback.
-        width = self.region.width or (self.size.width + 4)
-        if 0 < width <= 56 and index is None:
-            by_label = {label: callback for label, callback in actions}
-            narrow: list[tuple[str, Callable[[], None]]] = []
-            if self.state.slot_count < MAX_SLOTS:
-                narrow.append(("+", by_label["+ add"]))
-            narrow.extend([
-                ("d", by_label["d delete"]),
-                ("↑ model", by_label["↑ model"]),
-                ("↓ model", by_label["↓ model"]),
-            ])
-            return narrow
-        # Keep the highest-priority prefix here, then let the shared fitter
-        # shorten complete labels to key-only tokens.
-        budget = max(width - 6, 1)
-        selected: list[tuple[str, Callable[[], None]]] = []
-        for action in actions:
-            keys = [label.strip().split(None, 1)[0]
-                    for label, _callback in (*selected, action)]
-            if cell_len(" · ".join(keys)) > budget:
-                break
-            selected.append(action)
-        return selected or actions[:1]
+        return actions
 
     def _dynamic_hint_state(self) -> str:
         state = f"{self.state.slot_count}/{MAX_SLOTS} slots"
-        if self.state.target_index is not None:
-            state += f" · target {self.state.target_index + 1:02d}"
         if self.state.chain_error:
             state += " · error"
         return state
@@ -1442,8 +1429,7 @@ class ChainPanel(Vertical):
             ("d delete", "d del", "d"),
             ("space play/pause", "space play", "space"),
             ("s stop", "s"),
-            ("l loop", "l"),
-        )
+            ("l loop", "l"))
         choices = []
         for candidate in product(*options):
             action_text = " · ".join(candidate)
@@ -1451,8 +1437,7 @@ class ChainPanel(Vertical):
                 score = (
                     candidate[3] == "l loop",
                     sum(cell_len(label) for label in candidate),
-                    tuple(cell_len(label) for label in candidate),
-                )
+                    tuple(cell_len(label) for label in candidate))
                 choices.append((score, candidate))
         labels = max(choices, default=((), ("d", "space", "s", "l")))[1]
         return [
@@ -1464,6 +1449,13 @@ class ChainPanel(Vertical):
             (labels[3], lambda: self._fire_node_message(
                 self.input_node, self.input_node.PlaybackRequested("loop"))),
         ]
+
+    def handle_slot_hint_click(self, event: MouseEvent) -> bool:
+        """Handle an action token on a Slot frame before row fallback routing."""
+        for row in self._slot_rows.values():
+            if row.handle_hint_click(event):
+                return True
+        return False
 
     @staticmethod
     def _fire_node_message(node: NodeWidget, message: Message) -> None:
@@ -1546,7 +1538,7 @@ class ChainPanel(Vertical):
             pass
         screen_id, app_tab = view_context(self)
         selection_keys = (
-            (f"slot:{self.state.target_index}",)
+            (f"slot:{self.state.target_index}")
             if self.state.target_index is not None else ())
         return ViewAnchor(
             screen_id=screen_id,
@@ -1561,8 +1553,7 @@ class ChainPanel(Vertical):
             scroll_y=float(getattr(self, "scroll_y", 0.0)),
             selection_keys=selection_keys,
             confirmation_state=None,
-            detail_context_key=detail_context_key,
-        )
+            detail_context_key=detail_context_key)
 
     def set_mutation_anchor(self, anchor: ViewAnchor | None) -> None:
         self._mutation_anchor = anchor
@@ -1636,24 +1627,27 @@ class ChainPanel(Vertical):
     def on_resize(self, _event) -> None:
         if hasattr(self, "input_node"):
             self._refresh_hint()
+        for row in self._slot_rows.values():
+            row.refresh_hint()
 
     def compose(self) -> ComposeResult:
         if not self._legacy_mode:
             self._slot_widgets = {}
+            self._slot_rows = {}
             with Horizontal(classes="chain-node-row chain-node-row-input"):
                 self.input_node = InputNodeWidget()
                 yield self.input_node
             for snapshot in self.state.slots:
                 path = snapshot.path or snapshot.candidate
                 title, gear, quality_unsupported = self._slot_metadata(path)
-                with Horizontal(
-                        classes="chain-slot-row",
-                        id=f"chain-slot-row-{snapshot.index}"):
+                with ChainSlotRow(snapshot.index) as row:
                     slot = ChainSlotWidget(
                         snapshot.index, snapshot, title=title, gear=gear,
                         quality_unsupported=quality_unsupported)
                     slot.is_target = snapshot.index == self.state.target_index
                     self._slot_widgets[snapshot.index] = slot
+                    self._slot_rows[snapshot.index] = row
+                    row.bind_slot(slot)
                     yield slot
                     with Horizontal(classes="chain-slot-actions"):
                         yield ChainSlotAction(slot, -1)
@@ -1661,8 +1655,7 @@ class ChainPanel(Vertical):
             self.add_slot = AddSlotButton(
                 disabled=self.state.slot_count >= MAX_SLOTS)
             yield self.add_slot
-            self.params = ChainParams(
-                "", classes="chain-params", split_focus=True)
+            self.params = ChainParams("", classes="chain-params")
             yield self.params
             return
         # REQ-043 追加：聚焦 marquee 行已删——节点框本身显示标题+文件名，
@@ -1708,8 +1701,7 @@ class ChainPanel(Vertical):
         tokens = [token for token, _ in self._border_hint_actions()]
         set_border_hint_hover(
             self,
-            border_hint_action_token(self, event.screen_x, event.screen_y, tokens),
-        )
+            border_hint_action_token(self, event.screen_x, event.screen_y, tokens))
 
     def on_leave(self, event: Leave) -> None:
         set_border_hint_hover(self, None)
@@ -1734,6 +1726,9 @@ class ChainPanel(Vertical):
                 snapshot, title=title, gear=gear,
                 quality_unsupported=quality_unsupported)
             widget.set_target(index == target)
+            row = self._slot_rows.get(index)
+            if row is not None:
+                row.refresh_hint()
         if hasattr(self, "add_slot"):
             self.add_slot.disabled = self.state.slot_count >= MAX_SLOTS
             self.add_slot.refresh()
@@ -1742,8 +1737,7 @@ class ChainPanel(Vertical):
             self.params.set_values(
                 float(chain.get("gain", live.CHAIN_PARAMETER_DEFAULTS["gain"])),
                 float(chain.get("master", live.CHAIN_PARAMETER_DEFAULTS["master"])),
-                float(chain.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])),
-            )
+                float(chain.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])))
         self._refresh_hint()
 
     def reconcile_after_mutation(self, event) -> None:
@@ -1810,8 +1804,7 @@ class ChainPanel(Vertical):
                     # would preserve bypass candidates after an external
                     # replacement merely because a previous TUI write exists.
                     fingerprint=live.chain_file_fingerprint(),
-                    revision=chain.get("revision"),
-                )
+                    revision=chain.get("revision"))
                 self._observed_chain_fingerprint = observed
             if len(self._slot_widgets) != self.state.slot_count:
                 self._schedule_dynamic_recompose(self.state.target_index)
@@ -1914,6 +1907,7 @@ class PackFileTable(ClickSelectTable):
         Binding("a", "toggle_all_pick", "all/none", show=False),
         Binding("i", "install_selected", "install", show=False),
         Binding("u", "uninstall_selected", "uninstall", show=False),
+        Binding("x", "expand_pack", "expand", show=False),
     ]
 
     def __init__(self) -> None:
@@ -1939,6 +1933,9 @@ class PackFileTable(ClickSelectTable):
 
     def action_uninstall_selected(self) -> None:
         self.screen.query_one(DetailPane)._pack_uninstall_selected()
+
+    def action_expand_pack(self) -> None:
+        self.screen.query_one(DetailPane).action_expand_pack()
 
     def action_close_pack(self) -> None:
         pane = self.screen.query_one(DetailPane)
@@ -2007,11 +2004,11 @@ class DetailViewTabs(ViewTabStrip):
 
     def __init__(self) -> None:
         super().__init__(
-            "DETAIL",
+            "TONE DETAIL",
             [("description", "DESCRIPTION"), ("selection", "PACK")],
             active="description",
             id="detail-view-tabs",
-        )
+            classes="view-tabs--border")
         self._has_pack = False
 
     def set_view(self, mode: str, *, has_pack: bool) -> None:
@@ -2019,6 +2016,7 @@ class DetailViewTabs(ViewTabStrip):
         self.display = has_pack
         if has_pack:
             self.set_active(mode)
+            self.sync_border_title()
         self.refresh()
 
     def action_previous_view(self) -> None:
@@ -2074,6 +2072,13 @@ class DetailPane(Vertical):
             super().__init__()
             self.tone = tone
 
+    class PackExpandedRequested(Message):
+        """The PACK view requested the larger v0.1.1-style detail screen."""
+
+        def __init__(self, tone: dict) -> None:
+            super().__init__()
+            self.tone = tone
+
     class PackFilesInstalled(Message):
         """pack 表 i 键安装完成（二级菜单内直接下载选中的模型）。"""
 
@@ -2102,6 +2107,7 @@ class DetailPane(Vertical):
         Binding("enter", "browse_empty_slot", "browse", show=False),
         Binding("d", "delete_empty_slot", "delete", show=False),
         Binding("r", "retry_detail", "retry", show=False),
+        Binding("x", "expand_pack", "expand", show=False),
         Binding("escape", "back_from_creator", "back", show=False),
     ]
 
@@ -2167,8 +2173,9 @@ class DetailPane(Vertical):
         text-style: bold;
     }
     DetailPane #detail-view-tabs {
-        height: 1; padding: 0 1; margin-bottom: 1;
-        color: $text-muted; background: $panel;
+        position: absolute; layer: border-tabs;
+        width: 1; height: 1; padding: 0; margin: 0;
+        opacity: 0;
     }
     DetailPane #detail-slots {
         height: 1; padding: 0 1; margin-bottom: 1;
@@ -2205,6 +2212,7 @@ class DetailPane(Vertical):
         self._pack_table.display = False
         self._pack_mode = False
         self._pack_remote = False  # 远程（未下载）pack：Enter 走安装二级页
+        self._pack_auto_load_first = False
         self._pack_kind = "amp"
         self._pack_slot_index: int | None = None
         self._pack_slot_status: SlotStatus | None = None
@@ -2343,14 +2351,24 @@ class DetailPane(Vertical):
     def _theme_colors(self) -> dict[str, str]:
         return theme_colors(self.app)
 
-    # Per-gear badge colors: amp burns orange, cab green, pedal yellow;
-    # anything unknown (e.g. experimental) falls back to muted.
-    _GEAR_STYLES = {"amp": "$primary", "cab": "$success", "pedal": "$warning"}
+    # Keep native TONE3000 gear tokens distinct in the compact detail summary.
+    # Unknown future values intentionally fall back to muted instead of
+    # inventing a new semantic color at render time.
+    _GEAR_STYLES = {
+        "amp": "$primary",
+        "amp-cab": "$accent",
+        "cab": "$success",
+        "pedal": "$success",
+        "space": "#6aa9e8",
+        "outboard": "#5bb6a8",
+        "experimental": "$text-muted",
+    }
 
     @staticmethod
     def _gear_badge(gear: str) -> str:
-        style = DetailPane._GEAR_STYLES.get(gear, "$text-muted")
-        return f"[b {style}]{_escape(gear.upper())}[/]"
+        token = str(gear or "").strip().casefold()
+        style = DetailPane._GEAR_STYLES.get(token, "$text-muted")
+        return f"[b {style}]{_escape(token.upper())}[/]"
 
     @staticmethod
     def _tone_summary(tone: dict, model_id: int | None = None) -> str:
@@ -2368,6 +2386,9 @@ class DetailPane(Vertical):
             parts.append(f"[b $accent]@{_escape(str(username))}[/]{badge}")
         if tone.get("gear"):
             parts.append(DetailPane._gear_badge(str(tone["gear"])))
+        fmt = tone_format(tone)
+        if fmt:
+            parts.append(f"[b $text-muted]{_escape(fmt)}[/]")
         models = tone.get("models_count")
         if models is not None:
             parts.append(f"[b]{models}[/] [dim]MODELS[/dim]")
@@ -2447,6 +2468,7 @@ class DetailPane(Vertical):
         # A pack response that belongs to the previous view must never be able
         # to re-enter the table after the user has moved elsewhere.
         self._pack_remote = False
+        self._pack_auto_load_first = False
         self._pack_tone = {}
         self._pack_rows = {}
         self._pack_path_to_key = {}
@@ -2458,6 +2480,7 @@ class DetailPane(Vertical):
             self._pack_slot_status = None
             self._pack_slot_label = None
         self._pack_error = False
+        self._pack_loading = False
         self._pack_busy = None
         self._pack_operation_generation += 1
         set_border_hint_layout(self, "", [])
@@ -2488,17 +2511,69 @@ class DetailPane(Vertical):
         self._summary.content = content
         self._summary.set_class(not content, "detail-summary--empty")
 
+    def update_tone_metadata(self, tone: dict) -> None:
+        """Merge a fetched remote tone into the visible detail in place.
+
+        Search rows are intentionally lightweight. A later ``tone_by_id``
+        response must enrich the current Description/PACK without rebuilding
+        the view, otherwise keyboard navigation can jump and pack loading can
+        lose its cursor.
+        """
+        tone_id = tone.get("id")
+        current_id = (self._current_tone or {}).get("id")
+        if tone_id is None or current_id is None or int(tone_id) != int(current_id):
+            return
+        merged = dict(self._current_tone or {})
+        merged.update(tone)
+        self._current_tone = merged
+        if int((self._pack_tone or {}).get("id") or 0) == int(tone_id):
+            self._pack_tone = dict(self._pack_tone)
+            self._pack_tone.update(tone)
+
+        if self._summary_mode != "tone":
+            return
+        if self._view_mode == "description":
+            summary = self._tone_summary(merged)
+            if self._pack_slot_index is not None:
+                state = (self._pack_slot_status.value.upper()
+                         if self._pack_slot_status else "SLOT")
+                summary = " · ".join(
+                    part for part in (summary, state,
+                                      f"TARGET {self._pack_slot_index + 1:02d}")
+                    if part)
+            self._set_summary(summary)
+            self._set_marquee(self._marquee_content(
+                merged, self._chain_model_id(merged)))
+            self._body.update(description_only(
+                merged, colors=self._theme_colors()))
+            self._rerender = lambda: self._body.update(
+                description_only(
+                    merged, colors=self._theme_colors()))
+        elif self._view_mode == "selection":
+            self._set_summary(self._tone_summary(merged))
+            rows = self._pack_table.ordered_rows
+            model_id = None
+            if rows and 0 <= self._pack_table.cursor_row < len(rows):
+                model = self._pack_rows.get(rows[self._pack_table.cursor_row].key.value)
+                if model:
+                    model_id = model.get("id")
+            self._set_marquee(self._marquee_content(merged, model_id))
+        self._ensure_verification(merged)
+
     def _refresh_view_tabs(self) -> None:
         """Keep the visible Description/Pack strip aligned with the view."""
-        has_pack = bool(
-            self._current_tone
-            and (self._description_remote or self._pack_remote or self._pack_rows
-                 or self._pack_slot_index is not None)
-        )
+        # LOCAL and TONE3000 tones share one canonical detail surface. PACK is
+        # a sibling view of DESCRIPTION even before its rows are loaded or a
+        # target Slot exists, so the two tags never change by data state.
+        has_pack = self._summary_mode == "tone" and bool(self._current_tone)
         mode = self._view_mode if self._view_mode in {
             "description", "selection"
         } else "description"
         self._view_tabs.set_view(mode, has_pack=has_pack)
+        # Multi-view tone contexts use the outer border as their single title
+        # row; non-tone surfaces retain their own contextual border title.
+        if has_pack:
+            self._view_tabs.sync_border_title()
 
     def _detail_context_key(self, tone: dict | None = None) -> str:
         """Return a stable key for the current Description/Pack pair."""
@@ -2508,8 +2583,7 @@ class DetailPane(Vertical):
             return f"tone:{tone_id}"
         return "tone:{title}:{author}".format(
             title=tone.get("title") or "",
-            author=tone.get("username") or "",
-        )
+            author=tone.get("username") or "")
 
     def _detail_tab_state(self) -> dict[str, dict]:
         return self._detail_tab_states.setdefault(
@@ -2551,8 +2625,7 @@ class DetailPane(Vertical):
             scroll.scroll_to(
                 x=saved.get("scroll_x", scroll.scroll_x),
                 y=saved.get("scroll_y", scroll.scroll_y),
-                animate=False,
-            )
+                animate=False)
             if saved.get("focused"):
                 scroll.focus()
         except Exception:
@@ -2604,8 +2677,7 @@ class DetailPane(Vertical):
             scroll_y=scroll_y,
             selection_keys=selection_keys,
             confirmation_state=confirmation_state,
-            detail_context_key=self._detail_context_key(),
-        )
+            detail_context_key=self._detail_context_key())
 
     def set_mutation_anchor(self, anchor: ViewAnchor | None) -> None:
         self._mutation_anchor = anchor
@@ -2708,8 +2780,7 @@ class DetailPane(Vertical):
                     slot_label=saved.get("slot_label"),
                     origin=saved.get("origin") or "description",
                     focus_table=True,
-                    remote=bool(saved.get("remote")),
-                )
+                    remote=bool(saved.get("remote")))
                 self._restore_pack_anchor(saved.get("anchor"))
                 return
             if tone and not (tone.get("models") or []):
@@ -2752,8 +2823,7 @@ class DetailPane(Vertical):
         inner = max(width - 6, 1)
         available = max(
             inner - reserved_state_width - (cell_len(" · ") if reserved_state_width else 0),
-            1,
-        )
+            1)
         if cell_len(" · ".join(actions)) <= available:
             return " · ".join(actions)
         core = {"i install", "u uninstall"}
@@ -2772,7 +2842,7 @@ class DetailPane(Vertical):
         """提示条更新（REQ-024/025：状态变化靠左、常驻动作靠右）。
 
         左段状态 = 勾选计数 + 安装进度（有则显示），右段常驻 =
-        i install · u uninstall；同级视图由顶部 [/] tab 控制。
+        i install · u uninstall · x expand；同级视图由顶部 [/] tab 控制。
         """
         if self._view_mode != "selection":
             return
@@ -2786,6 +2856,48 @@ class DetailPane(Vertical):
         state = " · ".join(left)
         hint = self._pack_view_hint(reserved_state_width=cell_len(state))
         set_border_hint_layout(self, state, hint.split(" · "))
+
+    def action_expand_pack(self) -> None:
+        """Open the larger pack screen without changing the current target."""
+        if self._view_mode != "selection" or not self._pack_tone:
+            return
+        self.post_message(self.PackExpandedRequested(dict(self._pack_tone)))
+
+    def _attempt_auto_load_first(self) -> None:
+        """Try the first Library model once, without installing it."""
+        if not self._pack_auto_load_first or not self._pack_mode:
+            return
+        if self._pack_loading:
+            return
+        self._pack_auto_load_first = False
+        model = next(iter(self._pack_rows.values()), None)
+        if model is None:
+            self.app.notify("This tone has no models", severity="warning")
+            return
+        path = model.get("local_path")
+        if not path:
+            self.app.notify("First model is not downloaded", severity="warning")
+            return
+        slot_index = self._pack_slot_index
+        if slot_index is None:
+            self.app.notify("Select a target Slot before loading the first model",
+                            severity="warning")
+            return
+        try:
+            panel = self.app.query_one(ChainPanel)
+            if panel.state.target_index != slot_index:
+                self.app.notify("Select the target Slot before loading the first model",
+                                severity="warning")
+                return
+            if panel.state.slot(slot_index).path == path:
+                return
+        except Exception:
+            self.app.notify("Select a target Slot before loading the first model",
+                            severity="warning")
+            return
+        self.post_message(self.PackFilePicked(
+            None, path, (self._pack_tone or {}).get("gear"),
+            slot_index=slot_index))
 
     def _selected_pack_keys(self) -> list[str]:
         """勾选行 key；未勾选任何行时回退光标行（单行语义与多选共存）。"""
@@ -3176,8 +3288,7 @@ class DetailPane(Vertical):
             x=anchor.get("scroll_x", table.scroll_x),
             y=scroll_y,
             animate=False,
-            force=True,
-        )
+            force=True)
 
     def _refresh_preset_detail(self, name: str) -> None:
         """Re-render the retained Preset context without clearing the pane."""
@@ -3214,8 +3325,7 @@ class DetailPane(Vertical):
             active=library.preset_current() == name,
             dirty=library.preset_current() == name
             and library.preset_is_dirty(
-                name, preset_id=self._detail_preset_id),
-        )
+                name, preset_id=self._detail_preset_id))
 
     def _show_detail_unavailable(self, object_name: str) -> None:
         """Keep the Detail surface explicit when its object was removed."""
@@ -3389,9 +3499,11 @@ class DetailPane(Vertical):
         self._set_summary(summary)
         self._ensure_verification(tone)
         colors = self._theme_colors()
-        self._body.update(description_only(tone, colors=colors))
+        self._body.update(description_only(
+            tone, colors=colors))
         self._rerender = lambda: self._body.update(
-            description_only(tone, colors=self._theme_colors()))
+            description_only(
+                tone, colors=self._theme_colors()))
         self._refresh_view_tabs()
         set_border_hint_layout(
             self, "", [token for token, _action in self._border_hint_actions()])
@@ -3406,7 +3518,8 @@ class DetailPane(Vertical):
                          slot_label: str | None = None,
                          origin: str | None = None,
                          focus_table: bool = False,
-                         remote: bool = False) -> None:
+                         remote: bool = False,
+                         allow_empty: bool = False) -> None:
         """Selection view: the tone's whole pack as the interactive file list.
 
         Enter / double-click picks a row and hot-swaps the chain slot; the
@@ -3422,10 +3535,10 @@ class DetailPane(Vertical):
         tone = tone or self._current_tone or {}
         models = models if models is not None else tone.get("models") or []
         if not models:
-            if not remote and focus_table:
+            if not remote and focus_table and not allow_empty:
                 self.app.notify("This tone has no downloadable models",
                                 severity="warning")
-            if not remote:
+            if not remote and not allow_empty:
                 return
         if slot_index is None:
             try:
@@ -3475,12 +3588,15 @@ class DetailPane(Vertical):
 
     @staticmethod
     def _arch_tag(architecture: str | None, colors: dict[str, str]) -> str:
-        """A2 (SlimmableContainer) burns amber, IR green, older A1 amber-warn."""
-        if architecture == "IR":
+        """Render the stable A1/A2/IR label with its semantic color."""
+        label = architecture_label(architecture)
+        if label == "IR":
             return f"[b {colors['value']}]IR[/]"
-        if architecture == "SlimmableContainer":
+        if label == "A2":
             return f"[b {colors['header']}]A2[/]"
-        return f"[b {colors['warn']}]A1[/]"
+        if label == "A1":
+            return f"[b {colors['warn']}]A1[/]"
+        return "[dim]—[/]"
 
     @staticmethod
     def _fmt_size(size: int) -> str:
@@ -3505,7 +3621,12 @@ class DetailPane(Vertical):
         # 表重建后光标回到 (0,0)：清掉同步记录，下次 refresh 重新对齐激活行。
         self._pack_synced_model = None
         self._pack_synced_ir = None
+        tone = self._pack_tone or self._current_tone or {}
         for model in models:
+            normalized = normalize_model_architecture(model, tone=tone)
+            if not model_architecture(normalized, tone=tone):
+                continue
+            model = normalized
             model_id = model.get("id")
             key = f"m{model_id}"
             self._pack_rows[key] = model
@@ -3548,8 +3669,7 @@ class DetailPane(Vertical):
             slot_status=snapshot.status,
             slot_label=tone.get("gear") if tone else None,
             origin="slot",
-            focus_table=focus_table,
-        )
+            focus_table=focus_table)
 
     def show_slot_empty(self, slot_index: int, *, target: bool = True) -> None:
         """Show an Empty Slot without retaining the previous pack context."""
@@ -3567,14 +3687,16 @@ class DetailPane(Vertical):
         self._summary_mode = "empty-slot"
         self._view_mode = "empty"
         self.border_title = f"SLOT {slot_index + 1:02d}"
-        self._set_marquee(f"SLOT {slot_index + 1:02d}")
+        # The slot identity is already in the outer border title.  Keeping it
+        # out of the marquee, summary, and instruction avoids three copies of
+        # the same label in an otherwise sparse empty state.
+        self._set_marquee("")
         self._marquee.set_class(False, "detail-marquee--empty")
         target_text = " · TARGET" if target else ""
-        self._set_summary(
-            f"[b $state-idle]NONE[/] · SLOT {slot_index + 1:02d}{target_text}")
+        self._set_summary(f"[b $state-idle]NONE[/]{target_text}")
         self._body.update(
-            f"[dim]Slot {slot_index + 1:02d} is empty. "
-            "Choose a local tone or pack to load a supported .nam/.wav file.[/dim]")
+            "[dim]Choose a local tone or pack to load a supported .nam/.wav "
+            "file.[/dim]")
         self._rerender = None
         set_border_hint_layout(
             self, "", [token for token, _action in self._border_hint_actions()])
@@ -3593,7 +3715,28 @@ class DetailPane(Vertical):
                               kind=kind, origin="node",
                               focus_table=focus_table)
 
-    def show_remote_pack(self, tone: dict) -> None:
+    def show_library_pack(self, tone: dict, *, remote: bool = False) -> None:
+        """Open a Library tone directly in PACK and try its first model."""
+        if (self._view_mode == "selection" and self._pack_mode
+                and bool(self._pack_remote) == bool(remote)
+                and self._pack_origin == "description"
+                and self._detail_context_key(tone) == self._detail_context_key()):
+            self._pack_table.focus()
+            return
+        if remote:
+            self.show_remote_pack(tone, auto_load_first=True)
+            return
+        self._description_remote = False
+        self._exit_pack_mode()
+        self._enter_selection(
+            tone=tone, models=tone.get("models") or [],
+            origin="description", focus_table=True, remote=False,
+            allow_empty=True)
+        if self._pack_mode:
+            self._pack_auto_load_first = True
+            self._attempt_auto_load_first()
+
+    def show_remote_pack(self, tone: dict, *, auto_load_first: bool = False) -> None:
         """TONE3000 场景的 Selection 视图：shell 先立起来（Description 同款
         头两行），模型列表后台拉取后填入 pack 表——远程文件未下载置灰，
         Enter 一行打开安装二级页（PackInstallRequested）。"""
@@ -3602,6 +3745,7 @@ class DetailPane(Vertical):
         self._exit_pack_mode()
         self._enter_selection(tone=tone, models=[], origin="description",
                               focus_table=True, remote=True)
+        self._pack_auto_load_first = auto_load_first
         if tone_id:
             generation = self._view_generation
             self._pack_loading = True
@@ -3629,7 +3773,10 @@ class DetailPane(Vertical):
                                    generation: int | None = None) -> None:
         generation = self._view_generation if generation is None else generation
         try:
-            ms = await asyncio.to_thread(tone3000.models, tone_id, a2_only=False)
+            # The table is the complete pack view: A1, A2, and IR rows all
+            # need to arrive before the shared resolver classifies them.
+            ms = await asyncio.to_thread(tone3000.models, tone_id,
+                                         a2_only=False)
         except Exception as e:
             if self._view_alive(generation) and self._pack_remote \
                     and int(self._pack_tone.get("id") or 0) == tone_id:
@@ -3645,6 +3792,9 @@ class DetailPane(Vertical):
                 or self._view_mode != "selection"
                 or int(self._pack_tone.get("id") or 0) != tone_id):
             return  # 视图已切走：晚到的回答不覆盖
+        # A1 (WaveNet) 是废弃架构：pack 视图不浏览、不展示旧模型。
+        ms = [m for m in ms
+              if model_architecture(m, tone=self._pack_tone) != "A1"]
         ms = self._merge_remote_local_models(tone_id, ms)
         self._remote_models_cache[tone_id] = list(ms)
         self._pack_loading = False
@@ -3661,6 +3811,7 @@ class DetailPane(Vertical):
         self._pack_refresh_anchor = None
         if keep_focus:
             self._pack_table.focus()
+        self._attempt_auto_load_first()
         self._update_pack_hint()
 
     @staticmethod
@@ -3929,7 +4080,8 @@ class DetailPane(Vertical):
                 None, model["local_path"], tone.get("gear"),
                 slot_index=self._pack_slot_index))
         else:
-            slot = "ir" if model.get("architecture") == "IR" else "model"
+            slot = ("ir" if model_architecture(model, tone=tone) == "IR"
+                    else "model")
             self.post_message(self.PackFilePicked(
                 slot, model["local_path"], tone.get("gear")))
 
@@ -3939,6 +4091,10 @@ class DetailPane(Vertical):
         Selection 视图：i install / u uninstall 常驻（REQ-038 多选批量）。
         Description/Pack 通过顶部 view tabs 切换，不重复提供底部动作。
         """
+        view_action = (
+            ViewTabStrip.NAVIGATION_HINT,
+            self._view_tabs.action_next_view)
+        view_actions = [view_action] if self._view_tabs._has_pack else []
         if self._view_mode == "selection":
             if self._pack_busy is not None:
                 return []
@@ -3946,13 +4102,14 @@ class DetailPane(Vertical):
                 ("enter load", self._pack_table.action_select_cursor),
                 ("i install", self._pack_install_selected),
                 ("u uninstall", self._pack_uninstall_selected),
+                ("x expand", self.action_expand_pack),
                 ("esc back", self.action_back_from_creator),
             ]
             if self._pack_error and not self._pack_loading:
                 actions.insert(0, ("r retry", self.retry_remote_pack))
-            return actions
+            return [*actions, *view_actions]
         if self._view_mode == "description":
-            return [("esc back", self.action_back_from_creator)]
+            return [("esc back", self.action_back_from_creator), *view_actions]
         if self._view_mode == "empty":
             return [
                 ("enter browse", self.action_browse_empty_slot),
@@ -3970,11 +4127,14 @@ class DetailPane(Vertical):
     def on_click(self, event: MouseEvent) -> None:
         """The right-aligned border hint exposes the current mode's actions,
         including REQ-038 的 i install / u uninstall 批量动作 token。"""
+        if self._view_tabs.activate_from_border(event):
+            return
         if self._view_mode not in ("description", "selection", "empty", "creator"):
             return
         border_hint_click(self, event, self._border_hint_actions())
 
     def on_mouse_move(self, event: MouseMove) -> None:
+        self._view_tabs.hover_from_border(event)
         if self._view_mode not in ("description", "selection", "empty"):
             set_border_hint_hover(self, None)
             return
@@ -3984,6 +4144,7 @@ class DetailPane(Vertical):
                 [token for token, _ in self._border_hint_actions()]))
 
     def on_leave(self, event: Leave) -> None:
+        self._view_tabs.clear_border_hover()
         set_border_hint_hover(self, None)
 
     def show(self, t: dict, *, remote: bool = False) -> None:
@@ -4027,11 +4188,13 @@ class DetailPane(Vertical):
         self._set_marquee(self._marquee_content(tone, model.get("id")))
         self._marquee.set_class(False, "detail-marquee--empty")
         filename = Path(model.get("local_path") or model.get("name") or "").name
-        architecture = model.get("architecture") or "model"
-        self._set_summary(
-            f"[b $success]{_escape(str(architecture).upper())}[/] · "
-            f"{_escape(filename or 'external file')}"
-        )
+        architecture = model_architecture(model, tone=tone)
+        summary_parts = []
+        if architecture:
+            summary_parts.append(
+                f"[b $success]{_escape(architecture.upper())}[/]")
+        summary_parts.append(_escape(filename or "external file"))
+        self._set_summary(" · ".join(summary_parts))
         self._ensure_verification(tone)
         colors = self._theme_colors()
         self._body.update(metadata_table(tone, model, skip_title=True,
@@ -4066,8 +4229,12 @@ class DetailPane(Vertical):
             state += " · DIRTY"
         chain = preset.get("chain") or {}
         slots = chain.get("slots") if isinstance(chain.get("slots"), list) else []
+        resolved_slots = (resolved.get("slots")
+                          if isinstance(resolved.get("slots"), list) else [])
         slot_summary = " ".join(
-            f"{index + 1:02d}:{Path(str(slot.get('path'))).name if slot.get('path') else 'NONE'}"
+            f"{index + 1:02d}:{preset_slot_label(
+                slot,
+                resolved_slots[index] if index < len(resolved_slots) else None)}"
             for index, slot in enumerate(slots) if isinstance(slot, dict)
         ) or "NONE"
         self._set_summary(

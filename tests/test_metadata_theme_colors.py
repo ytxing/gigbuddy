@@ -8,7 +8,8 @@ from rich.table import Table
 from rich.text import Text
 
 from tui.app import GigBuddyApp
-from tui.metadata import (DEFAULT_COLORS, metadata_table,
+from tui.metadata import (DEFAULT_COLORS, architecture_label, gear_markup,
+                          format_label, metadata_table, model_architecture,
                           preset_metadata_table, signed_fixed, theme_colors)
 from tui.panels import DetailPane
 
@@ -55,6 +56,36 @@ def test_signed_fixed_reserves_minus_column():
     assert len(signed_fixed(0.8)) == len(signed_fixed(-0.1))
 
 
+def test_model_architecture_resolves_tone3000_a1_and_architectureless_ir():
+    assert architecture_label("WaveNet") == "A1"
+    assert architecture_label("1") == "A1"
+    assert architecture_label("2") == "A2"
+    assert architecture_label("custom") == "Custom"
+    assert format_label("aa-snapshot") == "AA-SNAPSHOT"
+    assert model_architecture(
+        {"name": "greenback.wav", "architecture": None},
+        tone={"gear": "cab", "platform": "ir"},
+    ) == "IR"
+    assert model_architecture(
+        {"name": "space.wav", "architecture": None},
+        tone={"gear": "space"},
+    ) == "IR"
+    assert model_architecture(
+        {"name": "space.nam", "architecture": None},
+        tone={"gear": "space", "format": "nam"},
+    ) == ""
+
+
+def test_native_gear_colors_are_consistent():
+    table = metadata_table({"id": 1, "gear": "space", "format": "ir"})
+    assert _cell_color(table, 1, "SPACE") == "#6aa9e8"
+    assert "IR" in [cell.plain for cell in table.columns[1].cells
+                     if isinstance(cell, Text)]
+    table = metadata_table({"id": 1, "gear": "pedal"})
+    assert _cell_color(table, 1, "PEDAL") == DEFAULT_COLORS["value"]
+    assert "#5bb6a8" in gear_markup("outboard")
+
+
 def test_metadata_table_description_has_section_label():
     """Prose descriptions carry the section-header grammar: a bold DESCRIPTION
     title above the full-width text, table first and prose last (the picker
@@ -87,14 +118,16 @@ def test_preset_metadata_table_colors_parameter():
     colors = {"section": "#222222", "field": "#333333", "value": "#444444",
               "warn": "#555555"}
     preset = {"name": "p", "chain": {"slots": [
-        {"path": "/x/amp.nam"}, {"path": "/y/cab.wav"},
+        {"model_id": 101, "path": "/x/amp.nam"},
+        {"model_id": 202, "path": "/y/cab.wav"},
     ]}, "updated_at": "2026-01-01T00:00:00"}
-    resolved = {"slots": [{"path": "/x/amp.nam"}, {"path": "/y/cab.wav"}],
+    resolved = {"slots": [{"model_id": 101, "path": "/x/amp.nam"},
+                           {"model_id": 202, "path": "/y/cab.wav"}],
                 "gain": 0.8, "master": 1.0, "quality": 1.0}
     table = preset_metadata_table(preset, resolved, dirty=True, colors=colors)
     assert _cell_color(table, 1, "SAVED · DIRTY") == "#555555"  # dirty → warn
-    assert _cell_color(table, 1, "amp.nam") == "#444444"         # slot → value
-    assert _cell_color(table, 1, "cab.wav") == "#444444"         # slot → value
+    assert _cell_color(table, 1, "#101") == "#444444"            # slot → value
+    assert _cell_color(table, 1, "#202") == "#444444"            # slot → value
     assert _cell_color(table, 0, "CONTROLS") == "#222222"
     clean = preset_metadata_table(preset, resolved, colors=colors)
     assert _cell_color(clean, 1, "SAVED") == "#444444"          # saved → value
@@ -144,6 +177,8 @@ def test_theme_colors_normalizes_textual_ansi_names_for_rich():
         "field": "white",
         "value": "green",
         "warn": "red",
+        "space": DEFAULT_COLORS["space"],
+        "outboard": DEFAULT_COLORS["outboard"],
     }
 
     table = metadata_table(

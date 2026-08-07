@@ -3,7 +3,7 @@ from io import StringIO
 import re
 import sys
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 from rich import box
 from rich.console import Console, Group
@@ -27,12 +27,16 @@ import tone3000  # noqa: E402
 # theme-less callers). Inside the TUI, callers pass theme_colors(app) so every
 # color follows the active theme. "field" is the warm beige of field names;
 # "value" is the fixed success color and "warn" follows the active theme.
+# SPACE and OUTBOARD are native TONE3000 gear values with dedicated colors so
+# they remain distinguishable from CAB/PEDAL and from each other.
 DEFAULT_COLORS = {
     "header": "#e59a3c",
     "section": "#f5b042",
     "field": "#d3bf9e",
     "value": "#8fb573",
     "warn": "#e0b34a",
+    "space": "#6aa9e8",
+    "outboard": "#5bb6a8",
 }
 
 
@@ -42,6 +46,137 @@ def signed_fixed(value, digits: int = 2, fallback: str = "?") -> str:
         return f"{float(value): .{digits}f}"
     except (TypeError, ValueError):
         return fallback
+
+
+def architecture_label(architecture) -> str:
+    """Normalize legacy and canonical TONE3000 architecture tokens."""
+    value = str(architecture or "").strip()
+    token = re.sub(r"[^a-z0-9]+", "", value.casefold())
+    if token == "ir":
+        return "IR"
+    if token in {"2", "a2", "slimmablecontainer"}:
+        return "A2"
+    if token in {"custom"}:
+        return "Custom"
+    # TONE3000 calls the original NAM runtime WaveNet.  The product-facing
+    # label is A1, so do not expose the backend token in user-facing tables.
+    if token in {"1", "a1", "wave", "wavenet"}:
+        return "A1"
+    return ""
+
+
+_IR_SUFFIXES = frozenset({".wav", ".wave", ".flac", ".aif", ".aiff"})
+_NAM_SUFFIXES = frozenset({".nam", ".aida-x", ".aa-snapshot", ".proteus"})
+_IR_GEAR_TOKENS = frozenset({"cab", "space", "ir"})
+_FORMAT_LABELS = {
+    "nam": "NAM",
+    "ir": "IR",
+    "aida-x": "AIDA-X",
+    "aa-snapshot": "AA-SNAPSHOT",
+    "proteus": "PROTEUS",
+}
+
+
+def format_label(value) -> str:
+    """Normalize canonical ``format`` and its deprecated ``platform`` alias."""
+    token = str(value or "").strip().casefold()
+    return _FORMAT_LABELS.get(token, token.upper() if token else "")
+
+
+def tone_format(tone: dict | None) -> str:
+    """Resolve a Tone's canonical display format with legacy fallbacks."""
+    tone = tone if isinstance(tone, dict) else {}
+    for key in ("format", "platform"):
+        value = format_label(tone.get(key))
+        if value:
+            return value
+    gear = str(tone.get("gear") or "").strip().casefold()
+    if gear in _IR_GEAR_TOKENS or tone.get("irs_count"):
+        return "IR"
+    if any(tone.get(key) for key in
+           ("models_count", "a1_models_count", "a2_models_count",
+            "custom_models_count")):
+        return "NAM"
+    return ""
+
+
+def _model_suffix(model: dict) -> str:
+    """Return a model file suffix from a local path, name, or URL."""
+    fallback = ""
+    for key in ("local_path", "name", "model_url", "url"):
+        raw = str(model.get(key) or "").strip()
+        if not raw:
+            continue
+        path = unquote(urlparse(raw).path or raw.split("?", 1)[0])
+        suffix = Path(path).suffix.casefold()
+        if suffix in _IR_SUFFIXES:
+            return suffix
+        fallback = fallback or suffix
+    return fallback
+
+
+def model_architecture(model: dict | None, *, tone: dict | None = None) -> str:
+    """Resolve one model to ``A1``, ``A2``, or ``IR`` when evidence exists.
+
+    The public TONE3000 API has two representations that need context: A1
+    models use the backend token ``WaveNet``, and IR rows often have a null
+    architecture even though their URL/name is a ``.wav`` file.  A missing
+    architecture is treated as IR only when the file or parent tone proves it;
+    arbitrary unknown values are kept hidden instead of guessed as A1.
+    """
+    model = model if isinstance(model, dict) else {}
+    tone = tone if isinstance(tone, dict) else {}
+    # Only the canonical ``format`` field can override a model-level
+    # architecture. ``platform`` is a legacy fallback and may coexist with
+    # mixed old packs whose model rows still carry the authoritative token.
+    model_labels = [architecture_label(model.get(key))
+                    for key in ("architecture_version", "architecture")]
+    if "IR" in model_labels:
+        return "IR"
+    explicit_format = (format_label(model.get("format"))
+                       or format_label(tone.get("format")))
+    if explicit_format:
+        if explicit_format == "IR":
+            return "IR"
+        # A non-NAM format is not an A1/A2 architecture. Keep a real
+        # architecture value if the backend supplied one, but never let a
+        # deprecated gear fallback turn an explicit NAM row into an IR.
+        for label in model_labels:
+            if label and label != "IR":
+                return label
+        return ""
+    for label in model_labels:
+        if label:
+            return label
+    suffix = _model_suffix(model)
+    if suffix in _IR_SUFFIXES:
+        return "IR"
+    if suffix in _NAM_SUFFIXES:
+        return ""
+    gear = str(tone.get("gear") or "").strip().casefold()
+    platform = str(tone.get("platform") or "").strip().casefold()
+    if gear in _IR_GEAR_TOKENS or platform == "ir":
+        return "IR"
+    return ""
+
+
+def normalize_model_architecture(model: dict, *, tone: dict | None = None) -> dict:
+    """Copy a model row with its resolved UI architecture attached."""
+    normalized = dict(model)
+    label = model_architecture(normalized, tone=tone)
+    if label:
+        normalized["architecture"] = label
+    return normalized
+
+
+def is_visible_architecture(architecture=None, *, model: dict | None = None,
+                            tone: dict | None = None) -> bool:
+    """Whether a model belongs in any user-facing model list."""
+    if model is None and isinstance(architecture, dict):
+        model = architecture
+    if model is not None:
+        return bool(model_architecture(model, tone=tone))
+    return bool(architecture_label(architecture))
 
 
 class _SelectableTableVisual(Visual):
@@ -151,6 +286,8 @@ def theme_colors(app) -> dict[str, str]:
             v.get("field") or v.get("foreground"), DEFAULT_COLORS["field"]),
         "value": rich_color(v.get("success"), DEFAULT_COLORS["value"]),
         "warn": rich_color(v.get("warning"), DEFAULT_COLORS["warn"]),
+        "space": DEFAULT_COLORS["space"],
+        "outboard": DEFAULT_COLORS["outboard"],
     }
 
 
@@ -165,6 +302,29 @@ def _value(value, fallback: str = "-") -> str:
 def _gear_value(value) -> str:
     """Display the native gear token without changing its identity."""
     return _value(value, "SLOT").upper()
+
+
+def _gear_color(colors: dict[str, str], value) -> str | None:
+    """Resolve a detail Type color while preserving unknown native values."""
+    token = str(value or "").strip().casefold()
+    color_key = {
+        "amp": "header",
+        "amp-cab": "section",
+        "cab": "value",
+        "pedal": "value",
+        "space": "space",
+        "outboard": "outboard",
+    }.get(token)
+    return colors.get(color_key) if color_key else None
+
+
+def gear_markup(value, *, colors: dict[str, str] | None = None) -> str:
+    """Render a native gear token with the same color used by Type details."""
+    palette = {**DEFAULT_COLORS, **(colors or {})}
+    label = _gear_value(value)
+    color = _gear_color(palette, value)
+    escaped = rich_escape(label)
+    return f"[b {color}]{escaped}[/]" if color else escaped
 
 
 def _link_markup(href: str, label: str) -> str:
@@ -208,6 +368,8 @@ def metadata_copy_text(tone: dict | None = None, model: dict | None = None,
             lines.append(f"TONE3000: {tone3000_url(tone)}")
         lines.append(f"Author: @{_value(tone.get('username'), '?').lstrip('@')}")
         lines.append(f"Type: {_gear_value(tone.get('gear'))}")
+        if tone_format(tone):
+            lines.append(f"Format: {tone_format(tone)}")
         if tone.get("tags"):
             lines.append(f"Tags: {_value(tone.get('tags'))}")
         if tone.get("description"):
@@ -217,8 +379,10 @@ def metadata_copy_text(tone: dict | None = None, model: dict | None = None,
         lines.extend([
             f"Model ID: {_value(model.get('id'))}",
             f"Model filename: {_value(Path(local_path).name if local_path else model.get('name'))}",
-            f"Architecture: {_value(model.get('architecture'))}",
         ])
+        architecture = model_architecture(model, tone=tone)
+        if architecture:
+            lines.append(f"Architecture: {architecture}")
         if model.get("model_url"):
             lines.append(f"Model source: {model['model_url']}")
         if local_path:
@@ -279,7 +443,9 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
         row("FILE", "Filename", Path(local_path).name if local_path else None,
             style=f"bold {colors['value']}")
         row("FILE", "Model ID", model.get("id"))
-        row("FILE", "Architecture", model.get("architecture"))
+        architecture = model_architecture(model, tone=tone)
+        if architecture:
+            row("FILE", "Architecture", architecture)
         if model.get("model_url"):
             row("SOURCE", "Model source",
                 _link_markup(model["model_url"], "Open model source"),
@@ -305,7 +471,15 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
                     markup=True)
             else:
                 row("IDENTITY", "Author", "?")
-            row("IDENTITY", "Type", _gear_value(tone.get("gear")))
+            gear = _gear_value(tone.get("gear"))
+            gear_color = _gear_color(colors, tone.get("gear"))
+            row("IDENTITY", "Type", gear,
+                style=f"bold {gear_color}" if gear_color else None)
+
+        fmt = tone_format(tone)
+        if fmt:
+            row("IDENTITY", "Format", fmt,
+                style=f"bold {colors['value']}" if fmt == "IR" else None)
 
         url = tone3000_url(tone)
         if url:
@@ -326,18 +500,21 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
             row("POPULARITY", "Favorites", tone.get("favorites_count", 0))
 
         if any(key in tone for key in (
-                "a1_models_count", "a2_models_count", "custom_models_count",
+                "a2_models_count", "custom_models_count",
                 "irs_count", "models_count", "model_name")):
-            row("MODEL SET", "A1 / A2",
-                f"{tone.get('a1_models_count') or 0} / {tone.get('a2_models_count') or 0}")
+            # A1 (WaveNet) 是废弃架构：MODEL SET 不显示 A1 计数，即使
+            # 远程 tone 带 a1_models_count（A1-only 的 tone 无 MODEL SET 区）。
+            row("MODEL SET", "A2",
+                f"{tone.get('a2_models_count') or 0}")
             row("MODEL SET", "Custom / IR",
                 f"{tone.get('custom_models_count') or 0} / {tone.get('irs_count') or 0}")
-            if not condensed:
-                row("MODEL SET", "Total", tone.get("models_count", 0))
             if tone.get("model_name"):
                 row("MODEL SET", "Default name", tone.get("model_name"))
         if not model and tone.get("models") is not None:
-            row("MODEL SET", "Downloaded", len(tone.get("models") or []))
+            downloaded = sum(
+                1 for item in tone.get("models") or []
+                if model_architecture(item, tone=tone))
+            row("MODEL SET", "Downloaded", downloaded)
             row("MODEL SET", "Local folder", _compact_path(tone.get("local_dir")))
 
     if note:
@@ -354,16 +531,49 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
 
 def description_only(tone: dict | None = None, model: dict | None = None,
                      *, colors: dict[str, str] | None = None):
-    """Render only a tone/model description for compact picker details."""
+    """Render a tone/model description for picker or tab-owned detail bodies.
+
+    The DESCRIPTION block (title + prose) plus the tone's Tags and Makes:
+    those fields belong to the tab-owned view, so they render here instead of
+    duplicating the metadata table's CLASSIFICATION section. TAGS/MAKES sit
+    above the prose; the DESCRIPTION title distinguishes the prose block.
+    """
     tone = tone or {}
     model = model or {}
     colors = {**DEFAULT_COLORS, **(colors or {})}
     description = tone.get("description") or model.get("description")
-    return Group(
-        Text("DESCRIPTION", style=f"bold {colors['section']}"),
-        Text(""),
-        Text(_value(description, "No description available.")),
-    )
+    prose = Text(_value(description, "No description available."))
+    section = f"bold {colors['section']}"
+    parts = []
+    tags = tone.get("tags") or []
+    if tags:
+        parts += [Text("TAGS", style=section), Text(_value(tags))]
+    makes = tone.get("makes") or []
+    if makes:
+        parts += [Text("MAKES", style=section), Text(_value(makes))]
+    # TAGS/MAKES 区块在描述正文上面；DESCRIPTION 标题紧贴正文做区分。
+    if parts:
+        parts.append(Text(""))
+    parts += [Text("DESCRIPTION", style=section), prose]
+    return Group(*parts)
+
+
+def preset_slot_label(slot: dict | None,
+                      resolved_slot: dict | None = None) -> str:
+    """Return the compact Model ID label used for a preset Slot.
+
+    Filenames are storage details and should not make the Slot summary expand.
+    The resolved Slot supplies the ID for legacy path-only records.
+    """
+    slot = slot if isinstance(slot, dict) else {}
+    resolved_slot = resolved_slot if isinstance(resolved_slot, dict) else {}
+    model_id = slot.get("model_id")
+    if model_id is None:
+        model_id = resolved_slot.get("model_id")
+    if model_id is not None:
+        return f"#{model_id}"
+    path = resolved_slot.get("path") or slot.get("path")
+    return "UNKNOWN" if path else "NONE"
 
 
 def preset_metadata_table(preset: dict, resolved: dict, *, active: bool = False,
@@ -372,9 +582,9 @@ def preset_metadata_table(preset: dict, resolved: dict, *, active: bool = False,
     """Render a preset with the same visual grammar as tone metadata.
 
     Presets are chain snapshots rather than tones, so the sections emphasize
-    identity, ordered Slots, and the three live controls. Resolved paths are
-    reduced to filenames here; the full path remains available through the
-    CLI and the copied metadata view.
+    identity, ordered Slots, and the three live controls. Slot rows use compact
+    Model IDs; file paths remain available through the edit surface and copied
+    metadata view.
     colors: palette resolved from the active theme (theme_colors).
     """
     preset = preset or {}
@@ -431,13 +641,7 @@ def preset_metadata_table(preset: dict, resolved: dict, *, active: bool = False,
             resolved_slot = (resolved_slots[index]
                              if index < len(resolved_slots)
                              and isinstance(resolved_slots[index], dict) else {})
-            path = resolved_slot.get("path") or slot.get("path")
-            model_id = slot.get("model_id")
-            if path:
-                value = f"#{model_id} {Path(str(path)).name}" \
-                    if model_id is not None else Path(str(path)).name
-            else:
-                value = "NONE"
+            value = preset_slot_label(slot, resolved_slot)
             row("SLOTS", f"{index + 1:02d}", value,
                 style=f"bold {colors['value']}")
 

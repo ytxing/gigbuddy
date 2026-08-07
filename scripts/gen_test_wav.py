@@ -3,9 +3,10 @@
 用法: gen_test_wav.py <out.wav> [duration=3] [sr=48000]
 """
 import sys, math, struct, wave
+from pathlib import Path
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "data/dry_test.wav"
+    out = sys.argv[1] if len(sys.argv) > 1 else "data/dry_inputs/dry-test.wav"
     dur = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0
     sr = int(sys.argv[3]) if len(sys.argv) > 3 else 48000
     n = int(dur * sr)
@@ -27,6 +28,7 @@ def main():
 
     peak = max(1e-9, max(abs(x) for x in samples))
     scale = 0.9 / peak
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
     with wave.open(out, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
         w.writeframes(b"".join(

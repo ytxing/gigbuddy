@@ -5,7 +5,7 @@
 数据源: TONE3000 (原 ToneHunt)，90k+ NAM 模型。
 
 CLI:
-    tone3000.py search <query>              # 关键词搜索（A2 架构）
+    tone3000.py search <query>              # 关键词搜索（全部架构）
     tone3000.py top [limit]                 # 全站下载排行
     tone3000.py models <tone_id>            # 列出 tone 的 A2 模型
     tone3000.py download <tone_id> <dest>   # 下载全部 A2 .nam 到目录
@@ -44,6 +44,46 @@ _verified_write_lock = threading.Lock()
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/126.0 Safari/537.36")
+
+
+def _canonical_tone(row: dict) -> dict:
+    """Expose TONE3000's current Tone field while keeping legacy rows usable.
+
+    The public API documents ``format`` as canonical and ``platform`` as a
+    deprecated alias.  The legacy Supabase RPCs used by this integration still
+    return ``platform``, so normalize that response at the API boundary instead
+    of making every caller know which backend generated the row.
+    """
+    if not isinstance(row, dict):
+        return row
+    if row.get("format") in (None, "") and row.get("platform") not in (None, ""):
+        row["format"] = row["platform"]
+    return row
+
+
+def _canonical_tones(rows):
+    return [_canonical_tone(row) for row in (rows or [])]
+
+
+def _is_a2_model(model: dict) -> bool:
+    """Accept the documented architecture version and the legacy token."""
+    version = str(model.get("architecture_version") or "").strip().casefold()
+    if version:
+        return version in {"2", "a2"}
+    token = str(model.get("architecture") or "").strip().casefold()
+    return token in {"2", "a2", "slimmablecontainer"}
+
+
+def _is_a1_model(model: dict) -> bool:
+    """A1 is the deprecated WaveNet runtime; the product filters it out.
+
+    TONE3000 exposes the backend token ``WaveNet`` (plus the legacy ``1``/``a1``
+    values) for A1 rows. Callers that fetch a full model set must drop these
+    rows so A1 files are never downloaded, browsed, or shown.
+    """
+    token = str(model.get("architecture_version")
+                or model.get("architecture") or "").strip().casefold()
+    return token in {"1", "a1", "wave", "wavenet"}
 
 
 def verified_users() -> set[str]:
@@ -152,25 +192,30 @@ def _post(url, body):
 
 def search(query="", page_size=50, order_by="trending", gear_filters=None,
            usernames=None, tag_names=None, make_names=None, page_number=1):
-    """search_tones_a2 RPC：关键词 + A2 架构 + 排序（trending / newest / best-match /
-    downloads-all-time，对齐 tone3000.com 官网排序；空查询即 trending 流）
+    """search_tones_a2 RPC：关键词 + 全部架构 + 排序（trending / newest /
+    best-match / downloads-all-time，对齐 tone3000.com 官网排序；空查询即
+    trending 流）。``architecture_filter=None`` 是该 RPC 的“全部架构”值，
+    不能使用 ``"2"``，否则 A1-only 与部分 IR tone 会从所有远程表中消失。
 
-    gear_filters: None 或合法值列表 — ["amp"] / ["cab"] / ["amp-cab"]（TONE3000 值域，无 "ir"）
+    gear_filters: None 或合法值列表 — ["amp"] / ["cab"] / ["space"] /
+    ["amp-cab"]（TONE3000 原生 gear 值，无 "ir"）
     usernames: 作者名列表（精确），tag_names: 标签名列表（精确），
     make_names: 设备/Make 名列表（精确）—— 与 query 叠加过滤
     """
-    return _post(f"{API}/rpc/search_tones_a2", {
+    return _canonical_tones(_post(f"{API}/rpc/search_tones_a2", {
         "query_term": query, "page_number": page_number, "page_size": page_size,
         "order_by": order_by, "tag_names": tag_names, "make_names": make_names,
         "gear_filters": gear_filters, "is_calibrated": False, "size_filters": None,
-        "usernames": usernames, "architecture_filter": "2"})
+        "usernames": usernames, "architecture_filter": None}))
 
 
 def top(limit=50):
     """tones_counts 排行（下载/收藏）"""
-    return _get(f"{API}/tones_counts",
-                select="id,title,gear,downloads_count,favorites_count,a2_models_count,platform",
-                order="downloads_count.desc", limit=limit)
+    return _canonical_tones(_get(f"{API}/tones_counts",
+                select=("id,title,gear,downloads_count,favorites_count,"
+                        "a1_models_count,a2_models_count,custom_models_count,"
+                        "irs_count,models_count,platform"),
+                order="downloads_count.desc", limit=limit))
 
 
 def top_favorites(limit=50):
@@ -179,10 +224,11 @@ def top_favorites(limit=50):
     行形状与 search 结果兼容。REQ-023：行缺 username/avatar_url（此前表格
     显示 @?）——按 user_id 批量联查 users 补上（一次 in 过滤请求）。
     """
-    rows = _get(f"{API}/tones_counts",
-                select="id,title,gear,downloads_count,favorites_count,"
-                       "a2_models_count,irs_count,models_count,created_at,user_id",
-                order="favorites_count.desc", limit=limit)
+    rows = _canonical_tones(_get(f"{API}/tones_counts",
+                select="id,title,description,gear,downloads_count,favorites_count,"
+                       "a1_models_count,a2_models_count,custom_models_count,"
+                       "irs_count,models_count,created_at,user_id",
+                order="favorites_count.desc", limit=limit))
     _attach_usernames(rows)
     return rows
 
@@ -275,10 +321,13 @@ def models(tone_id, a2_only=True):
     响应可达 19MB+、耗时 60s+，见 scripts/import_handoff.py 踩坑记录）。
     """
     ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
-              select="id,model_url,name,architecture:model_json->>architecture", limit=300)
+              select=("id,model_url,name,"
+                      "architecture:model_json->>architecture,"
+                      "architecture_version:model_json->>architecture_version"),
+              limit=300)
     if not a2_only:
         return ms
-    return [m for m in ms if m.get("architecture") == "SlimmableContainer"]
+    return [m for m in ms if _is_a2_model(m)]
 
 
 def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
@@ -294,6 +343,9 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     ms = models(tone_id, a2_only=a2_only)
+    if not a2_only:
+        # A1 (WaveNet) 是废弃架构，产品一律不下载；IR wav 与 A2 保留。
+        ms = [m for m in ms if not _is_a1_model(m)]
     if model_ids:
         ms = [m for m in ms if m["id"] in set(model_ids)]
     if not ms:
@@ -344,8 +396,12 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
         if return_paths:
             records.append({"id": m["id"], "tone_id": tone_id, "model_url": m["model_url"],
                             "name": m.get("name"),
-                            "model_json": {"architecture": m.get("architecture")}
-                                          if m.get("architecture") else None,
+                            "model_json": {
+                                key: value for key, value in (
+                                    ("architecture", m.get("architecture")),
+                                    ("architecture_version", m.get("architecture_version")),
+                                ) if value not in (None, "")
+                            } or None,
                             "local_path": str(out)})
     if not quiet:
         print(f"[{tone_id}] 下载 {got}/{len(ms)} -> {dest}")
@@ -364,7 +420,7 @@ def tone_by_id(tone_id, with_models=False):
     rows = _get(f"{API}/tones_counts", id=f"eq.{tone_id}", limit=1)
     if not rows:
         return None
-    t = dict(rows[0])
+    t = _canonical_tone(dict(rows[0]))
     if t.get("is_deleted"):
         return None
     # username / avatar_url live on the users table
@@ -393,7 +449,7 @@ def tone_by_id(tone_id, with_models=False):
         if m.get("name"):
             t["model_name"] = m["name"]
             break
-    return t
+    return _canonical_tone(t)
 
 
 def tones_for_model_ids(model_ids):
@@ -428,7 +484,9 @@ def tones_for_model_ids(model_ids):
 
 def fmt(t):
     return (f"{t['id']:>7} | dl={t.get('downloads_count', 0):>6} fav={t.get('favorites_count', 0):>5} "
-            f"a2={t.get('a2_models_count', 0):>3} | {t.get('gear', '?'):<8} | {t.get('title', '')[:58]} | @{t.get('username', '')}")
+            f"a1={t.get('a1_models_count', 0):>3} a2={t.get('a2_models_count', 0):>3} "
+            f"custom={t.get('custom_models_count', 0):>3} ir={t.get('irs_count', 0):>3} | "
+            f"{t.get('gear', '?'):<8} | {t.get('title', '')[:58]} | @{t.get('username', '')}")
 
 
 # ---- 试听干音素材（TONE3000 网页播放器内置，托管于其 MIT 开源仓库） ----
@@ -456,6 +514,13 @@ DRY_INPUTS = {
     "frogger": "Frogger - Bass.wav", "garden": "Garden - Bass.wav",
     "rollin": "Rollin' - Bass.wav", "smokin": "Smokin' - Bass.wav",
 }
+
+# The small set used by the input picker and a fast bootstrap. Keep this
+# catalog-level choice next to the source map so UI and installer agree.
+DRY_INPUT_STARTER_KEYS = (
+    "mayer", "brit", "cream", "john", "pop-punk", "metalcore",
+    "smooth", "fast-thrash", "hotrod", "slide-lead",
+)
 
 
 def fetch_dry_inputs(dest_dir, names=None, progress=None):

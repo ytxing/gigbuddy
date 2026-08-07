@@ -4,7 +4,8 @@ import asyncio
 from pathlib import Path
 
 from tui.app import GigBuddyApp
-from tui.library_panel import ToneSelected
+from tui.install_screen import PackInstallScreen
+from tui.library_panel import RemoteToneSelected, ToneSelected
 from tui.panels import ChainPanel, DetailPane
 from tui.chain_state import SlotStatus
 
@@ -185,9 +186,80 @@ def test_canonical_local_enter_stays_in_detail_context(
             detail = app.query_one(DetailPane)
             app.on_tone_selected(ToneSelected(tone["id"]))
             await pilot.pause()
-            assert detail._view_mode == "description"
-            assert not detail._pack_mode
+            assert detail._view_mode == "selection"
+            assert detail._pack_mode
+            # No Slot is focused in this scenario, so Library Enter preserves
+            # the viewing context without inventing a load target.
+            assert detail._pack_slot_index is None
             assert detail._current_tone["id"] == tone["id"]
+
+    run(scenario())
+
+
+def test_library_enter_auto_loads_first_downloaded_model_into_target(
+        monkeypatch, tmp_path):
+    current, first, second, _models, tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+    current["chain"] = _chain([second])
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            panel.state.focus_slot(0)
+            app.on_tone_selected(ToneSelected(tone["id"]))
+            await pilot.pause()
+            assert current["chain"]["slots"][0]["path"] == first
+            assert panel.state.slot(0).path == first
+            assert app.query_one(DetailPane)._pack_mode
+
+    run(scenario())
+
+
+def test_remote_library_enter_auto_loads_first_downloaded_model(
+        monkeypatch, tmp_path):
+    current, first, second, models, tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+    current["chain"] = _chain([second])
+    remote_tone = {key: value for key, value in tone.items() if key != "models"}
+    monkeypatch.setattr(
+        "tui.panels.tone3000.models",
+        lambda _tone_id, a2_only=False: [dict(models[0])],
+    )
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            panel.state.focus_slot(0)
+            app.on_remote_tone_selected(RemoteToneSelected(remote_tone))
+            await pilot.pause(0.8)
+            assert current["chain"]["slots"][0]["path"] == first
+            assert panel.state.slot(0).path == first
+
+    run(scenario())
+
+
+def test_library_pack_x_expands_to_large_pack_screen(monkeypatch, tmp_path):
+    _first, _second, models, tone = _slot_models(tmp_path)
+    monkeypatch.setattr("tui.install_screen.tone3000.models",
+                        lambda _tone_id, a2_only=False: [dict(model)
+                                                         for model in models])
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            pane = app.query_one(DetailPane)
+            pane.show_library_pack(tone)
+            await pilot.pause()
+            assert any(token == "x expand"
+                       for token, _action in pane._border_hint_actions())
+            await pilot.press("x")
+            await pilot.pause()
+            assert isinstance(app.screen, PackInstallScreen)
+            assert app.screen._tone["id"] == tone["id"]
 
     run(scenario())
 

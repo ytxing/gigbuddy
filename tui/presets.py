@@ -6,6 +6,7 @@ TUI and external agents share one code path.
 """
 import asyncio
 from copy import deepcopy
+import shlex
 import sys
 from pathlib import Path
 from typing import Callable
@@ -19,7 +20,7 @@ from textual.message import Message
 from textual.widgets import DataTable, Input, Select, Static
 
 from .marquee import MarqueeBar
-from .metadata import signed_fixed
+from .metadata import preset_slot_label, signed_fixed
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      border_hint_hit, hint_span, set_border_hint_hover)
@@ -60,19 +61,100 @@ def _preset_controls(chain: dict) -> str:
 
 
 def _preset_slot_summary(chain: dict | None) -> str:
-    """Compact ordered Slot summary used by the main Presets table."""
+    """Compact ordered Model ID summary used by the main Presets table."""
     if not isinstance(chain, dict):
         return "INVALID"
     slots = chain.get("slots") or []
     if not slots:
         return "NONE"
-    labels: list[str] = []
+    return " > ".join(preset_slot_label(slot) for slot in slots)
+
+
+PRESET_SORT_CHOICES = [("Updated", "updated"), ("Name", "name")]
+_PRESET_SEARCH_FIELDS = ("name", "note", "file", "id")
+
+
+def _preset_search_tokens(query: str) -> list[tuple[str, str]]:
+    """Parse the small local Preset query grammar without raising on typing."""
+    try:
+        raw_tokens = shlex.split(query)
+    except ValueError:
+        raw_tokens = query.split()
+    tokens = []
+    for raw in raw_tokens:
+        key, separator, value = raw.partition(":")
+        key = key.casefold() if separator else ""
+        if key not in _PRESET_SEARCH_FIELDS:
+            key = ""
+            value = raw
+        value = value.strip().casefold()
+        if value:
+            tokens.append((key, value))
+    return tokens
+
+
+def _preset_search_catalog(presets: list[dict]) -> dict[int, dict[str, set[str]]]:
+    """Resolve model/tone IDs and model names for one preset refresh."""
+    model_ids = {
+        int(slot["model_id"])
+        for preset in presets
+        for slot in (preset.get("chain") or {}).get("slots", [])
+        if isinstance(slot, dict)
+        and isinstance(slot.get("model_id"), int)
+        and not isinstance(slot.get("model_id"), bool)
+    }
+    if not model_ids:
+        return {}
+    marks = ",".join("?" for _ in model_ids)
+    with library.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, tone_id, name FROM models "
+            f"WHERE id IN ({marks})", tuple(sorted(model_ids))).fetchall()
+    return {
+        int(row["id"]): {
+            "ids": {str(row["id"]), str(row["tone_id"])},
+            "files": {str(row["name"] or "")},
+        }
+        for row in rows
+    }
+
+
+def _preset_matches(preset: dict, tokens: list[tuple[str, str]],
+                    catalog: dict[int, dict[str, set[str]]]) -> bool:
+    """Match every query token against the requested local Preset fields."""
+    chain = preset.get("chain") or {}
+    slots = chain.get("slots") if isinstance(chain, dict) else []
+    slots = slots if isinstance(slots, list) else []
+    fields: dict[str, set[str]] = {
+        "name": {str(preset.get("name") or "").casefold()},
+        "note": {str(preset.get("note") or "").casefold()},
+        "file": set(),
+        "id": set(),
+    }
     for slot in slots:
-        if not isinstance(slot, dict) or not slot.get("path"):
-            labels.append("NONE")
+        if not isinstance(slot, dict):
             continue
-        labels.append(Path(str(slot["path"])).name)
-    return " > ".join(labels)
+        path = str(slot.get("path") or "")
+        if path:
+            fields["file"].add(Path(path).name.casefold())
+        model_id = slot.get("model_id")
+        if isinstance(model_id, int) and not isinstance(model_id, bool):
+            details = catalog.get(model_id, {})
+            fields["id"].update(details.get("ids", {str(model_id)}))
+            fields["file"].update(
+                name.casefold() for name in details.get("files", set()) if name)
+    all_text = " ".join(
+        value for values in fields.values() for value in values).casefold()
+    for key, value in tokens:
+        if key == "id":
+            if value not in fields["id"]:
+                return False
+        elif key:
+            if not any(value in field for field in fields[key]):
+                return False
+        elif value not in all_text:
+            return False
+    return True
 
 
 def _same_local_path(left: object, right: object) -> bool:
@@ -195,9 +277,9 @@ class PresetPanel(Vertical):
         yield MarqueeBar(id="preset-marquee")
         yield SearchBar(
             input_id="preset-search",
-            sort_options=[("Updated", "updated")],
+            sort_options=PRESET_SORT_CHOICES,
             sort_id="preset-sort",
-            placeholder="Search presets",
+            placeholder="name:clean note:live file:SVT id:101",
             input_cls=PresetSearchInput,
             id="preset-search-bar",
         )
@@ -216,8 +298,39 @@ class PresetPanel(Vertical):
         self._query = ""
         self._sort = "updated"
         self._filter_anchor = None
+        self._starter_bootstrap_started = False
+        self._bootstrap_starter_if_empty()
         self.refresh_presets()
         self.call_after_refresh(lambda: self._publish_highlight(force=True))
+
+    def _bootstrap_starter_if_empty(self) -> None:
+        with library.connect() as conn:
+            has_preset = conn.execute(
+                "SELECT 1 FROM presets LIMIT 1").fetchone() is not None
+        if has_preset or self._starter_bootstrap_started:
+            return
+        self._starter_bootstrap_started = True
+        self.app.notify("Preparing starter presets")
+        self.run_worker(self._bootstrap_starter_presets(),
+                        name="starter-presets", exclusive=True)
+
+    async def _bootstrap_starter_presets(self) -> None:
+        try:
+            result = await asyncio.to_thread(
+                library.bootstrap_starter_presets, quiet=True)
+        except Exception as exc:
+            self.app.notify(f"Starter presets unavailable: {exc}",
+                            severity="warning")
+            return
+        self._fingerprint = None
+        self.refresh_presets(force=True)
+        count = int(result.get("presets") or 0)
+        failed = result.get("failed") or []
+        if failed:
+            self.app.notify(f"Starter presets incomplete: {count} ready",
+                            severity="warning")
+        elif count:
+            self.app.notify(f"Starter presets ready: {count}")
 
     def focus_search(self) -> None:
         self._search_editing = True
@@ -317,16 +430,14 @@ class PresetPanel(Vertical):
         }
         existing_keys = set(self._preset_names_by_key)
         presets = all_presets
-        query = self._query.strip().casefold()
-        if query:
-            presets = [
-                p for p in presets
-                if query in " ".join((
-                    str(p.get("name") or ""),
-                    str(p.get("note") or ""),
-                    _preset_slot_summary(p.get("chain")),
-                )).casefold()
-            ]
+        search_tokens = _preset_search_tokens(self._query)
+        if search_tokens:
+            catalog = _preset_search_catalog(all_presets)
+            presets = [p for p in presets
+                       if _preset_matches(p, search_tokens, catalog)]
+        if self._sort == "name":
+            presets = sorted(
+                presets, key=lambda p: str(p.get("name") or "").casefold())
         visible_keys = {self._row_key(preset) for preset in presets}
         # Search changes visibility only. Selection is keyed to the complete
         # preset set, so hidden rows return selected when the query is cleared.
@@ -987,6 +1098,211 @@ class PresetNameModal(GigBuddyModal):
                 [token for token, _ in self._border_hint_actions()]))
 
 
+class ChainSaveModal(GigBuddyModal):
+    """Choose whether to overwrite the active Preset or save a new one."""
+
+    CSS = """
+    ChainSaveModal > ModalBox {
+        width: 72%; height: auto; margin: 8 14;
+    }
+    #chain-save-line {
+        height: 3; width: 100%; align: left middle;
+    }
+    #chain-save-mode {
+        width: 20; height: 3; padding: 0;
+        background: $boost;
+        border-top: none; border-right: none;
+        border-bottom: none; border-left: none;
+    }
+    #chain-save-mode > SelectCurrent {
+        background: $boost;
+        border-top: none !important; border-right: none !important;
+        border-bottom: none !important; border-left: none !important;
+    }
+    #chain-save-name-label {
+        width: auto; padding: 0 1; color: $text-muted;
+    }
+    #chain-save-name {
+        width: 1fr; height: 3; padding: 0 1;
+        background: $boost;
+        border-top: none; border-right: none;
+        border-bottom: none; border-left: none;
+    }
+    #chain-save-name:focus {
+        background: $surface-lighten-1;
+        border-top: none; border-right: none;
+        border-bottom: none; border-left: none;
+    }
+    #chain-save-status { height: 1; color: $text-muted; }
+    """
+
+    class Saved(Message):
+        def __init__(self, name: str, preset_id: int | None = None) -> None:
+            super().__init__()
+            self.name = name
+            self.preset_id = _valid_preset_id(preset_id)
+
+    def __init__(self) -> None:
+        super().__init__()
+        active = library.preset_current()
+        self._mode = "save_here" if active else "save_as_new"
+        self._active_name = active
+        self._pending_overwrite: str | None = None
+
+    def compose(self) -> ComposeResult:
+        box = ModalBox()
+        box.border_title = "SAVE"
+        with box:
+            with Horizontal(id="chain-save-line"):
+                yield Select(
+                    [("SAVE HERE", "save_here"),
+                     ("SAVE AS NEW", "save_as_new")],
+                    value=self._mode,
+                    allow_blank=False,
+                    id="chain-save-mode",
+                )
+                yield Static("Preset name:", id="chain-save-name-label")
+                yield Input(
+                    placeholder=self._active_name or "new preset name",
+                    id="chain-save-name",
+                )
+            yield Static("", id="chain-save-status")
+
+    def on_mount(self) -> None:
+        self._update_hint()
+        self.query_one("#chain-save-name", Input).focus()
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#chain-save-status", Static).update(text)
+        self._update_hint(text)
+
+    def _update_hint(self, state: str = "") -> None:
+        box = self.query_one(ModalBox)
+        action = "enter overwrite" if self._pending_overwrite else "enter save"
+        set_border_hint_layout(box, state, ["cancel", action])
+
+    def _finish_save(self, name: str) -> None:
+        try:
+            preset = library.preset_save(name)
+        except (OSError, ValueError, TypeError) as exc:
+            self._pending_overwrite = None
+            self._set_status(f"Save failed: {exc}")
+            return
+        self.post_message(self.Saved(preset["name"], preset.get("id")))
+        self.dismiss()
+
+    def _submit(self) -> None:
+        if self._pending_overwrite:
+            name = self._pending_overwrite
+            self._finish_save(name)
+            return
+
+        if self._mode == "save_here":
+            active = library.preset_current()
+            if not active:
+                self._mode = "save_as_new"
+                self.query_one("#chain-save-mode", Select).value = "save_as_new"
+                self.query_one("#chain-save-name", Input).focus()
+                self._set_status("Choose SAVE AS NEW and enter a name")
+                return
+            self._pending_overwrite = active
+            self._set_status(f'"{active}" already exists. Overwrite it?')
+            return
+
+        name = self.query_one("#chain-save-name", Input).value.strip()
+        if not name:
+            self._set_status("Preset name required")
+            return
+        if library.preset_get(name):
+            self._pending_overwrite = name
+            self._set_status(f'"{name}" already exists. Overwrite it?')
+            return
+        self._finish_save(name)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "chain-save-name":
+            return
+        if self._pending_overwrite and event.value.strip() != self._pending_overwrite:
+            self._pending_overwrite = None
+            self._set_status("")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "chain-save-name":
+            self._submit()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "chain-save-mode":
+            return
+        self._mode = str(event.value)
+        self._pending_overwrite = None
+        self._set_status("")
+        self.query_one("#chain-save-name", Input).focus()
+
+    def _confirm(self) -> None:
+        self._submit()
+
+    def _border_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
+        return [("cancel", self.dismiss),
+                ("enter overwrite" if self._pending_overwrite else "enter save",
+                 self._confirm)]
+
+    def on_click(self, event: MouseEvent) -> None:
+        border_hint_click(self.query_one(ModalBox), event,
+                          self._border_hint_actions())
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        box = self.query_one(ModalBox)
+        set_border_hint_hover(
+            box, border_hint_action_token(
+                box, event.screen_x, event.screen_y,
+                [token for token, _ in self._border_hint_actions()]))
+
+
+class ClearSlotsConfirm(GigBuddyModal):
+    """Confirm clearing the current chain without deleting Presets or files."""
+
+    CSS = """
+    ClearSlotsConfirm > ModalBox {
+        width: 58%; height: auto; margin: 10 21;
+        border: round $warning; border-title-color: $warning;
+    }
+    """
+
+    class Confirmed(Message):
+        pass
+
+    def compose(self) -> ComposeResult:
+        box = ModalBox()
+        box.border_title = "CLEAR ALL SLOTS"
+        with box:
+            yield NonSelectableStatic(
+                "Are you sure you want to clear all Slots?\n"
+                "Local files and Presets will not be deleted.")
+
+    def on_mount(self) -> None:
+        box = self.query_one(ModalBox)
+        set_border_hint_layout(
+            box, "", ["cancel", "enter clear all"])
+
+    def _confirm(self) -> None:
+        self.post_message(self.Confirmed())
+        self.dismiss()
+
+    def _border_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
+        return [("cancel", self.dismiss), ("enter clear all", self._confirm)]
+
+    def on_click(self, event: MouseEvent) -> None:
+        border_hint_click(self.query_one(ModalBox), event,
+                          self._border_hint_actions())
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        box = self.query_one(ModalBox)
+        set_border_hint_hover(
+            box, border_hint_action_token(
+                box, event.screen_x, event.screen_y,
+                [token for token, _ in self._border_hint_actions()]))
+
+
 class PresetEditModal(GigBuddyModal):
     """Edit a Preset snapshot in memory, then commit it explicitly."""
 
@@ -1048,7 +1364,7 @@ class PresetEditModal(GigBuddyModal):
                 "Draft only · Enter saves · ctrl+enter saves and loads · Esc cancels")
             table = DataTable(id="preset-edit-slots", cursor_type="row")
             table.add_column("Slot", key="index", width=8)
-            table.add_column("File", key="path")
+            table.add_column("Model ID", key="path")
             yield table
             with Horizontal(id="preset-edit-fields"):
                 yield Input(id="preset-edit-gain", placeholder="gain")
@@ -1114,11 +1430,11 @@ class PresetEditModal(GigBuddyModal):
         for index, slot in enumerate(slots):
             path = slot.get("path") if isinstance(slot, dict) else None
             if path:
-                label = Path(str(path)).name
+                label = preset_slot_label(slot)
             elif index in self._draft_candidates:
-                label = f"BYPASS · {Path(self._draft_candidates[index]).name}"
+                label = "BYPASS"
             else:
-                label = "NONE"
+                label = preset_slot_label(slot)
             table.add_row(f"{index + 1:02d}", escape(label), key=f"slot:{index}")
         if table.ordered_rows:
             table.move_cursor(row=self._cursor, animate=False, scroll=False)

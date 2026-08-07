@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${GIGBUDDY_PYTHON:-$ROOT/.venv/bin/python}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python3}"
+fi
+
+exec "$PYTHON_BIN" "$ROOT/src/library.py" "$@"

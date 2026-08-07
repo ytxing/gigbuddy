@@ -42,21 +42,54 @@ fully MIT core stack.
 ## Quick start
 
 ```bash
-# 1. Build the engine (NeuralAudio + NAM Core, MIT; needs cmake/clang++ and brew install portaudio)
-./cpp/build.sh
+# One command: Python environment, dependencies, database, starter presets,
+# official dry inputs, NeuralAudio sources, and the realtime engine.
+./install.sh
 
-# 2. Build the tone library from TONE3000
-bin/gigbuddy tone search "fender super reverb"     # search TONE3000
-bin/gigbuddy tone import 19                        # download + persist metadata to DB
-bin/gigbuddy tone list                             # browse the local library
-bin/gigbuddy tone show 19                          # full metadata + local files
+# If you only want to inspect the TUI, skip the native engine build.
+./install.sh --no-engine --starter-dry
 
-# 3. Point the engine at an ordered Slot chain (file names = TONE3000 semantic model names)
-bin/gigbuddy chain set '{"slots": [{"path": "data/tones/19-fender-super-reverb-1977/Fender Super Reverb: EQ Flat, Volume 3, sm57.nam"}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
-bin/gigbuddy chain get
+# Start the TUI after the install.
+.venv/bin/python -m tui
+.venv/bin/python -m tui --no-engine  # when install used --no-engine
+```
 
-# 4. Offline render (optional, when you want a wav file)
-python3 src/render.py chain.json data/dry.wav out.wav
+The default setup downloads the exact models needed by the built-in preset
+catalog and all 34 official TONE3000 dry-input WAV files. It is idempotent:
+existing database rows and non-empty files are reused. `--starter-dry` limits
+the download to the ten common guitar samples. The native engine build fetches
+`mikeoliphant/NeuralAudio` with its submodules and requires Homebrew PortAudio
+on macOS. Use `--no-engine` when that toolchain is not available.
+
+**Third-party dependency note.** The RTNeural checkout inside NeuralAudio
+vendors Eigen as a plain directory that currently points at Eigen master
+(3.4.90, a 3.5 pre-release), which is incompatible with NAM Core: it drops
+`unsupported/Eigen/FFT` (required by NAM `linear.cpp`) and removes
+`Eigen::placeholders::lastN` (used by NeuralAudio `LSTM.h`/`LSTMDynamic.h`).
+If `cpp/build.sh` fails on either symbol, replace
+`third_party/NeuralAudio/deps/RTNeural/modules/Eigen` with the Eigen 3.4.0
+source tarball from GitLab
+(`gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz`) and patch
+`Eigen::placeholders::lastN(...)` → `Eigen::lastN(...)` in the two LSTM headers
+before rebuilding. See the comment in `install.sh` at the clone step.
+
+The generated runtime data is kept under `data/` and is intentionally ignored
+by Git. To prepare the same starter content manually:
+
+```bash
+bin/gigbuddy preset bootstrap
+python3 src/tone3000.py dry data/dry_inputs
+bin/gigbuddy preset list
+```
+
+To import an additional tone, search first and then use the real ID returned by
+the search:
+
+```bash
+bin/gigbuddy tone search "fender super reverb"
+bin/gigbuddy tone import <tone-id>
+bin/gigbuddy tone list
+bin/gigbuddy tone show <tone-id>
 ```
 
 ## TUI (realtime tone-chain console)
@@ -69,7 +102,7 @@ is already running in another terminal.
 # 省略 --in/--out 使用系统默认音频设备；设备列表与选择见 TUI AUDIO SETTINGS 面板
 ./bin/realtime_cli --live data/live_chain.json --level-file data/level.json
 
-# terminal 2: TUI (Textual; omit --no-engine if terminal 1 is not running)
+# terminal 2: TUI (Textual; omit --no-engine when this engine is running)
 .venv/bin/python -m tui --no-engine
 ```
 
@@ -103,6 +136,8 @@ TUI features (v0.2):
   `enter` (load), and `ctrl+z`/`ctrl+shift+z` undo/redo preset application.
   Preset writes are scoped to this pane; the global `ctrl+p` command palette
   can focus the pane or open Save/Save As.
+  Preset search is local and one-line: `name:...`, `note:...`, `file:...`,
+  and `id:...` (model ID or tone ID), with `Updated` and `Name` sorting.
 - **Level meter** (bottom): 0.3s refresh from the engine.
 
 Search examples:
@@ -128,8 +163,9 @@ gigbuddy tone show <id> [--json]                                 # full metadata
 gigbuddy tone import <id>                                        # download + persist
 gigbuddy chain get                                               # cat live_chain.json
 gigbuddy chain set '<json>'                                      # write it (hot-swap)
-gigbuddy preset seed                                             # add/update built-in catalog
-gigbuddy preset seed --replace                                   # delete all presets, rebuild catalog
+gigbuddy preset seed                                             # download starter models, then seed
+gigbuddy preset seed --replace                                   # delete all presets, download, rebuild
+gigbuddy preset seed --local-only                                # seed only already-downloaded models
 gigbuddy preset list                                             # named chain snapshots
 gigbuddy preset save <name> [--note "..."]                       # snapshot current chain
 gigbuddy preset load <name>                                      # apply (engine hot-swap)

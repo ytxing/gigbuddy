@@ -1,0 +1,6 @@
+# Textual 8 is the API family used by the v0.2 TUI, including its current
+# DataTable and theme variable behavior.
+textual>=8.2,<9
+# Optional offline rendering uses numpy; installing it here keeps the CLI
+# usable immediately after the one-click setup.
+numpy>=1.26,<3

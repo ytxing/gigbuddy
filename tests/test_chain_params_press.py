@@ -1,13 +1,13 @@
 """REQ-007: ChainParams 参数行鼠标点按/长按步进。
 
-点按（快速按下释放）= 该参数基础步长；长按（按住 ≥350ms）每 100ms
-重复同一基础步长；释放或移出 token/面板即停止。
+点按（按下即响应）= 该参数基础步长；继续按住时按时长分段加速重复
+同一基础步长；释放或移出 token/面板即停止。
 键盘 g/G/m/M/q/Q 绑定不在本文件覆盖（见 test_tui_keyboard.py）。
 
 事件派发说明：pilot.mouse_down/mouse_up 直接走 screen._forward_event 绕
-过 App 层的 Click 合成，且 headless driver 的事件处理有 ~100ms 排队延迟，
-与 350ms 长按阈值形成竞态。因此交互测试改为同步构造事件调用 widget
-handler（事件时序确定），长按定时器仍是真实 asyncio 计时（run_test 内）。
+过 App 层的 Click 合成，且 headless driver 的事件处理有排队延迟。因此
+交互测试改为同步构造事件调用 widget handler（事件时序确定），长按定时器
+仍是真实 asyncio 计时（run_test 内）。
 """
 import asyncio
 
@@ -81,12 +81,12 @@ def test_click_steps_by_base_step(monkeypatch, tmp_path):
             params = panel.params
             g_x, G_x = token_x(params, 0), token_x(params, 1)
 
-            # G（上升）：0.8 → 0.9
+            # G（上升）：0.8 → 1.3
             await pilot.click(params, offset=(G_x, 0))
             await pilot.pause()
-            assert writes[-1]["gain"] == 0.9, writes[-1]
+            assert writes[-1]["gain"] == 1.3, writes[-1]
 
-            # g（下降）：0.9 → 0.8
+            # g（下降）：1.3 → 0.8
             await pilot.click(params, offset=(g_x, 0))
             await pilot.pause()
             assert writes[-1]["gain"] == 0.8, writes[-1]
@@ -98,7 +98,7 @@ def test_click_steps_by_base_step(monkeypatch, tmp_path):
 
 
 def test_short_hold_then_release_is_single_base_step(monkeypatch, tmp_path):
-    """按下 <350ms 即释放：只步进一次基础步长（不进长按、无重复）。"""
+    """按下 <200ms 即释放：只步进一次基础步长（不进重复）。"""
     chain, writes = setup_chain(monkeypatch, tmp_path)
 
     async def scenario():
@@ -111,19 +111,19 @@ def test_short_hold_then_release_is_single_base_step(monkeypatch, tmp_path):
             m_x = token_x(params, 2)  # m（master 下降）
 
             send_down(params, m_x)
-            await pilot.pause(0.1)  # 远小于 350ms 阈值
+            await pilot.pause(0.1)  # 仍处于 200ms 初始保持窗口
             send_up(params, m_x)
             send_click(params, m_x)
             await pilot.pause(0.2)  # 给潜在重复步进留时间
 
             assert len(writes) == 1, writes
-            assert writes[-1]["master"] == 0.75, writes[-1]
+            assert writes[-1]["master"] == 0.3, writes[-1]
 
     run(scenario())
 
 
-def test_long_press_repeats_by_0_1_and_stops_on_release(monkeypatch, tmp_path):
-    """长按 G：以 0.1 粒度连续步进（步数明显多于单次），释放即停。"""
+def test_long_press_repeats_by_0_5_and_stops_on_release(monkeypatch, tmp_path):
+    """长按 G：以 0.5 粒度连续步进（步数明显多于单次），释放即停。"""
     chain, writes = setup_chain(monkeypatch, tmp_path)
 
     async def scenario():
@@ -136,23 +136,23 @@ def test_long_press_repeats_by_0_1_and_stops_on_release(monkeypatch, tmp_path):
             G_x = token_x(params, 1)
 
             send_down(params, G_x)
-            # >350ms 判定长按，再压住 ~0.3s 让重复步进跑几拍
+            # 超过 200ms 后继续按住，让分段重复跑几拍
             await pilot.pause(0.4)
             await pilot.pause(0.30)
             steps_held = len(writes)
             gain_held = writes[-1]["gain"]
             send_up(params, G_x)
-            # 真实路径 mouse_up 后 App 会合成 Click —— 长按释放的 click 必须被丢弃
+            # 真实路径 mouse_up 后 App 会合成 Click —— 按下已响应，合成 click 必须被丢弃
             send_click(params, G_x)
             await pilot.pause(0.25)
 
-            # 长按必须明显多于一次（≥3 步），且每步 0.1（gain 的基础步长）
-            # （第 index+1 步 = 0.8 + 0.1*(index+1)）
+            # 长按必须明显多于一次（≥3 步），且每步 0.5（鼠标步长）
+            # （第 index+1 步 = 0.8 + 0.5*(index+1)）
             assert steps_held >= 3, writes
-            assert gain_held == round(0.8 + 0.1 * steps_held, 2), (
-                f"held gain {gain_held} != 0.8 + 0.1*{steps_held}")
+            assert gain_held == round(0.8 + 0.5 * steps_held, 2), (
+                f"held gain {gain_held} != 0.8 + 0.5*{steps_held}")
             for index, cfg in enumerate(writes):
-                assert abs(cfg["gain"] - 0.8 - 0.1 * (index + 1)) < 1e-6, cfg
+                assert abs(cfg["gain"] - 0.8 - 0.5 * (index + 1)) < 1e-6, cfg
 
             # 释放（及随后的合成 click）不再步进：写链次数与值都冻结
             assert len(writes) == steps_held, writes
@@ -172,9 +172,9 @@ def test_long_press_stops_when_moving_off_token(monkeypatch, tmp_path):
             panel.chain = dict(chain)
             await pilot.pause()
             params = panel.params
-            Q_x = token_x(params, 5)  # Q（quality 上升）
+            G_x = token_x(params, 1)  # G（gain 上升）
 
-            send_down(params, Q_x)
+            send_down(params, G_x)
             await pilot.pause(0.4)
             await pilot.pause(0.2)
             assert len(writes) >= 3, writes
@@ -221,8 +221,8 @@ def test_long_press_clamps_quality_at_zero(monkeypatch, tmp_path):
     run(scenario())
 
 
-def test_click_m_uses_master_keyboard_step_unchanged(monkeypatch, tmp_path):
-    """鼠标 master 单击使用与键盘相同的 0.05 基础步长。"""
+def test_click_m_uses_mouse_step(monkeypatch, tmp_path):
+    """鼠标 master 单击使用 0.5 步长。"""
     chain, writes = setup_chain(monkeypatch, tmp_path)
 
     async def scenario():
@@ -236,6 +236,6 @@ def test_click_m_uses_master_keyboard_step_unchanged(monkeypatch, tmp_path):
 
             await pilot.click(params, offset=(M_x, 0))
             await pilot.pause()
-            assert writes[-1]["master"] == 0.85, writes[-1]
+            assert writes[-1]["master"] == 1.3, writes[-1]
 
     run(scenario())

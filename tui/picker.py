@@ -206,11 +206,11 @@ class TonePickerScreen(GigBuddyModal):
             self.query_one("#pick-status", MarqueeBar).content = (
                 "Searching TONE3000…")
         try:
-            # IR picker only searches cabs — an amp search hit has no IR models.
+            # IR picker searches both CAB and SPACE tones; both expose IR files.
             rows = await asyncio.to_thread(
                 library.tone3000.search,
                 query, page_size=50,
-                gear_filters=["cab"] if self.kind == "ir" else None)
+                gear_filters=["cab", "space"] if self.kind == "ir" else None)
             rows = await asyncio.to_thread(library.mark_download_state, rows)
         except Exception as e:
             if self._request_alive(generation, query):

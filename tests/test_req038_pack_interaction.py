@@ -15,6 +15,7 @@ from textual.widgets import DataTable
 
 from tui.app import GigBuddyApp
 from tui.install_screen import PackInstallScreen
+from tui.library_panel import LibraryPanel
 from tui.panels import ChainSlotWidget, DetailPane
 
 
@@ -46,9 +47,105 @@ def _monkey_remote(monkeypatch):
     monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
 
 
+def test_detail_pack_filters_a1_rows(monkeypatch):
+    """Remote Detail PACK must drop WaveNet (A1) rows and keep A2."""
+    monkeypatch.setattr(GigBuddyApp, "action_open_chain_save_menu",
+                        lambda self: None, raising=False)
+    monkeypatch.setattr(GigBuddyApp, "action_clear_all_slots",
+                        lambda self: None, raising=False)
+    models = [
+        {"id": 1, "name": "legacy.nam", "architecture": "WaveNet"},
+        {"id": 2, "name": "modern.nam", "architecture": "SlimmableContainer"},
+    ]
+    fetch_flags = []
+    monkeypatch.setattr("tui.panels.tone3000.models",
+                        lambda tid, a2_only=True: fetch_flags.append(a2_only) or models)
+    monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            pane = app.query_one(DetailPane)
+            pane.show_remote_pack(
+                {"id": 77, "title": "AMP Pack", "gear": "amp",
+                 "username": "tester", "models_count": 2})
+            await pilot.pause(0.6)
+            assert [m["architecture"] for m in pane._pack_rows.values()] == [
+                "A2"
+            ]
+            assert pane._pack_table.row_count == 1
+            assert fetch_flags == [False]
+
+    run(scenario())
+
+
+def test_install_pack_filters_a1_rows(monkeypatch):
+    """AMP Install PACK must drop WaveNet (A1); only A2 is installable."""
+    monkeypatch.setattr(GigBuddyApp, "action_open_chain_save_menu",
+                        lambda self: None, raising=False)
+    monkeypatch.setattr(GigBuddyApp, "action_clear_all_slots",
+                        lambda self: None, raising=False)
+    models = [
+        {"id": 1, "name": "legacy.nam", "architecture": "WaveNet"},
+        {"id": 2, "name": "modern.nam", "architecture": "SlimmableContainer"},
+    ]
+    fetch_flags = []
+    monkeypatch.setattr(
+        "tui.install_screen.tone3000.models",
+        lambda tid, a2_only=True: fetch_flags.append(a2_only) or models,
+    )
+    monkeypatch.setattr(
+        "tui.install_screen.library.downloaded_model_ids_by_tone", lambda: {})
+    tone = {"id": 77, "title": "AMP Pack", "gear": "amp",
+            "username": "tester", "downloads_count": 2}
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(PackInstallScreen(tone))
+            await pilot.pause(0.5)
+            screen = app.screen
+            assert [m["architecture"] for m in screen._models] == ["A2"]
+            assert screen.query_one("#pack-table", DataTable).row_count == 1
+            assert fetch_flags == [False]
+
+    run(scenario())
+
+
+def test_install_pack_keeps_architectureless_ir_rows(monkeypatch):
+    """CAB Install PACK must infer IR for TONE3000 rows with null architecture."""
+    monkeypatch.setattr(GigBuddyApp, "action_open_chain_save_menu",
+                        lambda self: None, raising=False)
+    monkeypatch.setattr(GigBuddyApp, "action_clear_all_slots",
+                        lambda self: None, raising=False)
+    models = [
+        {"id": 1, "name": "blue-1.wav", "model_url": "https://cdn/blue-1.wav",
+         "architecture": None},
+        {"id": 2, "name": "blue-2.wav", "model_url": "https://cdn/blue-2.wav",
+         "architecture": None},
+    ]
+    monkeypatch.setattr("tui.install_screen.tone3000.models",
+                        lambda tid, a2_only=True: models)
+    monkeypatch.setattr(
+        "tui.install_screen.library.downloaded_model_ids_by_tone", lambda: {})
+    tone = {"id": 77, "title": "CAB Pack", "gear": "cab", "platform": "ir",
+            "username": "tester", "downloads_count": 2}
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(PackInstallScreen(tone))
+            await pilot.pause(0.5)
+            screen = app.screen
+            assert [m["architecture"] for m in screen._models] == ["IR", "IR"]
+            assert screen.query_one("#pack-table", DataTable).row_count == 2
+
+    run(scenario())
+
+
 async def _goto_remote_selection(app, pilot):
     """TONE3000 tab → 聚焦 Detail tabs → ``]`` 切到 Remote Pack。"""
-    await pilot.click(app.query_one("#--content-tab-pane-tone"))
+    app.query_one(LibraryPanel).activate_view_tab("pane-tone")
     await pilot.pause(0.6)
     pane = app.query_one(DetailPane)
     pane._view_tabs.focus()

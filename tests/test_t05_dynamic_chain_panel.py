@@ -312,7 +312,8 @@ def test_dynamic_panel_routes_focus_bypass_reorder_delete_and_add(
     asyncio.run(scenario())
 
 
-def test_dynamic_panel_tab_order_has_one_stop_per_parameter(monkeypatch, tmp_path):
+def test_dynamic_panel_tab_order_has_single_params_stop(monkeypatch, tmp_path):
+    """v0.1.1 契约：ChainParams 是整个参数行的单一焦点站（无每参数 overlay）。"""
     pytest.importorskip("textual", reason="focus order smoke needs Textual")
     from tui.app import GigBuddyApp
     from tui.panels import ChainPanel
@@ -338,15 +339,13 @@ def test_dynamic_panel_tab_order_has_one_stop_per_parameter(monkeypatch, tmp_pat
             assert app.focused is panel.slot_widgets[1]
             await pilot.press("tab")
             assert app.focused is panel.add_slot
-
-            for index in range(3):
-                await pilot.press("tab")
-                assert app.focused.id == f"chain-param-{index}"
+            await pilot.press("tab")
+            assert app.focused is panel.params
 
             await pilot.press("shift+tab")
-            assert app.focused.id == "chain-param-1"
-            await pilot.press("shift+tab")
-            assert app.focused.id == "chain-param-0"
+            assert app.focused is panel.add_slot
+            await pilot.press("tab")
+            assert app.focused is panel.params
             await pilot.press("shift+tab")
             assert app.focused is panel.add_slot
 

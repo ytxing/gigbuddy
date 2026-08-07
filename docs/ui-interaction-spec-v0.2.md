@@ -61,15 +61,15 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 
 ### 1.6 v0.2.9 Pane tab 与搜索栏修订
 
-- 多内容 Pane 使用 `PANENAME  TAG1  TAG2` 的 view tab strip；各项只用空格分隔。TAG 可 hover、点击且 active 高亮；其键盘激活方式已由 v0.2.10 固定为 `[/]`，不再使用 `tab/shift+tab` 或 `←/→` 切换。
-- 可搜索 Pane 使用同一行的 `query field + sort select`；SearchBar 通过 `$surface`、`$surface-hover` 和 `$accent` 背景区分状态，不使用输入框边框或独立卡片。
-- 枚举过滤放到搜索结果表头；该范围已由 v0.2.10 收窄为仅 Type/gear，Author 和其他列不提供过滤。
+- 多内容 Pane 使用 `PANENAME  TAG1 / TAG2` 的 view tab strip；TAG 之间用 `/` 分隔。TAG 可 hover、点击且 active 高亮；其键盘激活方式已由 v0.2.10 固定为 `[/]`，不再使用 `tab/shift+tab` 或 `←/→` 切换。
+- 可搜索 Pane 使用同一行的 `query field + sort select + type select`；SearchBar 通过 `$surface`、`$surface-hover` 和 `$accent` 背景区分状态，不使用输入框边框或独立卡片。
+- 枚举过滤放到 SearchBar 的 Type select；结果表头只显示信息，不提供点击过滤，Author 和其他列同样不提供过滤。
 
-### 1.7 v0.2.10 键位、固定宽度与 Type-only 修订
+### 1.7 v0.2.10 键位、固定宽度与 Type 过滤修订
 
 - `tab/shift+tab` 保持全局焦点前进/回退，不切换 view tab；当前 Pane 使用 `[`/`]` 切换前后 view tab，文本输入和模态编辑时不截获。
-- SearchBar 的 query 和 sort 使用固定 grid tracks；长 query 只在自身区域水平滚动或省略，不改变 SearchBar、sort 或 Pane 宽度。
-- 结果表头只提供 Type/gear 过滤，不提供 Author 或其他列过滤。Type 值从当前数据动态生成，服务端新增值无需修改本地闭合集合。
+- SearchBar 的 query、sort 和适用时的 type 使用固定 grid tracks；长 query 只在自身区域水平滚动或省略，不改变 SearchBar、sort/type 或 Pane 宽度。
+- SearchBar 的 Type select 提供动态 Type/gear 过滤，不提供 Author 或其他列过滤。Type 值从当前数据动态生成，服务端新增值无需修改本地闭合集合；结果表头不再是过滤命中区。
 
 ### 1.8 v0.2.11 原生 gear 展示修订
 
@@ -161,20 +161,20 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 | 页面 | reconcile 规则 |
 |---|---|
 | LOCAL | 刷新 SQLite rows 和受影响 tone 的下载状态，按 `local:<tone_id>` 恢复光标、选择和视口。 |
-| TONE3000 / FAVORITES | 只更新受影响 tone/model 的下载状态，保留 query、排序、已加载页、光标和视口；不得因本地安装/卸载重新排序远程结果。 |
+| TONE3000 | 只更新受影响 tone/model 的下载状态，保留 query、排序、已加载页、光标和视口；不得因本地安装/卸载重新排序远程结果。 |
 | TOP CREATORS | 本地安装/卸载不重新请求、重排或替换 creator 排行；按 `creator:<username>` 保留当前作者和视口。verified cache 的变化只能原位更新勾选标记。 |
 | DetailPane / Pack | 刷新模型 rows 和安装状态，按 `m<model_id>` 恢复光标、Description/Selection 模式、target 和视口；不得自动打开新的 TonePicker。 |
 | ChainPanel / Presets | 同步受影响文件、Slot、引用和 active/dirty 状态，保留当前对象、焦点、target、selection 和视口；无关页面不得被切换或清空。 |
 
-### 3.6 Pane view tab、SearchBar 和 Type 表头过滤
+### 3.6 Pane view tab、SearchBar 和 Type 过滤
 
-当同一 Pane 存在多个同级内容（例如 Library 的 LOCAL、TONE3000、FAVORITES、TOP CREATORS，或 DetailPane 的 Description、Pack）时，必须在同一 Pane 内使用 view tab strip。view tab 是内容切换协议，不是新的 screen，也不是底部 action token。
+当同一 Pane 存在多个同级内容（例如 Library 的 LOCAL、TONE3000、TOP CREATORS，或 DetailPane 的 Description、Pack）时，必须在同一 Pane 内使用 view tab strip。view tab 是内容切换协议，不是新的 screen，也不是底部 action token。
 
 - 每个 view tab 有稳定 `view_tab_id`、显示 TAG 和独立状态。激活 view tab 只替换该 Pane 的内容，不 push screen、不切换 App 主 tab、不改变其他 Pane 的焦点。
-- 鼠标点击 TAG 激活对应 view tab。view tab strip 整体只占一个 focus stop；`tab/shift+tab` 只按视觉顺序进入或离开该控件，不在 TAG 之间移动，也不激活 TAG。当前 Pane 不处于文本输入或模态编辑时，`[`/`]` 激活前后 TAG；首尾不循环，到边界 no-op。`←/→` 不承担同级 view 切换语义。
+- 鼠标点击 TAG 激活对应 view tab。view tab strip 整体只占一个 focus stop；`tab/shift+tab` 只按视觉顺序进入或离开该控件，不在 TAG 之间移动，也不激活 TAG。当前 Pane 不处于文本输入或模态编辑时，`[`/`]` 激活前后 TAG；导航首尾循环，`]` 从最后一个 TAG 回到第一个，`[` 从第一个 TAG 回到最后一个。`←/→` 不承担同级 view 切换语义。
 - 每个 view tab 独立保留 query、sort、type filter、cursor row key、selection、Detail context 和 viewport；切回时恢复该 tab 的状态。切换 tab 不触发全局 mutation refresh，也不清除其他 tab 的已提交 query。
-- SearchBar 是所有可搜索列表的固定一行：`query field + sort select`，视觉示例为 `SEARCH <query> · SORT <sort>`。SearchBar 宽度固定为 Pane content region，内容不能参与轨道尺寸计算：full/standard 使用 `query: minmax(16, 1fr)` + `sort: 24 cells`，compact 使用 `query: minmax(10, 1fr)` + `sort: 18 cells`；标签和分隔点占固定宽度。编辑时长 query 在自身轨道内水平滚动，未编辑时 cell-width-safe 省略；sort 始终贴右且不移动。
-- 只有 Type/gear 可通过结果表头过滤，Author 和其他列不提供过滤入口。Type filter 是即时、可恢复的单选局部状态：点击 Type 表头打开 `ALL + 当前数据中的非空原生类型` 菜单，选择项高亮并立即过滤，`ALL` 恢复不过滤。菜单关闭不改变当前 view tab、query、sort、cursor 或视口，除非结果中已不存在该 row。
+- SearchBar 是所有可搜索列表的固定一行：`query field + sort select + type select`。Library 的空 query 示例使用 `@tone3000 #clean author:tone3000 tag:clean make:"Fender Reverb"`，完整提示 `@作者`、`#标签`、`author:`、`tag:`、`make:` 和带空格值的引号写法；Preset 的空 query 示例使用 `name:clean note:live file:SVT id:101`，完整提示名称、备注、文件名和 Tone/Model ID 字段。SearchBar 宽度固定为 Pane content region，内容不能参与轨道尺寸计算：full/standard 使用固定 query 轨道 + `sort/type: 24 cells`，compact 使用固定 query 轨道 + `sort/type: 18 cells`；query、sort 和 type 只使用略有区别的背景区分，不使用下划线、外围框或分隔点。编辑时长 query 在自身轨道内水平滚动，未编辑时显示对应页面的完整示例提示；sort 和 type 始终贴右且不移动。
+- Type select 是即时、可恢复的单选局部状态：选项为 `ALL + 当前数据中的非空原生类型`，选择项高亮并立即过滤，`ALL` 恢复不过滤。Type 选项只出现在 SearchBar，不出现在结果表头；切换不改变当前 view tab、query、sort、cursor 或视口，除非结果中已不存在该 row。
 - TOP CREATORS 选中作者后，激活 Library 的 TONE3000 view tab 并提交 `@作者名` query；不得通过左右移动或打开新的 TONE3000 screen 完成跳转。
 
 ## 4. 视觉系统
@@ -238,6 +238,7 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 | 内容标题 | bold + `$primary`，单行 marquee | tone、model、creator、preset |
 | Slot 序号 | `$text-muted`，固定两位 | `01`–`06`，帮助识别 DSP 顺序 |
 | Slot 标签 | uppercase 原生 gear token + bold | `AMP`、`AMP-CAB`、`CAB`、`EXPERIMENTAL`、`FULL-RIG`、`OUTBOARD`、`PEDAL`、`SPACE`、`SLOT`；未来新值同样自动 uppercase |
+| Tone Detail Type | uppercase 原生 gear token + bold 专属色 | `AMP` `$primary`、`AMP-CAB` `$accent`、`CAB` `$success`、`PEDAL` `$success`、`SPACE` `#6aa9e8`、`OUTBOARD` `#5bb6a8`；`SPACE` 属于 IR 文件处理类型，摘要徽标和 `Type` 行使用同一映射，未知值使用 muted |
 | 正文/数据 | normal `$text` | description、文件名、参数 |
 | 状态 | 对应语义 token + 符号或文字 | `BYPASS`、`NONE`、错误 |
 | action token | `$text-muted`；hover 时主题反色 | 可点击快捷动作 |
@@ -263,9 +264,9 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 
 ### 4.5 Pane 标签、统一 SearchBar 与二级表面样式
 
-Pane 标题和 view tab 使用一行 `PANENAME  TAG1  TAG2`：Pane name uppercase + bold，TAG 为可交互文本，各项只用空格分隔，不显示 `·`。Pane name 不可点击，只有 TAG 有命中区。TAG hover 时用 `$surface-hover` 或主题 accent 背景点亮但不改变尺寸；active TAG 使用 bold + 高亮背景，并在 `NO_COLOR` 下使用 reverse + bold。TAG 不使用独立边框、圆角胶囊或嵌套卡片。
+Pane 标题和 view tab 必须直接占用 Pane 外框的左上边框线，统一使用 `PANENAME  ──  TAG1 / ACTIVE TAG / TAG2`；不得在内容区另起标题行。Pane name uppercase + bold，Pane name 与 TAG 之间固定显示 `──`，TAG 为可交互文本，TAG 之间用 `/` 分隔，不显示 `·`。active TAG 只使用 underline，未选中 TAG 使用 dim 变暗，TAG hover 时 underline 或主题 accent 点亮但不改变尺寸。Pane name 不可点击，只有 TAG 有命中区。`[ / ] select tab` 不显示在顶边标题中，统一作为最右侧稳定 action token 放在 Pane 右下角提示带。TAG 不使用独立边框、圆角胶囊或嵌套卡片。
 
-可搜索 Pane 在 view tab strip 下方固定一行 SearchBar，逻辑结构只有 `query field + sort select`，视觉示例为 `SEARCH <query> · SORT <sort>`。query 和 sort 同行显示；普通状态用 `$surface`，query focus 或 sort open 用 `$surface-hover`/`$accent` 背景，不使用输入框边框、外围框或阴影。SearchBar、表格起始位置和底部提示位置固定，搜索打开或关闭不能让下方表格跳动。
+可搜索 Pane 在 view tab strip 下方固定一行 SearchBar，逻辑结构只有 `query field + sort select + type select`（适用时）。Library 示例为 `SEARCH: @tone3000 #clean author:tone3000 tag:clean make:"Fender Reverb"  SORT: Trending  TYPE: AMP`，Preset 示例为 `SEARCH: name:clean note:live file:SVT id:101  SORT: Updated`。query、sort 和 type 同行显示；普通状态使用 `$surface`，query focus、sort open 或 type open 使用略有区别的 `$surface-hover`/`$accent` 背景，不使用下划线、输入框外围框或阴影。SearchBar、表格起始位置和底部提示位置固定，搜索打开或关闭不能让下方表格跳动。
 
 | SearchBar 状态 | 视觉 | 行为 |
 |---|---|---|
@@ -276,8 +277,8 @@ Pane 标题和 view tab 使用一行 `PANENAME  TAG1  TAG2`：Pane name uppercas
 | 无结果 | `$state-idle` + `no matching results`；保留 query | 不制造空行；修改 query 或过滤恢复 |
 | 查询错误 | `$warning` + 具体原因；保留可修正 query | 不覆盖旧结果，修正或 `esc` 后恢复 |
 
-- Type/gear 不放入 SearchBar，只位于搜索结果表头；Author 和其他列不得出现过滤菜单。Type 表头是固定列宽的稳定命中区，点击后打开紧凑单选菜单；选项显示 uppercase 标签，但使用原生 token 精确匹配，未知原生值也必须自动出现。
-- Type 过滤菜单不改变 SearchBar、表格起始行和底部提示带高度；过滤变化只更新 rows 和动态 Type 状态。
+- Type/gear 只放入 SearchBar 的 Type select，不位于搜索结果表头；Author 和其他列不得出现过滤菜单。Type select 是固定轨道的稳定控件；选项显示 uppercase 标签，但使用原生 token 精确匹配，未知原生值也必须自动出现。
+- Type select 不改变 SearchBar、表格起始行和底部提示带高度；过滤变化只更新 rows 和动态 Type 状态，表头点击不触发过滤。
 - SearchBar 输入框、sort 区域、清除 token 和同一搜索表面的建议列表属于同一 inside boundary；点击外部按第 3.4 节收起。
 - 二级表面（Description、Pack Selection、Slot Warning、InputSource 等）沿用父 Pane 的 `$surface`、字号层级和固定行高，通过 view tab TAG 切换同一上下文，不再使用 `←/→` 切换；不使用卡片套卡片或独立背景色。
 - 二级菜单/下拉菜单是触发控件旁的 transient surface：与触发控件对齐，使用 `$surface`、一层 `$primary` 边框和固定行高；当前行用 `$surface-hover` + `$primary` 光标，disabled 行用 `$text-disabled`，菜单展开不得改变父 Pane 尺寸。
@@ -334,26 +335,28 @@ Preset 不占用全局写入快捷键。任何页面需要打开 Preset Load/Sav
 
 ## 6. Library
 
-Library 保持 LOCAL、TONE3000、FAVORITES、TOP CREATORS 等现有来源和筛选。所有列表满足：
+Library 保持 LOCAL、TONE3000、TOP CREATORS 等现有来源和筛选。所有列表满足：
 
-- Library 顶部使用 `LIBRARY  LOCAL  TONE3000  FAVORITES  TOP CREATORS` view tab strip；各项只用空格分隔，active TAG 高亮，点击 TAG 只切换 Library 内容，不 push screen。
+- Library 外框左上边框线使用 `LIBRARY  ──  LOCAL / TONE3000 / TOP CREATORS` view tab strip；当前 active TAG 使用下划线，未选中 TAG 变暗，内容区不得重复占一行。DetailPane tone 详情使用 `TONE DETAIL  ──  DESCRIPTION / PACK`。点击 TAG 只切换内容，不 push screen；`[ / ] select tab` 固定显示在右下角统一提示带。
 - 单击只聚焦并更新 DetailPane；`enter` 或双击执行主要动作。
-- LOCAL tone 打开 Description/Local Pack；远程 tone 打开 Remote Description/Remote Pack。
-- SearchBar 一行包含当前 view tab 的固定轨道 query 和 sort；搜索、sort、Type filter、分页和缓存响应携带 query/page/type-filter 身份，晚到结果不能覆盖当前页面。
+- Library tone 的 `enter` 或双击直接把焦点送入 DetailPane 的 PACK view；不先经过 Description。
+- 进入 PACK 后只尝试首个 Model 一次：已有本地文件则加载到当前 Target Slot；没有本地文件则在左上角通知未下载，不自动安装、不 push 二级页面。
+- Description 仍由单击高亮和 Detail view tab 进入；Library Enter 不改变已有 Target Slot。
+- SearchBar 一行包含当前 view tab 的固定轨道 query、sort 和 type；搜索、sort、Type filter、分页和缓存响应携带 query/page/type-filter 身份，晚到结果不能覆盖当前页面。
 - `r` 刷新当前来源；刷新保留有效详情，失败时显示可恢复状态。
 - `↓ more` 是条件 action token：位于动态状态之后、稳定动作之前；出现/消失不改变稳定动作后缀的右边界，点击它等价于当前列表按 `↓` 加载下一页。
 - TOP CREATORS 聚焦展示 Creator Detail，不把 creator 错连到 tone。
 
-Library 选择 Tone 不自动决定 Slot 类型或创建 Slot。真正加载发生在 Pack 文件行，并写入 Target Slot。
+Library 选择 Tone 不自动决定 Slot 类型或创建 Slot。首个已下载 Model 的自动尝试和 Pack 文件行的明确加载都写入当前 Target Slot；没有 Target Slot 时只提示，不改链。
 
 | 来源 | 列/内容 | `enter` / 双击 | 稳定 action 后缀 |
 |---|---|---|---|
-| LOCAL | Sel、Title、Type、DL、Fav、Arch、Files、Up、Author | 打开 Tone Description/Local Pack | `a all/none · space select · d uninstall · enter open` |
-| TONE3000 | 远程 tone、类型、统计、作者、下载状态 | 打开 Remote Description/Remote Pack | `r refresh · enter detail` |
-| FAVORITES | 与来源一致的 tone 行 | 打开对应本地或远程详情 | 与 LOCAL/TONE3000 来源一致 |
+| LOCAL | Sel、Title、Type、DL、Fav、Arch、Files、Up、Author | 直接打开 Local Pack；首个已下载 Model 自动尝试加载到 Target Slot | `a all/none · space select · d uninstall · enter open` |
+| TONE3000 | 远程 tone、类型、统计、作者、下载状态 | 直接打开 Remote Pack；首个 Model 已下载则加载，否则左上角提示未下载 | `r refresh · enter open` |
 | TOP CREATORS | Rank、Creator、Tones、Downloads、Fav、Models | 激活 TONE3000 view tab 并真实搜索 `@creator` | `r refresh · enter search` |
 
-- Type/gear 筛选位于结果表头的 Type 列，不位于 SearchBar。筛选值从当前缓存或远程结果中的非空原生 `gear` 动态生成；不维护本地闭合集合。未知的新值直接作为菜单项，其标签按 uppercase 规则显示，并按原生 token 精确匹配。
+- Type/gear 筛选位于 SearchBar 的 Type select，不位于结果表头。筛选值从当前缓存或远程结果中的非空原生 `gear` 动态生成；不维护本地闭合集合。未知的新值直接作为选项，其标签按 uppercase 规则显示，并按原生 token 精确匹配。
+- LOCAL 的 Sort 只有 `Title`、`Newest added`、`Oldest added`；Title 按标题升序，added 两项按本地 `imported_at` 的新旧排序，分页保持该顺序。
 
 - LOCAL 搜索支持 `@author`、`#tag`、`author:`、`tag:`、`make:"..."`；Author 显示真实 `@作者名`，未知时显示明确占位。官网确认过的作者使用本地正向缓存并显示 `✓`，所有作者展示入口保持一致。
 - TONE3000 缓存键为 `(view_tab_id, query, sort, type_filter, author)`，FIFO 上限 20；启动预取一次，之后只有新 query、未命中 Type 过滤组合、load more 或 `r` 访问网络。
@@ -392,7 +395,8 @@ ChainPanel 采用截图确定的 fieldset 式层级：最外层是一层 `TONE C
 TONE CHAIN 内不渲染 `▶` 或 `▷`：Active Slot 显示绿色 `● LABEL`；Bypass Slot 标题显示红色 `● LABEL`，第二行显示 `filename  BYPASS`，其中 `BYPASS` 为红色 bold；Empty Slot 显示 `○ SLOT` 和内容 `NONE`。`▶/▷` 仅属于 DetailPane 的 Pack 文件列表，用于区分当前处理文件和 bypass 恢复候选，不能出现在 ChainPanel 标题、内容行或右侧动作列。
 
 - 分组标题使用 bold `$text-muted`，target/focus 时按第 4.3 节增强；状态灯与标题同行且不挤压边框。边框使用主题 surface/border token，只有当前 ChainPanel 外框使用 `$primary`，不能把每个 Slot 都画成高亮卡片。
-- 每个 Slot 分组的内容区固定为两行：第一行显示主要 Tone/Model 信息，第二行显示原生标题或文件名等次要信息；缺失信息保留空白或明确状态，不用占位行改变高度。移动动作固定在右侧竖列，内容截断不得推动该动作列。
+- 每个 Slot 分组的内容区固定为两行：第一行显示主要 Tone/Model 信息，第二行显示原生标题或文件名等次要信息；缺失信息保留空白或明确状态，不用占位行改变高度。Model 切换仍使用右侧箭头列，内容截断不得推动该动作列。
+- 每个 Slot 分组的右下角边框提示提供 `delete · tone · bypass/restore · move ↑ · ↓`；Empty Slot 隐藏不适用的 `bypass`，空间不足时按完整 token 整体压缩或隐藏，不显示半截动作。`tone` 聚焦 LOCAL，让用户为该 Slot 选择 Tone。`move ↑` 和 `↓` 是两个独立可点击动作。
 - 0–6 个 Slot 使用同一分组组件和稳定间距；添加、删除、Loading、Bypass、Empty 或标签长度变化不得改变其他 Slot 的标题位置、内容起始列或动作列。窄屏可隐藏次要信息，但保留序号、状态灯、uppercase 标签和主要动作。焦点仅改变背景、边框或反色，不在内容行前增加 `>`。
 
 ### 7.2 Slot 状态机
@@ -426,9 +430,10 @@ TONE CHAIN 内不渲染 `▶` 或 `▷`：Active Slot 显示绿色 `● LABEL`�
 |---|---|---|---|
 | 聚焦 | `tab/shift+tab` | 单击 Slot 行 | 在 Input、Slot、参数控件间导航；更新 target 和 DetailPane |
 | 添加 | `+` | 点击 `+ add slot` | 末尾追加 Empty Slot 并聚焦 |
-| 删除 | `d` | 点击 `d delete` | 删除当前 Slot 行；不卸载 Library 文件 |
-| 上移 | `⌥↑` | 点击 `⌥↑` token | 与上方 Slot 对调，焦点跟随内容 |
-| 下移 | `⌥↓` | 点击 `⌥↓` token | 与下方 Slot 对调，焦点跟随内容 |
+| 删除 | `d` | 点击 `delete` | 删除当前 Slot 行；不卸载 Library 文件 |
+| 选择 Tone | 无固定快捷键 | 点击 `tone` | 聚焦 LOCAL，让用户选择并加载 Tone |
+| 上移 | `⌥↑` | 点击 `move ↑` token | 与上方 Slot 对调，焦点跟随内容 |
+| 下移 | `⌥↓` | 点击 `↓` token | 与下方 Slot 对调，焦点跟随内容 |
 | 前一 Model | `↑` | 点击行尾 `↑` | 同 pack 前一已下载 Model |
 | 后一 Model | `↓` | 点击行尾 `↓` | 同 pack 后一已下载 Model |
 | bypass/恢复 | `enter` | 双击 | Active ↔ Bypass；Empty 的 `enter`/双击打开来源选择 |
@@ -437,9 +442,11 @@ TONE CHAIN 内不渲染 `▶` 或 `▷`：Active Slot 显示绿色 `● LABEL`�
 - Slot 间键盘导航只用 `tab/shift+tab`，不能让 `↑/↓` 同时移动 Slot 焦点。
 - `⌥↑/⌥↓` 只交换相邻项，不跨 INPUT；首项上移、末项下移均 no-op + 明确提示。
 - 不支持拖拽；拖动手势不得产生重排、加载或删除。
-- `d` 删除 Slot 本身；清空后保留位置的需求通过添加 Empty Slot 表达，不提供隐式 unload。
+- `d` 删除 Slot 本身；清空后保留位置的需求通过添加 Empty Slot 表达，不提供隐式 unload。`delete` 只删除链上的 Slot，不删除本地文件。
 - Active、Bypass 和 Empty 都可删除；删除最后一个 Slot 后进入合法的零 Slot 状态。
 - `+` 达到 6 个后禁用；协议和引擎仍必须独立拒绝第 7 个 Slot。
+- ChainPanel 主边框右下角提供 `save · clear all slots`。`+ add slot` 仍在 ChainPanel 内容区；`save` 打开 SAVE 二级菜单；`SAVE HERE` 覆盖 active Preset，必须显示 `"<name>" already exists. Overwrite it?` 并再次 `enter overwrite`；`SAVE AS NEW` 与 `Preset name:` 输入框同一行，名称冲突使用相同确认页。
+- `clear all slots` 必须二次确认，显示 `Are you sure you want to clear all Slots?`；确认只清空当前链上的 Slot，不删除本地文件或 Preset。
 - `tab/shift+tab` 在 ChainPanel 内按 `INPUT → Slot 01…Slot nn → + add slot → GAIN → MASTER → QUALITY` 顺序循环；反向键按逆序返回。动作 token 可点击，但不额外插入 Tab 顺序。
 
 ### 7.5 Pack 加载与 bypass
@@ -454,17 +461,17 @@ TONE CHAIN 内不渲染 `▶` 或 `▷`：Active Slot 显示绿色 `● LABEL`�
 
 ### 7.6 参数
 
-| 参数 | 减少 | 增加 | 基础步长 | 值域 |
-|---|---|---|---:|---:|
-| gain | `g` | `G` | 0.10 | 0–10 |
-| master | `m` | `M` | 0.05 | 0–10 |
-| quality | `q` | `Q` | 0.05 | 0–1 |
+| 参数 | 减少 | 增加 | 键盘步长 | 鼠标步长 | 值域 |
+|---|---|---|---:|---:|---:|
+| gain | `g` | `G` | 0.10 | 0.50 | 0–10 |
+| master | `m` | `M` | 0.05 | 0.50 | 0–10 |
+| quality | `q` | `Q` | 0.05 | 0.50 | 0–1 |
 
-短按或单击改变一个基础步长。长按 350ms 后每 100ms 重复，不做二段加速；松开、移出、失去捕获或到边界立即停止。单击数值进入最多两位小数的精确编辑，`enter` 应用、`esc` 或失焦取消。点击中间 `·` 恢复协议默认值（gain/master/quality 均为 `1.0`）；需要设置为 `0` 时使用减小键或精确编辑。参数属于 Chain，不随 Slot target 改变。
+键盘按键每次使用表中的键盘步长。鼠标短按或单击在按下时立即改变 `0.50`；继续按住时，前 `200ms` 只保留这一次变化；随后按住时间分段加速：`200–600ms` 每 `120ms`、`600–1200ms` 每 `80ms`、超过 `1200ms` 每 `60ms` 重复一个鼠标步长。重复调度使用单调按下时间，延迟帧不补发成跳跃；松开、移出、失去捕获或到边界立即停止，合成 click 不再追加一步。长按期间数值先在 UI 中立即更新，链写入在后台按最多每 `80ms` 合并提交，松开时强制提交最终值。单击数值进入最多两位小数的精确编辑，`enter` 应用、`esc` 或失焦取消。点击中间 `·` 恢复协议默认值（gain/master/quality 均为 `1.0`）；需要设置为 `0` 时使用减少键或精确编辑。参数属于 Chain，不随 Slot target 改变。
 
 `quality` 是链级 NAM 质量因子：所有支持 quality scaling 的 `.nam` Slot 使用同一个当前值；`.wav` IR 忽略该参数。若某个 NAM 不支持 scaling，使用其默认质量，并在该 Slot 行追加 `quality unsupported` warning，不改变 Active/Bypass/Empty 的基础状态，也不阻塞其他 Slot。
 
-ChainPanel 稳定动作后缀优先级：`+ add · d delete · enter bypass/restore · ⌥↑/⌥↓ move · ↑/↓ model · space play/pause`。窄屏先以完整 token 保留核心动作，再缩写说明词或隐藏低优先级 token；动态前缀使用剩余宽度显示 `n/6 slots`、target、loading 或 error。
+ChainPanel 主边框稳定动作后缀为 `save · clear all slots`。每个 Slot 边框的稳定动作后缀为 `delete · tone · bypass/restore · move ↑ · ↓`；Model 切换仍由右侧 `↑/↓` 箭头列提供。窄屏先以完整 token 保留核心动作，再缩写说明词或隐藏低优先级 token；动态前缀只显示 `n/6 slots`、loading 或 error，不显示 target。
 
 ## 8. DetailPane 完整对应关系
 
@@ -473,10 +480,10 @@ DetailPane 跟随实际焦点对象；Target Slot 仅决定 Pack 加载位置，
 | 来源/状态 | 页面 | 内容 | 主要功能 |
 |---|---|---|---|
 | 无有效选择 | Empty | 空态文字，无残留背景 | 无动作 |
-| LOCAL tone 聚焦 | Tone Description | 标题、tone/model id、description、作者认证 | 阅读/复制；通过 Detail view tab 进入 Local Pack |
+| LOCAL tone 聚焦 | Tone Description | 标题、tone/model id、description、作者认证 | 阅读/复制；Library `enter`/双击直接进入 Local Pack |
 | LOCAL tone Selection | Local Pack | 文件、架构、大小、下载、Target Slot、`▶/▷` | 加载、切换当前文件 bypass、`i/u` |
-| TONE3000 tone 聚焦 | Remote Description | 远程元信息和 description | 阅读/复制；通过 Detail view tab 进入 Remote Pack |
-| TONE3000 Selection | Remote Pack | 远程文件、架构、下载状态、`installed` 标记 | 批量选择、安装、卸载；未安装文件进入 Pack Install，已安装文件可加载 |
+| TONE3000 tone 聚焦 | Remote Description | 远程元信息和 description | 阅读/复制；Library `enter`/双击直接进入 Remote Pack |
+| TONE3000 Selection | Remote Pack | 远程文件、架构、下载状态、`installed` 标记 | 首个已下载 Model 自动尝试；批量选择、安装、卸载；未安装文件进入 Pack Install，已安装文件可加载 |
 | Active Slot 聚焦 | Slot Pack | Slot 序号、派生标签、所属 pack、`▶` 当前文件 | 加载其他文件、重复选择 bypass、`i/u` |
 | Bypass Slot 聚焦 | Slot Pack | Slot 序号、`BYPASS`、原 pack、`▷` 候选 | 重复选择恢复；其他文件加载并恢复 |
 | Empty Slot 聚焦 | Empty Slot | Slot 序号、`NONE`、Target 状态 | 引导从 Library 选 Tone；不残留旧 pack |
@@ -485,7 +492,7 @@ DetailPane 跟随实际焦点对象；Target Slot 仅决定 Pack 加载位置，
 | PRESETS 行聚焦 | Preset Detail | 名称、active/dirty、按序 Slots、参数、note | 预览；`enter` load、`s` save、`e` edit、`r` rename、`d` delete 由 Presets 面板执行 |
 | 解析/应用错误 | Error Detail | 明确字段、Slot 序号和错误原因 | 返回来源修正，不做隐式修复 |
 
-Tone Description 与 Pack Selection 是同一 Detail context 下的 view tabs；点击 TAG 或使用 `[/]` 激活。`tab/shift+tab` 只做焦点遍历，`←/→` 不切换这两个 view。没有可用 Model 时留在 Description 并说明原因。Pack 表不显示独立 TONE id 列；标题超长 marquee，正文可滚动。
+Tone Description 与 Pack Selection 是同一 Detail context 下的 view tabs；点击 TAG 或使用 `[/]` 激活。`tab/shift+tab` 只做焦点遍历，`←/→` 不切换这两个 view。Library `enter`/双击直接进入 Pack；没有可用 Model 时留在 PACK 并说明原因。Pack 表不显示独立 TONE id 列；标题超长 marquee，正文可滚动。
 
 Pack 行中的 `▶` 和 `▷` 只针对 Target Slot。从 Library 打开的 Pack 显示 `target 04`；从 Slot 打开的 Slot Pack 中 viewing 与 target 必须相同，因为聚焦该 Slot 会同时更新 target。
 
@@ -496,10 +503,10 @@ Pack 行中的 `▶` 和 `▷` 只针对 Target Slot。从 Library 打开的 Pac
 | Pane | Active | Bypass | Empty |
 |---|---|---|---|
 | ChainPanel | 单击或 `tab` 聚焦并设为 target；`↑/↓` 切同 pack Model；`enter`/双击切为 Bypass；返回仍在当前行；替换、bypass、重排、添加或删除时写 Chain | 聚焦保留 target；`↑/↓` 选其他 Model 即恢复；`enter`/双击恢复；返回仍在当前行；落盘为 `path:null`，候选只留在进程内 | 聚焦设为 target；不可切 Model，也不能 bypass；`enter`/双击打开来源选择；返回仍在当前行；加载、添加或删除时写 Chain |
-| Library | 选择 tone 只更新 viewing 和 DetailPane，不改 target；`enter` 打开对应 Local/Remote Pack；`esc` 回 Library；不写 Chain | 与 Active 相同；不恢复候选、不改 bypass | 以当前 Empty target 打开对应 tone/Pack；`esc` 回 Library；不自动创建 Slot |
+| Library | 选择 tone 只更新 viewing 和 DetailPane，不改 target；`enter`/双击打开对应 Local/Remote Pack，并只尝试首个已下载 Model；`esc` 回来源；不自动安装或创建 Slot | 与 Active 相同；不恢复候选、不改 bypass | 以当前 Empty target 打开对应 tone/Pack；未下载只提示，不安装、不创建 Slot |
 | Local Pack / Slot Pack | target 明确为该 Slot；其他受支持文件 `enter`/双击替换并保持 Active；重复选择当前 `▶` 文件（`enter` 或双击）切 Bypass；`esc` 回来源；写新 `path` 或候选 | `▷` 文件 `enter`/双击恢复；其他受支持文件加载并清候选；`esc` 回来源；写新 `path` 或 `path:null` + 候选 | target 明确为该 Slot；受支持文件 `enter`/双击加载为 Active；无当前标记；`esc` 回来源；写新 `path`；未知格式直接拒绝且不写 Chain |
-| Remote Pack | target 保留但不改；未安装文件 `enter`/双击进入 Pack Install，已安装且受支持的文件 `enter`/双击加载；`esc` 回来源；安装不写 Chain | 同 Active；已安装候选可直接加载并恢复 | 同 Active；安装不创建 Slot，已安装且受支持的文件可明确加载到现有 target |
-| DetailPane | 显示 Slot Pack：序号、uppercase 派生标签、所属 pack、`▶`；点击 TAG 或 `[/]` 在 Description/Selection 间切换；动作写入 target Slot | 显示 Slot Pack：`BYPASS` 和 `▷`；重复选择候选恢复，选择其他文件替换；返回保留 target | 显示 Empty Slot：`NONE` 和 target；只提供去 Library/Pack 的入口；不残留旧 pack |
+| Remote Pack | target 保留但不改；Library 进入时首个已下载文件自动尝试加载；未安装文件 `enter`/双击进入 Pack Install，已安装且受支持的文件 `enter`/双击加载；`x expand` 打开大 Pack 页面；`esc` 回来源；安装不写 Chain | 同 Active；已安装候选可直接加载并恢复 | 同 Active；安装不创建 Slot，已安装且受支持的文件可明确加载到现有 target |
+| DetailPane | 显示 Slot Pack：序号、uppercase 派生标签、所属 pack、`▶`；点击 TAG 或 `[/]` 在 Description/Selection 间切换；`x expand` 打开大 Pack 页面；动作写入 target Slot | 显示 Slot Pack：`BYPASS` 和 `▷`；重复选择候选恢复，选择其他文件替换；返回保留 target | 显示 Empty Slot：`NONE` 和 target；只提供去 Library/Pack 的入口；不残留旧 pack |
 | Presets / Preset Edit | 预览保留 `path/model_id`；`enter` 加载会整体替换 Slots 并清 target/候选；`e` 在 draft Slot 上编辑；保存写入 preset 快照 | 保存按 `path:null` 降级为 Empty，并在确认中明示；加载不能恢复旧候选；draft 内的 bypass 也是临时状态 | 保存和加载均为 Empty；`e` 可在 draft 中添加或加载文件；整体加载后必须重新聚焦 target；任一 Slot 格式不受支持时拒绝整个 Preset 应用 |
 | 参数区 | `gain/master/quality` 只改 Chain 参数，不改 target、文件或状态；写入后标记 dirty | 参数变化不解除 bypass；只改 Chain 参数并标记 dirty | 参数可独立修改；不创建或删除 Slot；标记 dirty |
 | Input / InterfaceBar | Input、播放、MUTE 与 Slot 独立；`InputSource` 返回原焦点；不改 Slot 或 preset dirty | 同 Active；不会恢复 Slot | 同 Active；零 Slot 仍可切换 Input |
@@ -521,16 +528,16 @@ Pack 行中的 `▶` 和 `▷` 只针对 Target Slot。从 Library 打开的 Pac
 - `ctrl+z`/`ctrl+shift+z` 只撤销/重做 Preset 应用产生的完整 Chain 快照；手动增删、重排、换文件、bypass 和参数编辑不创建历史步骤。
 - Preset 应用历史最多 50 步；应用新 Preset 后清空 redo；快照包含 Slots 和参数，不包含 bypass 候选、Input、MUTE、焦点或 target。
 - undo/redo 不恢复 Library 光标、DetailPane 模式或 Input；应用后 target 已清空，必须重新聚焦 Slot。
-- Preset Detail 按 DSP 顺序显示 `01–06`，包括 Empty；gear 标签按 uppercase 原生 token 显示，只有 gear 缺失或不可解析时显示 `SLOT`，路径不可解析时显示 missing。
+- Preset Detail 按 DSP 顺序显示 `01–06`，包括 Empty；Slot 值显示紧凑 Model ID（例如 `#101`），不显示完整文件名。没有 Model ID 但仍有路径的历史记录显示 `UNKNOWN`，空 Slot 显示 `NONE`。
 - 旧 preset 读取时转换为 Slots；首次保存或覆盖写新格式，不原地批量迁移数据库。
 
 Presets 主面板：
 
 - 面板标题下固定一行 Preset search 槽位，不打开新页面或模态；未激活时可收起为 `search presets…` 或当前 query 摘要，激活时展开输入框；高度和表格布局固定。
-- `/` 或点击 search 槽位打开并聚焦输入框；输入后按名称、note、Slot 派生标签和 Model 文件名做大小写不敏感本地过滤；不访问网络、不改变 active、dirty 或 live Chain。
+- `/` 或点击 search 槽位打开并聚焦输入框；输入后做大小写不敏感本地过滤，不访问网络、不改变 active、dirty 或 live Chain。普通词按 AND 匹配 Preset 名称、Note、文件名和 ID；字段限定使用 `name:...`、`note:...`、`file:...`、`id:...`，其中 `id:` 同时匹配 model ID 与 tone ID。SearchBar 固定为 `SEARCH: name:clean file:SVT  SORT: Updated`，排序还提供 `Name`。
 - 点击 search 槽位以外的区域触发 `outside-click dismiss`，关闭输入框和候选层但保留 query/filter；再次 `/` 或点击槽位继续编辑。`enter` 或 `tab` 从 search 回到过滤后的表格首个可用行；`esc` 清空 query 并关闭 search。无匹配时显示 `no matching presets · esc clear`，不制造空行。
 - 过滤导致当前光标或选择不可见时，按 preset name 清理无效 selection，并把光标放到第一个匹配项；清空 query 后按 name 恢复原选择和视口。
-- 列：Sel、Preset、Slots、Note。Slots 按顺序显示紧凑摘要，例如 `amp > pedal > cab`；Empty 显示 `NONE`，超宽截断但完整顺序在 Preset Detail 中可读。
+- 列：Sel、Preset、Slots、Note。Slots 按顺序显示紧凑 Model ID 摘要，例如 `#101 > #202 > #303`；Empty 显示 `NONE`，没有 ID 的历史路径显示 `UNKNOWN`，不显示完整文件名。
 - `enter` 加载当前行，`s` 保存 active preset，`n` 新建/Save As，`e` 编辑当前 preset，`r` 重命名，`space` 选择，`a` 全选/全不选，`d` 删除，`esc` 清选择。`d` 在存在选中项时删除全部选中项；没有选中项时只删除当前行。
 - `s` 只保存 active preset；当前没有 active preset 时打开 Save As。聚焦非 active 行不会让 `s` 静默覆盖它；要修改该行使用 `e`，要先应用它使用 `enter`。
 - `e` 进入 Preset Edit draft：可修改 Slots、gain/master/quality 和 note；它不是只改备注，也不直接修改 live Chain。
@@ -634,6 +641,8 @@ InputSource 状态机：
 | Uninstall | `u` 或 `enter` 确认；`esc` 取消 | `u uninstall · esc cancel` |
 | Preset Load Confirm | dirty 时 `enter` 加载；`esc` 取消 | `enter load · esc cancel` |
 | Preset Save As | `enter` 保存；`esc` 取消 | `enter save · esc cancel` |
+| Chain Save | `SAVE HERE` 或 `SAVE AS NEW`；名称与 `SAVE AS NEW` 同行；冲突时 `enter overwrite`；`esc` 取消 | `cancel · enter save` / `cancel · enter overwrite` |
+| Clear All Slots | `enter` 确认清空链上 Slot；`esc` 取消 | `cancel · enter clear all` |
 | Preset Edit | `enter` 保存 draft；`ctrl+enter` 保存并加载；`esc` 取消 | `enter save · ctrl+enter save/load · esc cancel` |
 | Preset Rename | `enter` 重命名；`esc` 取消 | `enter rename · esc cancel` |
 | Preset Delete | `enter` 删除；`esc` 取消 | `enter delete · esc cancel` |
@@ -737,7 +746,8 @@ InputSource 状态机：
 所有 Pane、DetailPane、二级表面和模态都使用一个右下角提示带。提示带不是左右两个布局区，而是一个连续序列：动态状态和条件 action 在左，稳定 action 在最右侧。
 
 ```text
-                         3/6 slots · target 02 · loading… · + add · d delete · enter bypass · ⌥↑/⌥↓ move
+                         3/6 slots · loading… · save · clear all slots
+                                      delete · tone · bypass · move ↑ · ↓
                                                     viewing 03 · target 02 · enter load · esc back
 ```
 
@@ -747,15 +757,15 @@ InputSource 状态机：
 - 右侧稳定 action 的每个 `key label` token 都有独立命中区域；点击 token 与按其显示键位完全等价，包含写入、返回、确认和取消结果。键位别名（如 `enter/i`）可以同时接受，但只显示一个稳定 token。
 - 表格行单击只聚焦并更新 DetailPane；表格主动作必须通过 `enter`、双击或提示带 token 执行。选择框点击等价于 `space`，全选 token 点击等价于 `a`。
 - view tab TAG 点击等价于激活对应 `view_tab_id`；TAG 外部点击不改变当前 view tab。SearchBar query 点击等价于 `/`，sort 点击打开 sort 选项；点击 SearchBar 外部按第 3.4 节触发 `outside-click dismiss`，但不触发原 Pane 的加载、保存或删除动作。模态外部点击按阻塞表面规则忽略。
-- 结果表头只有 Type/gear 是过滤命中区；Author 和其他列不可过滤。点击 Type 打开单选菜单，选择立即应用并保持 SearchBar、cursor 和 viewport。
+- SearchBar 的 Type select 是唯一 Type/gear 过滤控件；结果表头和 Author 列不可过滤。选择立即应用并保持 SearchBar、cursor 和 viewport。
 
 | Pane / 模式 | 单提示带（动态前缀 · 稳定动作后缀） | 点击规则与键盘等价 |
 |---|---|---|---|
 | Library / LOCAL | `LOCAL · {count} · type: VALUE · ↓ more · a all/none · space select · d uninstall · enter open · r refresh` | 无 Type filter 时省略 `type: VALUE`；行单击聚焦；双击/`enter` 打开；选择框 = `space`；token 同键；`↓ more` = `↓` |
-| Library / TONE3000、FAVORITES | `TONE3000/FAVORITES · {count} · type: VALUE · loading/error · ↓ more · r refresh · enter detail` | 无 Type filter 时省略 `type: VALUE`；行单击聚焦；双击/`enter` 进入详情；刷新 token = `r`；`↓ more` = `↓` |
-| ChainPanel | `n/6 slots · target nn · loading/error · + add · d delete · enter bypass/restore · ⌥↑/⌥↓ move · ↑/↓ model · space play/pause` | Slot 行单击 = 聚焦；`enter` 与 Slot 双击均为 Active ↔ Bypass；token 同键；播放块点击 = `space` |
+| Library / TONE3000 | `TONE3000 · {count} · type: VALUE · loading/error · ↓ more · r refresh · enter open` | 无 Type filter 时省略 `type: VALUE`；行单击聚焦；双击/`enter` 进入 DetailPane PACK；刷新 token = `r`；`↓ more` = `↓` |
+| ChainPanel | `n/6 slots · loading/error · save · clear all slots` | 主边框 token 同键；Slot 行单击 = 聚焦；Slot 边框显示 `delete · tone · bypass/restore · move ↑ · ↓`，两个 move token 均可点击；`enter` 与双击均为 Active ↔ Bypass；播放块点击 = `space` |
 | DetailPane / Description | `viewing source · target nn · status · esc back` | view tab TAG 切换内容；`esc` token 同键；正文单击只移动焦点，不加载文件 |
-| DetailPane / Pack Selection | `viewing source · target nn · ▶/▷ · installed/not downloaded · enter load · i/u · esc back` | view tab TAG 切换内容；文件行单击只浏览；已下载文件双击/`enter` 加载；未下载文件双击/`enter` 进入安装；当前 `▶` 双击/`enter` bypass；token 同键 |
+| DetailPane / Pack Selection | `viewing source · target nn · ▶/▷ · installed/not downloaded · enter load · i/u · x expand · esc back` | view tab TAG 切换内容；文件行单击只浏览；已下载文件双击/`enter` 加载；未下载文件双击/`enter` 进入安装；`x` 或点击 token 打开大 Pack 页面；当前 `▶` 双击/`enter` bypass；token 同键 |
 | DetailPane / Empty | `slot nn · NONE · target · enter browse · d delete · esc back` | `enter browse` 打开来源；`d`、`esc` token 同键；不支持的文件在进入 Slot 前直接拒绝 |
 | Presets | `{count} presets · active/dirty · enter load · s save · n new · e edit · r rename · d delete · space/a select` | 行单击聚焦；双击/`enter` load；选择框 = `space`；token 同键；SearchBar query 点击 = `/` |
 | Preset Edit | `draft · n/6 slots · dirty · enter save · ctrl+enter save/load · esc cancel` | 所有 token 同键；模态外部点击不关闭；编辑控件失焦按 draft 规则处理 |
@@ -794,15 +804,15 @@ InputSource 状态机：
 - TUI 自己写入 Bypass 后经历一次轮询仍保留候选；不同 fingerprint、无 revision 或外部 revision 的 `path:null` 必须降级为 Empty。
 - Active、Bypass、Empty 三种持久状态分别走 ChainPanel、Library、Local/Slot Pack、Remote Pack、DetailPane、Presets、参数区和 Input 的矩阵路径；每条路径都验证入口焦点、加载目标、`esc` 返回和写入结果。
 - Library view tab 选择、Remote Pack 安装、DetailPane view tab 切换、参数和 Input 操作不得覆盖 target 或误写 Slot；当前 `▶` 的重复选择必须以双击触发 bypass，`▷` 的重复选择必须恢复 Active。
-- Remote Pack 安装成功后，已安装文件行必须可通过 `enter`/双击直接加载到原 Target；安装失败可 retry 且不写 Chain。
+- Library Enter/双击后的首个已下载 Model 必须可直接加载到原 Target；首个未下载只提示且不安装。Remote Pack 安装成功后，已安装文件行必须可通过 `enter`/双击直接加载到原 Target；安装失败可 retry 且不写 Chain。
 - Library、DetailPane 等包含多个同级内容的 Pane 验证 `view_tab_id`、TAG 高亮、点击和 `[/]` 切换、view tab strip 单 focus stop、`tab/shift+tab` 只做焦点顺序，以及 `←/→` 不再切换 view。
-- 每个可搜索列表验证一行 SearchBar 中同时存在 query 和 sort；验证背景焦点态、无边框样式、`/`、`tab`、`enter`、`esc` 和 sort 选择行为。
-- 验证只有 Type/gear 过滤出现在结果表头，Author 和其他列不可过滤；点击 Type 表头打开动态原生类型的单选菜单，uppercase 选中项高亮并按原生 token 即时过滤；菜单不改变 SearchBar、表格起始位置或底部提示高度。
+- 每个可搜索列表验证一行 SearchBar 中同时存在 query、sort 和适用时的 type；验证背景焦点态、无边框样式、`/`、`tab`、`enter`、`esc` 和 sort/type 选择行为。
+- 验证 Type/gear 过滤只出现在 SearchBar，Author 和其他列不可过滤；结果表头点击不打开菜单，SearchBar Type 选项按当前数据动态生成，uppercase 选中项按原生 token 即时过滤且不改变表格起始位置或底部提示高度。
 - 安装、卸载、导入、删除和部分成功分别验证：成功项只发布一次 `MutationCommitted`，所有已注册页面各 reconcile 一次，失败/取消/阻塞不发布事件。
 - mutation coordinator 验证相同 revision 的重复事件合并、无 revision 的不同事件按顺序分别 reconcile，以及同一事件对象重复投递只 reconcile 一次。
 - managed transaction 验证等待当前 session ready、candidate 使用唯一 transaction 和同一 revision、telemetry 身份完整；验证 apply 失败时 rollback 使用新的 transaction acknowledgement，且旧 applied 状态不会被消费。
 - managed transaction 验证原始 chain 文件不存在时先应用临时零 Slot rollback chain，收到 acknowledgement 后删除临时文件；engine 不活跃、无效 revision 和 acknowledgement 超时都显示明确失败。
-- 在 LOCAL、TONE3000、FAVORITES、TOP CREATORS、DetailPane、ChainPanel 和 Presets 中分别验证 `ViewAnchor` 的 screen、App tab、`view_tab_id`、focus、稳定 row key、cursor column、first visible row、行内偏移、scroll、selection、confirmation 和 Detail 恢复；删除当前行覆盖“下一行优先、否则上一行”。
+- 在 LOCAL、TONE3000、TOP CREATORS、DetailPane、ChainPanel 和 Presets 中分别验证 `ViewAnchor` 的 screen、App tab、`view_tab_id`、focus、稳定 row key、cursor column、first visible row、行内偏移、scroll、selection、confirmation 和 Detail 恢复；删除当前行覆盖“下一行优先、否则上一行”。
 - 验证成功 mutation 不自动切 tab、push screen、打开 Picker、抢隐藏页面焦点或清空 Detail；关闭操作页面时来源页面的 anchor 仍恢复。
 
 ### 14.3 Preset 与端到端
@@ -852,7 +862,7 @@ InputSource 状态机：
 | 仅红绿灰固定 | 当前 warning 也固定、无 idle token | theme 注册、metadata、状态测试 |
 | 成功 mutation 后所有页面刷新且保持视角 | 安装、卸载、导入和删除仍由多个入口手动刷新，可能清表、重置 cursor/viewport 或自动导航 | MutationCommitted、refresh coordinator、ViewAnchor、各页面 reconcile、焦点/视口测试 |
 | 多内容 Pane 统一使用 view tab | Library、DetailPane 等页面仍通过左右键或独立页面切换同级内容 | view tab strip、TAG hover/click/active、单 focus stop、`[/]`、tab-local state、导航测试 |
-| SearchBar 与 Type 表头过滤统一 | query、sort、Type 过滤分散在不同控件或使用边框框选 | 固定轨道的单行 query+sort、背景焦点态、Type-only 表头菜单、Author 无过滤、窄屏布局测试 |
+| SearchBar 与 Type 过滤统一 | query、sort、Type 过滤分散在不同控件或使用边框框选 | 固定轨道的单行 query+sort+type、背景焦点态、SearchBar Type select、Author 无过滤、窄屏布局测试 |
 | ChainPanel fieldset 与动态 uppercase Slot 标签 | 当前布局或旧文档可能固定 AMP/CAB 名称，且 Slot 内容/动作列会随文本变化 | TONE CHAIN 外框、Input/Slot 分组组件、原生 gear 展示映射、固定两行与动作列、0–6 Slot/新增类型视觉测试 |
 
 迁移必须保持旧格式只读兼容，但不得在新写入中长期维持两套 Chain 表示。测试若固化 v0.1 固定 AMP/CAB 行为，应随实现更新，不能用旧测试否决 v0.2 目标。

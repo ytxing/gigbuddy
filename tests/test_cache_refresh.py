@@ -64,9 +64,9 @@ def test_startup_prefetches_default_views(monkeypatch, tmp_path):
             await pilot.pause(0.6)  # prefetch workers finish (mocks are fast)
             assert counts == {"tone": 1, "creators": 1}
             # Both views are cached: entering either tab issues no request.
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
-            await pilot.click(app.query_one("#--content-tab-pane-creators"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-creators")
             await pilot.pause(0.4)
             assert counts == {"tone": 1, "creators": 1}
             table = app.query_one("#lib-table-tone", DataTable)
@@ -87,14 +87,14 @@ def test_cache_hit_skips_network_across_tabs_and_sorts(monkeypatch, tmp_path):
             await pilot.pause(0.6)  # startup prefetch (1 tone + 1 creators)
             assert counts["tone"] == 1
             # First visit: cached page set shows, no new request.
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert counts["tone"] == 1
             assert app.query_one("#lib-table-tone", DataTable).row_count == 40
             # Leave and come back: still cached.
-            await pilot.click(app.query_one("#--content-tab-pane-local"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-local")
             await pilot.pause(0.3)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert counts["tone"] == 1
             # New SORT combination: one fetch.
@@ -119,13 +119,13 @@ def test_type_filter_switch_hits_cache(monkeypatch, tmp_path):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.6)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert counts["tone"] == 1
-            app.query_one("#type-filter-tone", Select).value = "amp"
+            app.query_one("#type-filter-tone-search", Select).value = "amp"
             await pilot.pause(0.5)
             assert counts["tone"] == 2
-            app.query_one("#type-filter-tone", Select).value = "all"
+            app.query_one("#type-filter-tone-search", Select).value = "all"
             await pilot.pause(0.4)
             assert counts["tone"] == 2
     run(scenario())
@@ -147,7 +147,7 @@ def test_manual_refresh_reloads_current_view(monkeypatch, tmp_path):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.6)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert counts["tone"] == 1
             await pilot.press("r")  # LibraryTable binding → refresh active view
@@ -158,9 +158,9 @@ def test_manual_refresh_reloads_current_view(monkeypatch, tmp_path):
             assert "remote:6001" in keys, "refresh must show the new page set"
             # The refreshed set is now cached: leaving and returning fetches
             # nothing.
-            await pilot.click(app.query_one("#--content-tab-pane-local"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-local")
             await pilot.pause(0.3)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert counts["tone"] == 2
     run(scenario())
@@ -176,7 +176,7 @@ def test_new_query_gets_own_cache_slot(monkeypatch, tmp_path):
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.6)
-            await pilot.click(app.query_one("#--content-tab-pane-tone"))
+            app.query_one("LibraryPanel").activate_view_tab("pane-tone")
             await pilot.pause(0.4)
             assert counts["tone"] == 1
             search = app.query_one("#tone-search", Input)

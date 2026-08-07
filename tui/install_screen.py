@@ -18,7 +18,8 @@ from textual.message import Message
 from textual.widgets import DataTable, ProgressBar, Static
 
 from .marquee import MarqueeBar
-from .metadata import SelectableStatic, metadata_table, theme_colors
+from .metadata import (SelectableStatic, metadata_table, model_architecture,
+                       normalize_model_architecture, theme_colors)
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      set_border_hint_hover, set_border_hint_layout)
@@ -157,7 +158,7 @@ class PackInstallScreen(GigBuddyModal):
         self.query_one("#pack-progress", ProgressBar).display = False
         t = self._tone
         self.run_worker(
-            partial(self._load_models, t["id"], t.get("gear") == "cab",
+            partial(self._load_models, t["id"], library.model_is_ir({}, t),
                     self._load_generation), name="pack-load")
         self._update_hint("loading…")
 
@@ -205,8 +206,10 @@ class PackInstallScreen(GigBuddyModal):
             self._load_generation += 1
             generation = self._load_generation
         try:
-            ms = await asyncio.to_thread(
-                tone3000.models, tone_id, a2_only=not is_ir)
+            # INSTALL PACK is a complete model set.  Filtering to A2 here
+            # silently drops A1 files before the table can render them.
+            ms = await asyncio.to_thread(tone3000.models, tone_id,
+                                         a2_only=False)
         except Exception as e:
             if self._ui_alive(generation):
                 self._load_state = "error"
@@ -216,16 +219,24 @@ class PackInstallScreen(GigBuddyModal):
             return
         if not self._ui_alive(generation):
             return
-        self._models = ms
+        self._models = []
+        for model in ms:
+            normalized = normalize_model_architecture(model, tone=self._tone)
+            arch = model_architecture(normalized, tone=self._tone)
+            # A1 (WaveNet) 是废弃架构：不展示、不可勾选，因此也不会被下载。
+            if arch == "A1":
+                continue
+            if arch:
+                self._models.append(normalized)
         # REQ-038：默认勾选未下载的模型——已下载的不重复安装，u 可卸载。
         self._downloaded = library.downloaded_model_ids_by_tone().get(
             int(tone_id), set())
-        self._selected = {m["id"] for m in ms
+        self._selected = {m["id"] for m in self._models
                           if m["id"] not in self._downloaded}
         table = self.query_one("#pack-table", DataTable)
         table.clear()
-        for m in sorted(ms, key=lambda x: x["id"]):
-            arch = m.get("architecture") or "IR"
+        for m in sorted(self._models, key=lambda x: x["id"]):
+            arch = model_architecture(m, tone=self._tone)
             checked = "\\[x]" if m["id"] in self._selected else "\\[ ]"
             table.add_row(checked, self._mark_name(m), arch, key=str(m["id"]))
         self._load_state = "ready"
@@ -241,7 +252,7 @@ class PackInstallScreen(GigBuddyModal):
         t = self._tone
         self._set_status("loading pack contents…", hint="loading…")
         self.run_worker(
-            partial(self._load_models, t["id"], t.get("gear") == "cab",
+            partial(self._load_models, t["id"], library.model_is_ir({}, t),
                     self._load_generation), name="pack-load", exclusive=True)
 
     @staticmethod

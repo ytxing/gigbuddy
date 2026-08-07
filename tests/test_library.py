@@ -80,6 +80,7 @@ def test_tone3000_search_forwards_make_filters(monkeypatch):
     assert captured["usernames"] == ["coretonecaptures"]
     assert captured["tag_names"] == ["clean"]
     assert captured["make_names"] == ["Two Rock Traditional Clean"]
+    assert captured["architecture_filter"] is None
 
 
 def test_tone3000_model_id_lookup_returns_its_parent_tone(monkeypatch):
@@ -190,6 +191,9 @@ def test_existing_schema_gets_semantic_name_column():
     with library.connect() as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(models)")}
         assert "name" in columns
+        assert "architecture_version" in columns
+        tone_columns = {row[1] for row in conn.execute("PRAGMA table_info(tones)")}
+        assert "format" in tone_columns
         conn.execute("INSERT INTO tones (id) VALUES (1)")
         library.upsert_model(conn, {
             "id": 1, "tone_id": 1, "model_url": "u",
@@ -232,7 +236,14 @@ def test_list_filters():
     with library.connect() as conn:
         library.upsert_tone(conn, SAMPLE)
         library.upsert_tone(conn, cab)
+        conn.execute("UPDATE tones SET imported_at = CASE id "
+                     "WHEN 19 THEN '2026-01-01T00:00:00+00:00' "
+                     "WHEN 2 THEN '2026-02-01T00:00:00+00:00' END")
+        conn.commit()
     assert [t["id"] for t in library.list_tones()] == [2, 19]  # dl desc: both equal, id order
+    assert [t["id"] for t in library.list_tones(sort_by="title")] == [2, 19]
+    assert [t["id"] for t in library.list_tones(sort_by="added-desc")] == [2, 19]
+    assert [t["id"] for t in library.list_tones(sort_by="added-asc")] == [19, 2]
     assert [t["id"] for t in library.list_tones(gear="cab")] == [2]
     assert [t["id"] for t in library.list_tones(query="super")] == [19]
     assert [t["id"] for t in library.list_tones(gear="amp")] == []
@@ -289,6 +300,59 @@ def test_models_and_local_listing():
         library.upsert_model(conn, {"id": 51, "tone_id": 19, "model_url": "u1",
                                     "architecture": "SlimmableContainer", "local_path": None})
         assert conn.execute("SELECT COUNT(*) FROM models").fetchone()[0] == 2
+
+
+def test_local_listing_infers_architectureless_ir_and_keeps_a1_amp():
+    """Picker/list tables must not lose old IR rows with a null architecture."""
+    cab = {**SAMPLE, "id": 20, "gear": "cab", "platform": "ir",
+           "title": "Blue Cabinet"}
+    amp = {**SAMPLE, "id": 21, "gear": "amp", "platform": "nam",
+           "title": "Legacy Amp"}
+    with library.connect() as conn:
+        library.upsert_tone(conn, cab)
+        library.upsert_tone(conn, amp)
+        library.upsert_model(conn, {
+            "id": 601, "tone_id": 20, "model_url": "https://cdn/blue-1.wav",
+            "name": "Blue 1", "architecture": None,
+            "local_path": "data/tones/20-blue/Blue 1.wav",
+        })
+        library.upsert_model(conn, {
+            "id": 602, "tone_id": 21, "model_url": "https://cdn/legacy.nam",
+            "name": "Legacy", "architecture": "WaveNet",
+            "local_path": "data/tones/21-legacy/Legacy.nam",
+        })
+
+    assert [m["id"] for m in library.list_local_models("ir")] == [601]
+    # A1 (WaveNet) 是废弃架构：amp picker 不列出、默认选中不落到旧模型。
+    assert [m["id"] for m in library.list_local_models("amp")] == []
+    assert library._first_local_model(20, ir=True) == 601
+    assert library._first_local_model(21, ir=False) is None
+
+
+def test_space_tone_is_classified_as_ir():
+    assert library.model_is_ir(
+        {"architecture": None, "name": "space capture.wav"},
+        {"gear": "space"},
+    )
+
+
+def test_canonical_format_overrides_space_gear_fallback():
+    """The documented format field wins over the legacy SPACE IR heuristic."""
+    assert not library.model_is_ir(
+        {"architecture_version": None, "name": "space capture.nam"},
+        {"gear": "space", "format": "nam"},
+    )
+    assert library.model_is_ir(
+        {"architecture_version": None, "name": "space capture.nam"},
+        {"gear": "space", "format": "ir"},
+    )
+
+
+def test_architecture_version_is_canonical_for_model_classification():
+    assert not library.model_is_ir(
+        {"architecture_version": "1", "name": "capture.wav"},
+        {},
+    )
 
 
 def test_local_uninstall_blocks_active_chain_and_preserves_metadata(tmp_path):
@@ -683,7 +747,9 @@ def test_preset_seed_uses_library_models(tmp_path, monkeypatch):
         {"model_id": 1001, "path": "data/tones/SR AKG 414.nam"},
         {"model_id": 1002, "path": "data/tones/DR Oxford Big.wav"},
     ]
-    assert p["chain"]["gain"] == 0.8
+    assert p["chain"]["gain"] == 1.0
+    assert p["chain"]["master"] == 1.0
+    assert p["chain"]["quality"] == 1.0
 
 
 def test_preset_seed_skips_missing_tones(tmp_path, monkeypatch, capsys):
@@ -693,6 +759,18 @@ def test_preset_seed_skips_missing_tones(tmp_path, monkeypatch, capsys):
     assert library.preset_seed() == 0
     assert "skipped" in capsys.readouterr().out
     assert library.preset_get("ghost") is None
+
+
+def test_preset_seed_skips_stale_database_paths(tmp_path, monkeypatch, capsys):
+    amp, _ir = _put_models(tmp_path)
+    (library.TONES_DIR / "SR AKG 414.nam").unlink()
+    monkeypatch.setattr(
+        library, "SEED_CHAINS",
+        [("stale", "note", amp["id"], None)])
+
+    assert library.preset_seed() == 0
+    assert library.preset_get("stale") is None
+    assert "not available locally" in capsys.readouterr().out
 
 
 def test_preset_seed_replace_deletes_existing_presets(tmp_path, monkeypatch):
@@ -742,13 +820,13 @@ def test_mark_download_state(monkeypatch, tmp_path):
         conn.commit()
     (tmp_path / "IR1.wav").write_bytes(b"x")
     hits = [
-        {"id": 19, "gear": "amp", "models_count": 6},   # local + remote A2 ids
+        {"id": 19, "gear": "amp", "models_count": 6},   # local A2, remote A1+A2
         {"id": 999, "gear": "amp", "models_count": 3},  # nothing local
         {"id": 123, "gear": "cab", "models_count": 2},  # local, partial IR
     ]
     remote_models = {
-        19: [{"id": 1001, "architecture": "SlimmableContainer"},   # all A2 local
-             {"id": 9000, "architecture": "WaveNet"}],             # A1, not compared
+        19: [{"id": 1001, "architecture": "SlimmableContainer"},
+             {"id": 9000, "architecture": "WaveNet"}],             # A1 is part of the set
         123: [{"id": 9002, "architecture": "IR"},                  # have it
               {"id": 9001, "architecture": "IR"}],                 # missing
     }
@@ -758,7 +836,7 @@ def test_mark_download_state(monkeypatch, tmp_path):
 
     out = library.mark_download_state(hits)
     by_id = {t["id"]: t for t in out}
-    assert by_id[19]["download_state"] == "all"   # A2 all downloaded (A1 ignored)
+    assert by_id[19]["download_state"] == "partial"  # A1 still missing
     assert by_id[19]["downloaded"] == 2
     assert by_id[999]["download_state"] == "none"  # no local models, no API call
     assert by_id[123]["download_state"] == "partial"  # 1 of 2 IRs
@@ -770,8 +848,11 @@ def test_top_favorites_attaches_usernames(monkeypatch):
     表格不再显示 @?。"""
     import tone3000
 
+    selects = []
+
     def fake_get(url, **params):
         if "tones_counts" in url:
+            selects.append(params.get("select", ""))
             return [{"id": 1, "title": "T1", "user_id": "u1"},
                     {"id": 2, "title": "T2", "user_id": "u2"}]
         if "users" in url:
@@ -784,6 +865,8 @@ def test_top_favorites_attaches_usernames(monkeypatch):
     rows = tone3000.top_favorites(2)
     assert [r["username"] for r in rows] == ["alice", "bob"]
     assert rows[0]["avatar_url"] == "a"
+    assert "a1_models_count" in selects[0]
+    assert "custom_models_count" in selects[0]
 
 
 def test_backfill_tone_usernames(monkeypatch, tmp_path):

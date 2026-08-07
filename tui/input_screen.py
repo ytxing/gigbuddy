@@ -29,10 +29,7 @@ from .modals import (ClickSelectTree, GigBuddyModal, ModalBox,
                      set_border_hint_hover, set_border_hint_layout)  # noqa: E402
 
 # 常用干声素材（吉他，TONE3000 网页试听源）——d 键下载这些，其余按需补下
-DEFAULT_DRY_KEYS = [
-    "mayer", "brit", "cream", "john", "pop-punk", "metalcore",
-    "smooth", "fast-thrash", "hotrod", "slide-lead",
-]
+DEFAULT_DRY_KEYS = list(tone3000.DRY_INPUT_STARTER_KEYS)
 
 
 def _rel(path: str) -> str:
@@ -136,7 +133,8 @@ class InputSourceScreen(GigBuddyModal):
             tree.root.add_leaf(
                 "(no dry inputs)", {"type": "status"})
             tree.root.add_leaf(
-                "↓ download all (33)", {"type": "download", "keys": None})
+                f"↓ download all ({len(tone3000.DRY_INPUTS)})",
+                {"type": "download", "keys": None})
         if tree.root.children:
             tree.move_cursor(tree.root.children[0])
 

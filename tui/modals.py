@@ -57,16 +57,18 @@ def hint_span(label: str, token: str) -> tuple[int, int] | None:
     """Return a token's visual-cell span in a border subtitle."""
     # Match complete separator-delimited segments first.  A raw substring
     # search would resolve the ``d`` action to the ``d`` in ``add``.
-    key = _compact_hint_action(token).casefold()
-    if not key:
+    raw = token.strip().replace(r"\[", "[").casefold()
+    compact = _compact_hint_action(token).casefold()
+    if not raw and not compact:
         return None
     offset = 0
     for segment in label.split("·"):
         stripped = segment.strip()
         leading = len(segment) - len(segment.lstrip())
         visible = stripped.casefold()
-        wanted = token.strip().casefold()
-        if visible == wanted or visible == key or visible.startswith(key + " "):
+        if (visible in {raw, compact}
+                or visible.startswith(raw + " ")
+                or visible.startswith(compact + " ")):
             segment_start = offset + leading
             segment_end = offset + len(segment.rstrip())
             return cell_len(label[:segment_start]), cell_len(label[:segment_end])
@@ -151,7 +153,16 @@ def refresh_border_hint_layout(widget) -> str:
 
 def _compact_hint_action(action: str) -> str:
     """Return the key portion used when a complete action label will not fit."""
-    return action.strip().split(None, 1)[0] if action.strip() else ""
+    stripped = action.strip()
+    if stripped.startswith(r"\[") and "]" in stripped:
+        compact = stripped.split("]", 1)[0] + "]"
+    else:
+        parts = stripped.split()
+        if len(parts) == 2 and parts[1] in {"↑", "↓"}:
+            compact = parts[1]
+        else:
+            compact = parts[0] if parts else ""
+    return compact.replace(r"\[", "[")
 
 
 def _fit_hint_actions(actions: tuple[str, ...], width: int) -> tuple[str, ...]:
@@ -236,11 +247,11 @@ def set_border_hint_hover(widget, token: str | None) -> None:
     widget._hint_hover_base = label
     widget._hint_hover_token = token
     if token is None:
-        widget.border_subtitle = label
+        widget.border_subtitle = Text(label)
         return
     span = hint_span(label, token)
     if span is None:
-        widget.border_subtitle = label
+        widget.border_subtitle = Text(label)
         widget._hint_hover_token = None
         return
     variables = getattr(getattr(widget, "app", None), "theme_variables", {}) or {}
