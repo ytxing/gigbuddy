@@ -169,16 +169,6 @@ def normalize_model_architecture(model: dict, *, tone: dict | None = None) -> di
     return normalized
 
 
-def is_visible_architecture(architecture=None, *, model: dict | None = None,
-                            tone: dict | None = None) -> bool:
-    """Whether a model belongs in any user-facing model list."""
-    if model is None and isinstance(architecture, dict):
-        model = architecture
-    if model is not None:
-        return bool(model_architecture(model, tone=tone))
-    return bool(architecture_label(architecture))
-
-
 class _SelectableTableVisual(Visual):
     """Render a Rich table through Textual Content so selections are styled.
 
@@ -354,42 +344,6 @@ def tone3000_url(tone: dict | None) -> str | None:
     title = str(tone.get("title") or "tone")
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "tone"
     return f"https://www.tone3000.com/tones/{slug}-{tone_id}"
-
-
-def metadata_copy_text(tone: dict | None = None, model: dict | None = None,
-                       *, note: str | None = None) -> str:
-    """Build a stable, plain-text snapshot for the global Copy action."""
-    tone = tone or {}
-    lines: list[str] = []
-    if tone:
-        lines.append(f"Tone: {_value(tone.get('title'))}")
-        lines.append(f"Tone ID: {_value(tone.get('tone_id', tone.get('id')))}")
-        if tone3000_url(tone):
-            lines.append(f"TONE3000: {tone3000_url(tone)}")
-        lines.append(f"Author: @{_value(tone.get('username'), '?').lstrip('@')}")
-        lines.append(f"Type: {_gear_value(tone.get('gear'))}")
-        if tone_format(tone):
-            lines.append(f"Format: {tone_format(tone)}")
-        if tone.get("tags"):
-            lines.append(f"Tags: {_value(tone.get('tags'))}")
-        if tone.get("description"):
-            lines.append(f"Description: {_value(tone.get('description'))}")
-    if model:
-        local_path = model.get("local_path")
-        lines.extend([
-            f"Model ID: {_value(model.get('id'))}",
-            f"Model filename: {_value(Path(local_path).name if local_path else model.get('name'))}",
-        ])
-        architecture = model_architecture(model, tone=tone)
-        if architecture:
-            lines.append(f"Architecture: {architecture}")
-        if model.get("model_url"):
-            lines.append(f"Model source: {model['model_url']}")
-        if local_path:
-            lines.append(f"Local path: {local_path}")
-    if note:
-        lines.append(f"Status: {note}")
-    return "\n".join(lines)
 
 
 def metadata_table(tone: dict | None = None, model: dict | None = None,

@@ -302,49 +302,6 @@ def test_creators_sort_select_reorders(monkeypatch):
     run(scenario())
 
 
-def test_creator_bio_normalized_for_banner(monkeypatch):
-    """REQ-026: 作者简介进 banner（summary marquee）前换行/多空格压成
-    一行；详情页多行区保留原始换行。"""
-    import tui.panels as panels_mod
-    assert panels_mod._single_line(
-        "Line one\n\n  spaced\tout  text ") == "Line one spaced out text"
-    messy_bio = "Tone maker.\n\nLoves\n   plexi amps\tand IRs.  "
-    alice = {"id": 201, "title": "Alice One", "gear": "amp",
-             "downloads_count": 30, "username": "alice",
-             "a1_models_count": 1, "a2_models_count": 0, "irs_count": 0,
-             "description": "alice one"}
-
-    def fake_search(query, page_size, **kwargs):
-        return [dict(alice)]
-
-    def fake_user(name):
-        return {"username": name, "bio": messy_bio,
-                "display_name": "Alice", "created_at": "2023-01-02T00:00:00Z"}
-
-    monkeypatch.setattr("tui.library_panel.library.tone3000.search", fake_search)
-    monkeypatch.setattr("tui.library_panel.library.tone3000.top_creators",
-                        lambda **_kwargs: [_creator("alice", 5, 30, 0, 1)])
-    monkeypatch.setattr("tui.panels.tone3000.user", fake_user)
-    monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.5)
-            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
-            await pilot.pause(1.0)
-            pane = app.query_one(DetailPane)
-            # REQ-030 聚焦视图：无第二行摘要（bio 在正文多行保留换行）
-            assert str(pane._summary.content) == ""
-            body = _detail_text(app)
-            assert "Tone maker." in body and "Loves" in body
-            assert "\n" in _detail_text(app).strip() or "  " in body
-            # REQ-033：Enter 跳 @作者 搜索（不再是作者页）——聚焦视图
-            # 的 bio 单行化由 _single_line 单元断言覆盖
-
-    run(scenario())
-
-
 def test_creator_values_do_not_change_after_render(monkeypatch):
     """Official leaderboard values render once without background refinement."""
     calls = []

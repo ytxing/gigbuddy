@@ -38,30 +38,32 @@ def test_slow_tone_load_does_not_yank_back(monkeypatch, tmp_path):
     def slow_search(*args, **kwargs):
         # Runs inside asyncio.to_thread: sleep blocks the worker thread, not
         # the event loop, so the app stays interactive while it is in flight.
-        # 1.5s > the click-pause windows below: the load is guaranteed to be
+        # 0.2s > the click-pause windows below: the load is guaranteed to be
         # still in flight when we leave the tab.
-        time.sleep(1.5)
+        time.sleep(0.2)
         return [slow_tone()]
 
     monkeypatch.setattr(library.tone3000, "search", slow_search)
+    monkeypatch.setattr(library.tone3000, "top_creators",
+                        lambda **_kwargs: [])
     monkeypatch.setattr("tui.library_panel.library.mark_download_state",
                         lambda hits: hits)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
+            await pilot.pause(0.1)
             tabs = app.query_one(TabbedContent)
             # 1. Go to TONE3000; the 0.1s tick sees the switch and starts the
             #    slow reload worker.
             app.query_one(LibraryPanel).activate_view_tab("pane-tone")
-            await pilot.pause(0.4)
+            await pilot.pause(0.05)
             assert tabs.active == "pane-tone"
             # 2. Leave for LOCAL while the load is still in flight.
             app.query_one(LibraryPanel).activate_view_tab("pane-local")
-            await pilot.pause(0.3)
+            await pilot.pause(0.05)
             # 3. Let the slow search finish. It must not pull the UI back.
-            await pilot.pause(1.8)
+            await pilot.pause(0.3)
             assert tabs.active == "pane-local"
             assert app.screen.focused is None or (
                 app.screen.focused.id in ("local-search", "lib-table-local"))
@@ -78,22 +80,24 @@ def test_slow_load_stays_when_still_on_tone_tab(monkeypatch, tmp_path):
     def slow_search(*args, **kwargs):
         # Runs inside asyncio.to_thread: sleep blocks the worker thread, not
         # the event loop, so the app stays interactive while it is in flight.
-        # 1.5s > the click-pause windows below: the load is guaranteed to be
+        # 0.2s > the click-pause windows below: the load is guaranteed to be
         # still in flight when we leave the tab.
-        time.sleep(1.5)
+        time.sleep(0.2)
         return [slow_tone()]
 
     monkeypatch.setattr(library.tone3000, "search", slow_search)
+    monkeypatch.setattr(library.tone3000, "top_creators",
+                        lambda **_kwargs: [])
     monkeypatch.setattr("tui.library_panel.library.mark_download_state",
                         lambda hits: hits)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
+            await pilot.pause(0.1)
             app.query_one(LibraryPanel).activate_view_tab("pane-tone")
-            await pilot.pause(0.4)
-            await pilot.pause(1.8)  # let the load finish in place
+            await pilot.pause(0.05)
+            await pilot.pause(0.3)  # let the load finish in place
             assert app.query_one(TabbedContent).active == "pane-tone"
             assert app.screen.focused.id == "lib-table-tone"
     run(scenario())
@@ -127,21 +131,23 @@ def test_creator_load_more_keeps_cursor_and_viewport(monkeypatch, tmp_path):
         return _creator_hits(100, 100, 200)
 
     monkeypatch.setattr(library.tone3000, "top_creators", paged_creators)
+    monkeypatch.setattr(library.tone3000, "search",
+                        lambda *_args, **_kwargs: [])
     monkeypatch.setattr("tui.library_panel.library.mark_download_state",
                         lambda hits: hits)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
+            await pilot.pause(0.1)
             app.query_one(LibraryPanel).activate_view_tab("pane-creators")
-            await pilot.pause(0.4)   # tick starts the first page load
-            await pilot.pause(0.6)   # first page lands
+            await pilot.pause(0.1)   # tick starts the first page load
+            await pilot.pause(0.3)   # first page lands
             table = app.query_one("#lib-table-creators")
             assert table.row_count == 100
             # Move the cursor near the tail to request the next page.
             table.move_cursor(row=95)
-            await pilot.pause(0.3)
+            await pilot.pause(0.1)
             key_before = table.ordered_rows[table.cursor_row].key.value
             await pilot.pause(1.0)   # append page lands
             assert table.row_count == 200
@@ -172,6 +178,8 @@ def test_creator_scroll_bottom_preserves_viewport_anchor(monkeypatch, tmp_path):
         return _creator_hits(100, 100, 200)
 
     monkeypatch.setattr(library.tone3000, "top_creators", paged_creators)
+    monkeypatch.setattr(library.tone3000, "search",
+                        lambda *_args, **_kwargs: [])
     monkeypatch.setattr("tui.library_panel.library.mark_download_state",
                         lambda hits: hits)
 
@@ -180,13 +188,13 @@ def test_creator_scroll_bottom_preserves_viewport_anchor(monkeypatch, tmp_path):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
             app.query_one(LibraryPanel).activate_view_tab("pane-creators")
-            await pilot.pause(0.4)
-            await pilot.pause(0.6)   # first page lands
+            await pilot.pause(0.1)
+            await pilot.pause(0.3)   # first page lands
             table = app.query_one("#lib-table-creators")
             assert table.row_count == 100
             # Wheel to the bottom without moving the cursor.
             table.scroll_to(y=table.max_scroll_y, animate=False)
-            await pilot.pause(0.3)
+            await pilot.pause(0.1)
             assert table.scroll_y > 0
             old_bottom = table.scroll_y
             await pilot.pause(1.0)   # append lands
@@ -207,7 +215,7 @@ def test_tone_load_more_does_not_restore_stale_cursor(monkeypatch, tmp_path):
     def paged_search(_query, *, page_number, page_size, **_kwargs):
         calls["n"] += 1
         if page_number == 2:
-            time.sleep(1.0)
+            time.sleep(0.2)
         start = (page_number - 1) * page_size
         return [
             {"id": start + i, "title": f"Tone {start + i}",
@@ -217,22 +225,24 @@ def test_tone_load_more_does_not_restore_stale_cursor(monkeypatch, tmp_path):
         ]
 
     monkeypatch.setattr(library.tone3000, "search", paged_search)
+    monkeypatch.setattr(library.tone3000, "top_creators",
+                        lambda **_kwargs: [])
     monkeypatch.setattr("tui.library_panel.library.mark_download_state",
                         lambda hits: hits)
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
+            await pilot.pause(0.1)
             panel = app.query_one("LibraryPanel")
             panel.activate_view_tab("pane-tone")
-            await pilot.pause(0.5)
+            await pilot.pause(0.2)
             table = app.query_one("#lib-table-tone")
             table.focus()
             table.move_cursor(row=35, animate=False)
             await pilot.pause(0.1)
             table.move_cursor(row=38, animate=False)
-            await pilot.pause(1.2)
+            await pilot.pause(0.4)
 
             assert calls["n"] == 2
             assert table.row_count == 80

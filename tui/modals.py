@@ -19,7 +19,7 @@ from textual.containers import Vertical
 from textual.coordinate import Coordinate
 from textual.events import Leave, MouseEvent, MouseMove
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Static, Tree
+from textual.widgets import DataTable, Tree
 
 from .marquee import ellipsis_window, resolve_rich_style
 from .selection import ShiftSelectableScreenMixin
@@ -188,16 +188,6 @@ def _fit_hint_actions(actions: tuple[str, ...], width: int) -> tuple[str, ...]:
     return compact[-1:] if compact else ()
 
 
-def border_hint_action_hit(widget, screen_x: int, screen_y: int,
-                           tokens: tuple[str, ...] | list[str]) -> bool:
-    """Return whether the pointer is over one of the clickable hint tokens."""
-    hit = border_hint_hit(widget, screen_x, screen_y)
-    if hit is None:
-        return False
-    label, offset = hit
-    return border_hint_action_token(widget, screen_x, screen_y, tokens) is not None
-
-
 def border_hint_action_token(widget, screen_x: int, screen_y: int,
                              tokens: tuple[str, ...] | list[str]) -> str | None:
     """Return the specific action token under the pointer, if any."""
@@ -262,21 +252,6 @@ def set_border_hint_hover(widget, token: str | None) -> None:
     styled = Text(label)
     styled.stylize(f"bold {background} on {accent}", *span)
     widget.border_subtitle = styled
-
-
-def _is_blank_static_click(widget: Static, event: MouseEvent) -> bool:
-    """Recognize empty/trailing space without treating selectable text as blank."""
-    content = getattr(widget, "content", None)
-    if content is None or (isinstance(content, str) and not content.strip()):
-        return True
-    try:
-        content_region = widget.content_region
-        optimal_width = widget.get_content_width(content_region.size, widget.size)
-    except Exception:
-        return False
-    content_left = content_region.x - widget.region.x
-    return event.x < content_left or event.x >= content_left + min(
-        optimal_width, content_region.width)
 
 
 class ClickSelectTable(DataTable):

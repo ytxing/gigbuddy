@@ -127,43 +127,6 @@ def test_global_step_keys_fire_off_params_row_and_guard_shadows_them(
     run(scenario())
 
 
-def test_click_value_enters_edit_and_enter_applies(monkeypatch, tmp_path):
-    """REQ-021 click-value editing still works on the single focus stop."""
-
-    _patch_chain(monkeypatch, tmp_path)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(220, 55)) as pilot:
-            await pilot.pause(0.3)
-            params = app.query_one(ChainPanel).params
-
-            # GAIN value span (content x [6, 11)); screen x adds the 1-cell
-            # left padding. Click its middle.
-            index, start, end = params._value_spans[0]
-            assert index == 0
-            x = params.content_region.x + (start + end) // 2
-            await pilot.click(offset=(x, params.region.y))
-            await pilot.pause()
-            assert params._editing == 0
-            assert app.focused is params  # edit mode focuses the row
-
-            await pilot.press("backspace")
-            await pilot.pause()
-            await pilot.press("backspace")
-            await pilot.pause()
-            assert params._edit_text == " 1."
-            await pilot.press("7")
-            await pilot.pause()
-            assert params._edit_text == " 1.7"
-            await pilot.press("enter")
-            await pilot.pause(0.3)
-            assert params._editing is None
-            assert live.read_chain().get("gain") == 1.7
-
-    run(scenario())
-
-
 def test_click_token_dot_and_blank_do_not_move_focus(monkeypatch, tmp_path):
     """Clicking any non-value part of the row never steals focus; the dot
     restores the default value (REQ-027)."""

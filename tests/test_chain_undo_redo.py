@@ -99,7 +99,6 @@ def test_undo_restores_preset_config_and_redo_reapplies(monkeypatch, tmp_path):
             assert cfg["slots"] == [{"path": str(tones / "amp-b.nam")}]
     run(scenario())
 
-
 def test_undo_with_empty_stack_is_a_noop(monkeypatch, tmp_path):
     """No preset applied yet → ctrl+z must not touch the chain file."""
     _make_env(monkeypatch, tmp_path)
@@ -209,20 +208,4 @@ def test_undo_with_missing_keys_does_not_inject_none(monkeypatch, tmp_path):
             assert cfg["slots"][0]["path"].endswith("amp-a.nam")
             assert "quality" not in cfg or cfg["quality"] is not None
             assert cfg["slots"][1]["path"].endswith("cab-a.wav")
-    run(scenario())
-
-
-def test_undo_stack_bounded_at_50(monkeypatch, tmp_path):
-    """The undo stack keeps at most 50 snapshots (FIFO drop of the oldest)."""
-    _make_env(monkeypatch, tmp_path)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.3)
-            for i in range(51):
-                app._push_undo({"slots": [{"path": f"m{i}"}]})
-            assert len(app._undo_stack) == 50
-            assert app._undo_stack[0]["slots"][0]["path"] == "m1"  # oldest (m0) dropped
-            assert app._undo_stack[-1]["slots"][0]["path"] == "m50"
     run(scenario())

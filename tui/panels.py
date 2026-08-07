@@ -61,16 +61,6 @@ def _escape(text: str) -> str:
     return text.replace("[", "\\[")
 
 
-def _single_line(text: str) -> str:
-    """单行化：换行/制表/连续空白 → 单个空格，首尾 trim。
-
-    REQ-026：作者简介（bio）含大量换行/多空格，放进单行 banner
-    （marquee 滚动）时难看得要命——展示前压成一行。详情页多行文本区
-    保留原始换行（多行可读性更好），不做此处理。
-    """
-    return " ".join(str(text).split())
-
-
 _CHAIN_REPLACEMENT_OPERATIONS = frozenset({
     "chain", "preset-load", "undo", "redo",
 })
@@ -2797,10 +2787,6 @@ class DetailPane(Vertical):
                                               else "description"),
                                       focus_table=True,
                                       remote=self._description_remote)
-
-    def _mode_hint(self, *, selection: bool) -> str:
-        """Return the stable action vocabulary used by both detail modes."""
-        return "view tabs [/]"
 
     # ---- REQ-038 pack 表多选安装/卸载（i install / u uninstall）----
 

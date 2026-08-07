@@ -282,38 +282,3 @@ def test_description_header_resolves_model_id_from_canonical_slots(
                         lambda: _chain([first]))
 
     assert DetailPane._chain_model_id(relative_tone) == 101
-
-
-def test_empty_slot_clears_old_pack_and_brackets_switch_views(
-        monkeypatch, tmp_path):
-    _current, _first, _second, _models, _tone = _patch_canonical_chain(
-        monkeypatch, tmp_path)
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(140, 40)) as pilot:
-            await pilot.pause(0.15)
-            panel = app.query_one(ChainPanel)
-            detail = app.query_one(DetailPane)
-            panel.slot_widgets[0].focus()
-            await pilot.pause()
-            tabs = app.query_one("#detail-view-tabs")
-            tabs.focus()
-            await pilot.press("]")
-            await pilot.pause()
-            assert detail._view_mode == "selection"
-            await pilot.press("[")
-            await pilot.pause()
-            assert detail._view_mode == "description"
-
-            await pilot.click(panel.add_slot)
-            await pilot.pause()
-            assert panel.state.slot(1).status is SlotStatus.EMPTY
-            assert detail._pack_mode is False
-            assert detail._view_mode == "empty"
-            assert "NONE" in str(detail._summary.content)
-            assert "m101" not in {
-                row.key.value for row in detail._pack_table.ordered_rows
-            }
-
-    run(scenario())

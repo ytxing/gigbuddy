@@ -19,7 +19,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.events import Leave, MouseEvent, MouseMove
 from textual.message import Message
-from textual.widgets import (DataTable, Input, ProgressBar, Select,
+from textual.widgets import (DataTable, Input, Select,
                              TabbedContent, TabPane)
 from textual.widgets._tabbed_content import ContentTabs  # noqa: E402
 
@@ -82,12 +82,6 @@ _SEARCH_BAR_ID = {
     "pane-local": "#local-search-bar",
     "pane-tone": "#tone-search-bar",
 }
-
-
-def _parse_query(q: str) -> tuple[str, list[str], list[str]]:
-    """Compatibility view of the shared parser for older callers/tests."""
-    spec = parse_search(q)
-    return spec.text, list(spec.authors), list(spec.tags)
 
 
 class ToneSelected(Message):
@@ -535,7 +529,6 @@ class LibraryPanel(Vertical):
                 )
                 yield self._make_table("lib-table-tone")
                 yield MarqueeBar(id="tone-status")
-                yield ProgressBar(total=1, show_eta=False, id="import-progress")
             with TabPane("TOP CREATORS", id="pane-creators"):
                 yield SearchBar(
                     input_id=None,
@@ -600,7 +593,6 @@ class LibraryPanel(Vertical):
         self._local_selected: set[int] = set()
         self._mutation_anchor: ViewAnchor | None = None
         self._screen_generation = 1
-        self._import_request_id = 0
         self._mutation_request_id = 0
         self._tone_request_view: tuple | None = None
         self._creator_request_view: tuple | None = None
@@ -611,7 +603,6 @@ class LibraryPanel(Vertical):
         self._creator_cache: dict | None = None
         # 排行榜排序键（REQ-029）：tones / downloads / favorites / models。
         self._creator_sort = "tones"
-        self.query_one("#import-progress", ProgressBar).display = False
         # 点击 tab 后焦点落在 tab 条上，Textual 默认 left/right 会切换
         # LOCAL/TONE3000/TOP CREATORS —— 禁掉这个键位，左右只能在表格/
         # 搜索框里操作，防止误操作跳到别的视图。
@@ -640,7 +631,6 @@ class LibraryPanel(Vertical):
         self._tone_request_id += 1
         self._local_request_id += 1
         self._creator_request_id += 1
-        self._import_request_id += 1
         self._mutation_request_id += 1
         self._tone_loading = False
         self._local_loading = False
@@ -686,10 +676,6 @@ class LibraryPanel(Vertical):
     def _local_alive(self, generation: int, request_id: int) -> bool:
         return (self._screen_alive(generation)
                 and request_id == self._local_request_id)
-
-    def _import_alive(self, generation: int, request_id: int) -> bool:
-        return (self._screen_alive(generation)
-                and request_id == self._import_request_id)
 
     def _disable_tab_arrow_keys(self) -> None:
         """Make the tab strip's left/right dead (priority bindings win over
@@ -1635,19 +1621,6 @@ class LibraryPanel(Vertical):
                 self._update_remote_row(
                     tone_table, f"remote:{tone_id}", self._row_cells(tone))
 
-    def _reconcile_download_states(self, table_id: str,
-                                   tones: dict[int, dict],
-                                   key_prefix: str,
-                                   affected_ids: set[int] | None = None) -> None:
-        """Compatibility wrapper for callers that still need sync refresh."""
-        ids = affected_ids if affected_ids is not None else {
-            int(tone_id) for tone_id in tones
-        }
-        candidates = self._mutation_download_candidates(ids)
-        if candidates:
-            self._apply_download_state_updates(
-                library.mark_download_state(candidates))
-
     async def _reconcile_mutation_worker(self, tone_ids: set[int],
                                          generation: int,
                                          request_id: int) -> None:
@@ -2512,64 +2485,6 @@ class LibraryPanel(Vertical):
 
         if key_value:
             self.post_message(ToneHighlighted(tone, remote=remote))
-
-    # ---- import (TONE3000 tab) ----------------------------------------------
-
-    async def _import_and_select(self, tone_id: int) -> None:
-        """Import a remote tone (metadata + models), then surface it in the UI."""
-        self._import_request_id += 1
-        request_id = self._import_request_id
-        generation = self._screen_generation
-        if not self._import_alive(generation, request_id):
-            return
-        status = self.query_one("#tone-status", MarqueeBar)
-        bar = self.query_one("#import-progress", ProgressBar)
-        bar.update(total=1, progress=0)
-        bar.display = True
-        status.content = f"Importing tone {tone_id}…"
-
-        def progress(done: int, total: int, filename: str) -> None:
-            try:
-                self.app.call_from_thread(
-                    self._show_import_progress, generation, request_id,
-                    tone_id, done, total, filename)
-            except Exception:
-                pass
-
-        try:
-            # Downloads and SQLite work are blocking; keep Textual's event loop
-            # free so focus, arrows, and repaint continue during an import.
-            t = await asyncio.to_thread(
-                library.import_tone, tone_id, progress, quiet=True)
-        except Exception as e:
-            if self._import_alive(generation, request_id):
-                status.content = f"import failed: {e}"
-                bar.display = False
-            return
-        if not t:
-            if self._import_alive(generation, request_id):
-                status.content = f"tone3000 has no tone {tone_id}"
-                bar.display = False
-            return
-        publish = getattr(self.app, "_publish_mutation", None)
-        if callable(publish):
-            publish("import", (f"tone:{tone_id}",), t.get("revision"))
-        if not self._import_alive(generation, request_id):
-            return
-        count = len(t.get("models") or [])
-        bar.update(total=max(count, 1), progress=max(count, 1))
-        status.content = f"Imported tone {tone_id}: {count} file(s) — see LOCAL"
-        self.post_message(ToneSelected(tone_id))
-
-    def _show_import_progress(self, generation: int, request_id: int,
-                              tone_id: int, done: int, total: int,
-                              filename: str) -> None:
-        if not self._import_alive(generation, request_id):
-            return
-        self.query_one("#import-progress", ProgressBar).update(
-            total=max(total, 1), progress=done)
-        self.query_one("#tone-status", MarqueeBar).content = (
-            f"importing tone {tone_id}: {done}/{total}  {filename}")
 
     # ---- widget events ------------------------------------------------------
 

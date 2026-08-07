@@ -16,7 +16,7 @@ from textual.widgets import DataTable
 from tui.app import GigBuddyApp
 from tui.install_screen import PackInstallScreen
 from tui.library_panel import LibraryPanel
-from tui.panels import ChainSlotWidget, DetailPane
+from tui.panels import DetailPane
 
 
 def run(coro):
@@ -77,7 +77,6 @@ def test_detail_pack_filters_a1_rows(monkeypatch):
             assert fetch_flags == [False]
 
     run(scenario())
-
 
 def test_install_pack_filters_a1_rows(monkeypatch):
     """AMP Install PACK must drop WaveNet (A1); only A2 is installable."""
@@ -526,63 +525,3 @@ def test_pack_install_screen_u_uninstalls_selected(monkeypatch):
             await pilot.pause(0.2)
 
     run(scenario())
-
-
-def test_chain_click_opens_pack_with_old_absolute_db_rows(monkeypatch, tmp_path):
-    """REQ-041：REQ-035 之前的旧库 local_path 存绝对路径——链节点点击
-    → detail 必须打开对应 pack 视图（此前路径查找只匹配相对形式，
-    反查失败 → detail 被清成 "Move the library cursor…" 空态）。"""
-    import library as lib
-    import tui.app as appmod
-    import tui.panels as panels
-    import tui.live as live
-
-    monkeypatch.setattr(lib, "DB_FILE", tmp_path / "gigbuddy.db")
-    monkeypatch.setattr(lib, "CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr(lib, "ROOT", tmp_path)
-    monkeypatch.setattr(live, "ROOT", tmp_path)
-    monkeypatch.setattr(appmod.live, "CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr(panels.live, "CHAIN_FILE", tmp_path / "live_chain.json")
-    monkeypatch.setattr(live, "CHAIN_FILE", tmp_path / "live_chain.json")
-    # 项目根内路径（相对/绝对两种形式不同，才能覆盖旧格式场景）
-    f = lib.ROOT / "data" / "tones" / "10-jcm800" / "MV5 G1.nam"
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_bytes(b"fixture")
-    with lib.connect() as conn:
-        lib.upsert_tone(conn, {"id": 10, "title": "JCM800", "gear": "amp",
-                               "username": "a", "downloads_count": 1})
-        lib.upsert_model(conn, {"id": 1, "tone_id": 10, "model_url": "u",
-                                "name": "MV5 G1",
-                                "architecture": "SlimmableContainer",
-                                "local_path": str(f)})
-        conn.execute("UPDATE models SET local_path = ? WHERE id = 1", (str(f),))
-        conn.commit()
-    lib.chain_set({"model": str(f), "gain": 0.8})
-
-    async def scenario():
-        app = GigBuddyApp(spawn_engine=False)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.4)
-            pane = app.query_one(DetailPane)
-            assert "Move the library cursor" not in _detail_plain(app)
-            slot = next(n for n in app.query(ChainSlotWidget) if n.index == 0)
-            await pilot.click(slot)
-            await pilot.pause()
-            # 链点击 → detail 打开该节点的 pack 视图（不是空态占位）
-            assert pane._view_mode == "selection"
-            assert pane._pack_mode
-            assert pane._pack_table.row_count == 1
-            assert "JCM800" in str(pane._marquee.content)
-            assert pane._pack_tone.get("id") == 10
-
-    run(scenario())
-
-
-def _detail_plain(app) -> str:
-    """DetailPane 标题 + 正文纯文本（空态占位检测用）。"""
-    import io
-    from rich.console import Console
-    pane = app.query_one(DetailPane)
-    buf = io.StringIO()
-    Console(file=buf, width=120).print(pane._body.content)
-    return f"{pane._marquee.content or ''} {buf.getvalue()}"

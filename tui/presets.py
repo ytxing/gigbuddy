@@ -682,10 +682,6 @@ class PresetPanel(Vertical):
         self._fingerprint = None
         self.refresh_presets(force=True, incremental=True)
 
-    def selected_name(self) -> str | None:
-        preset = self._selected_preset()
-        return str(preset["name"]) if preset else None
-
     def _selected_preset(self) -> dict | None:
         table = self.query_one("#preset-table", DataTable)
         if not table.ordered_rows or not 0 <= table.cursor_row < len(table.ordered_rows):

@@ -485,7 +485,6 @@ class GigBuddyApp(App):
         dock: bottom; height: 1; padding: 0 1;
         color: $text-muted; content-align: left middle;
     }
-    #import-progress { dock: bottom; height: 1; }
     #lib-status { color: $text-muted; padding: 0 1; }
     PresetPanel > MarqueeBar, ChainPanel > MarqueeBar {
         height: 1; padding: 0 1; color: $text;

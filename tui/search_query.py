@@ -14,11 +14,6 @@ class SearchSpec:
     makes: tuple[str, ...] = ()
     model_ids: tuple[int, ...] = ()
 
-    @property
-    def is_empty(self) -> bool:
-        return not (self.text or self.authors or self.tags or self.makes or self.model_ids)
-
-
 class SearchSyntaxError(ValueError):
     """An input error that should be shown without issuing a search request."""
 
