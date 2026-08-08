@@ -138,7 +138,7 @@ if [[ -x "$ROOT/bin/realtime_cli" ]]; then
     echo "  $ROOT/.venv/bin/python -m tui"
 fi
 echo
-echo "Tip: use a truecolor terminal (iTerm2 / Windows Terminal / Kitty /"
-echo "WezTerm / Alacritty) for the full guitar-amp theme; on 16-color"
-echo "terminals GigBuddy switches to a compatible theme automatically."
+echo "Tip: use a truecolor terminal (iTerm2 / Kitty / WezTerm / Alacritty /"
+echo "Warp / Ghostty) for the full guitar-amp theme; macOS Terminal.app"
+echo "is 256-color and falls back to the compatible theme automatically."
 echo "Force the full theme with: TEXTUAL_COLOR_SYSTEM=truecolor gigbuddy"

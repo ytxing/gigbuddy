@@ -434,9 +434,9 @@ stop_banner
 printf '\nGigBuddy ready\n'
 printf '  %s/gigbuddy\n' "$BIN_DIR"
 printf '  install: %s\n' "$INSTALL_ROOT"
-printf 'Tip: use a truecolor terminal (iTerm2 / Windows Terminal / Kitty /\n'
-printf 'WezTerm / Alacritty) for the full guitar-amp theme; on 16-color\n'
-printf 'terminals GigBuddy switches to a compatible theme automatically.\n'
+printf 'Tip: use a truecolor terminal (iTerm2 / Kitty / WezTerm / Alacritty /\n'
+printf 'Warp / Ghostty) for the full guitar-amp theme; macOS Terminal.app\n'
+printf 'is 256-color and falls back to the compatible theme automatically.\n'
 printf 'Force the full theme with: TEXTUAL_COLOR_SYSTEM=truecolor gigbuddy\n'
 if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
   printf 'Add to PATH if needed: %s\n' "$BIN_DIR"
