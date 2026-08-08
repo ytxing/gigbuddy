@@ -8,4 +8,10 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python3}"
 fi
 
+if [[ $# -eq 0 ]]; then
+    # 无子命令：启动 TUI（cd 到仓库根保证 `-m tui` 可导入）
+    cd "$ROOT"
+    exec "$PYTHON_BIN" -m tui
+fi
+
 exec "$PYTHON_BIN" "$ROOT/src/library.py" "$@"
