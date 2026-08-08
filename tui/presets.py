@@ -1278,7 +1278,7 @@ class ChainSaveModal(GigBuddyModal):
         if not active:
             self._select("as")
             self.query_one("#chain-save-name", Input).focus()
-            self._set_status("没有当前 preset，请使用 SAVE AS 并输入名字")
+            self._set_status("No active preset — use SAVE AS and enter a name")
             return
         self._pending_overwrite = active
         self._set_status(f'"{active}" already exists. Overwrite it?')
