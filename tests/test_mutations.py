@@ -64,7 +64,10 @@ def test_non_adjacent_repeated_same_event_object_is_coalesced():
     ]
 
 
-def test_capture_runs_once_per_refresh_group_before_reconcile():
+def test_capture_runs_once_per_schedule_round_before_reconcile():
+    """Anchors are captured synchronously at publish time, before any page
+    refresh or reconcile can move the viewport (a capture deferred to flush
+    could read a table that an unrelated tick already cleared)."""
     scheduled = []
     trace = []
     coordinator = MutationRefreshCoordinator(
@@ -76,11 +79,33 @@ def test_capture_runs_once_per_refresh_group_before_reconcile():
     coordinator.receive(MutationCommitted("install", ("model:2",), 7))
     coordinator.receive(MutationCommitted("uninstall", ("tone:3",)))
 
+    assert trace == [("capture",)]
     scheduled.pop()()
 
     assert trace == [
         ("capture",),
         ("reconcile", "batch"),
-        ("capture",),
+        ("reconcile", "uninstall"),
+    ]
+
+
+def test_capture_repeats_for_each_schedule_round():
+    """A later mutation starts a new round and captures fresh anchors."""
+    scheduled = []
+    trace = []
+    coordinator = MutationRefreshCoordinator(
+        lambda callback: scheduled.append(callback),
+        lambda event: trace.append(("reconcile", event.operation)),
+        lambda: trace.append(("capture",)),
+    )
+    coordinator.receive(MutationCommitted("install", ("tone:1",), 7))
+    scheduled.pop()()
+    assert trace == [("capture",), ("reconcile", "install")]
+
+    coordinator.receive(MutationCommitted("uninstall", ("tone:2",)))
+    assert trace == [("capture",), ("reconcile", "install"), ("capture",)]
+    scheduled.pop()()
+    assert trace == [
+        ("capture",), ("reconcile", "install"), ("capture",),
         ("reconcile", "uninstall"),
     ]

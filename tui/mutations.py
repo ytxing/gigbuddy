@@ -96,6 +96,14 @@ class MutationRefreshCoordinator:
         if self._scheduled:
             return
         self._scheduled = True
+        # Capture the view anchors synchronously while the pages still reflect
+        # the pre-mutation viewport. Deferring the capture to ``flush()`` lets
+        # an unrelated refresh (e.g. the 0.1s tick rebuilding the preset table
+        # once the chain/active fingerprint changes) wipe the table -- and
+        # reset its scroll -- before the anchors are read, so the restore
+        # would resurrect the wrong (reset) position.
+        if self._capture is not None:
+            self._capture()
         self._schedule(self.flush)
 
     def flush(self) -> None:
@@ -116,8 +124,6 @@ class MutationRefreshCoordinator:
             else:
                 groups.append([event])
         for group in groups:
-            if self._capture is not None:
-                self._capture()
             self._reconcile(self._merge(group))
 
     @staticmethod

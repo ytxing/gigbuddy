@@ -1094,6 +1094,30 @@ class PresetNameModal(GigBuddyModal):
                 [token for token, _ in self._border_hint_actions()]))
 
 
+class _ChainSaveRow(Static):
+    """SAVE 弹窗的一行：聚焦时通知 owner 切换选中（▶ 跟随焦点）。"""
+
+    def __init__(self, row: str, owner, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.can_focus = True
+        self._row = row
+        self._owner = owner
+
+    def on_focus(self, event) -> None:
+        self._owner._select(self._row)
+
+
+class _ChainSaveNameInput(Input):
+    """名字输入框：获得焦点时选中 SAVE AS 行（▶ 跟随焦点）。"""
+
+    def __init__(self, owner, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._owner = owner
+
+    def on_focus(self, event) -> None:
+        self._owner._select("as")
+
+
 class ChainSaveModal(GigBuddyModal):
     """Choose whether to overwrite the active Preset or save a new one."""
 
@@ -1101,25 +1125,27 @@ class ChainSaveModal(GigBuddyModal):
     ChainSaveModal > ModalBox {
         width: 72%; height: auto; margin: 8 14;
     }
-    #chain-save-line {
-        height: 3; width: 100%; align: left middle;
+    #chain-save-here {
+        height: 1; padding: 0 1;
+        background: transparent;
     }
-    #chain-save-mode {
-        width: 20; height: 3; padding: 0;
-        background: $boost;
-        border-top: none; border-right: none;
-        border-bottom: none; border-left: none;
+    #chain-save-as {
+        width: auto; height: 1; padding: 0 3 0 1;
+        background: transparent;
     }
-    #chain-save-mode > SelectCurrent {
-        background: $boost;
-        border-top: none !important; border-right: none !important;
-        border-bottom: none !important; border-left: none !important;
+    #chain-save-here:focus, #chain-save-as:focus,
+    #chain-save-here:hover, #chain-save-as:hover {
+        background: $panel-lighten-1;
     }
-    #chain-save-name-label {
-        width: auto; padding: 0 1; color: $text-muted;
+    #chain-save-here.chain-save-row--selected,
+    #chain-save-as.chain-save-row--selected {
+        background: $panel-lighten-1;
+    }
+    #chain-save-as-line {
+        height: 1; width: 100%; align: left middle;
     }
     #chain-save-name {
-        width: 1fr; height: 3; padding: 0 1;
+        width: 1fr; height: 1; padding: 0 1;
         background: $boost;
         border-top: none; border-right: none;
         border-bottom: none; border-left: none;
@@ -1141,32 +1167,35 @@ class ChainSaveModal(GigBuddyModal):
     def __init__(self) -> None:
         super().__init__()
         active = library.preset_current()
-        self._mode = "save_here" if active else "save_as_new"
+        self._selected = "here" if active else "as"
         self._active_name = active
         self._pending_overwrite: str | None = None
+        self._last_click: tuple[float, str] | None = None
+
+    BINDINGS = [Binding("enter", "run_selected", "save", show=False)]
 
     def compose(self) -> ComposeResult:
         box = ModalBox()
         box.border_title = "SAVE"
         with box:
-            with Horizontal(id="chain-save-line"):
-                yield Select(
-                    [("SAVE HERE", "save_here"),
-                     ("SAVE AS NEW", "save_as_new")],
-                    value=self._mode,
-                    allow_blank=False,
-                    id="chain-save-mode",
-                )
-                yield Static("Preset name:", id="chain-save-name-label")
-                yield Input(
-                    placeholder=self._active_name or "new preset name",
+            yield _ChainSaveRow(
+                "here", self, id="chain-save-here", classes="chain-save-row")
+            with Horizontal(id="chain-save-as-line"):
+                yield _ChainSaveRow(
+                    "as", self, id="chain-save-as", classes="chain-save-row")
+                yield _ChainSaveNameInput(
+                    self, placeholder=self._active_name or "new preset name",
                     id="chain-save-name",
                 )
             yield Static("", id="chain-save-status")
 
     def on_mount(self) -> None:
+        self._render_rows()
         self._update_hint()
-        self.query_one("#chain-save-name", Input).focus()
+        if self._selected == "here":
+            self.query_one("#chain-save-here", Static).focus()
+        else:
+            self.query_one("#chain-save-name", Input).focus()
 
     def _set_status(self, text: str) -> None:
         self.query_one("#chain-save-status", Static).update(text)
@@ -1187,24 +1216,74 @@ class ChainSaveModal(GigBuddyModal):
         self.post_message(self.Saved(preset["name"], preset.get("id")))
         self.dismiss()
 
+    def _render_rows(self) -> None:
+        """刷新两行文本与选中指示符（▶ = 选中，未选中行留空格对齐）。
+
+        SAVE HERE 行尾附当前 preset 名（dim 只读——提示覆盖目标，不可改）；
+        SAVE AS 行的名字写在右侧可写输入框里。两行名字起始列对齐：
+        SAVE HERE 标签 9 字符 + 3 空格，SAVE AS 标签补 1 空格 + padding 右 3。
+        """
+        here = self.query_one("#chain-save-here", Static)
+        as_row = self.query_one("#chain-save-as", Static)
+        marker_here = "▶ " if self._selected == "here" else "  "
+        marker_as = "▶ " if self._selected == "as" else "  "
+        target = self._active_name
+        if target:
+            here.update(
+                f"{marker_here}SAVE HERE   [dim]{escape(target)} (will be overwritten)[/]")
+        else:
+            here.update(f"{marker_here}SAVE HERE   [dim]no active preset[/]")
+        as_row.update(f"{marker_as}SAVE AS ")
+        here.set_class(self._selected == "here", "chain-save-row--selected")
+        as_row.set_class(self._selected == "as", "chain-save-row--selected")
+
+    def _select(self, row: str) -> None:
+        """切换选中行（▶ 指示符跟随），不执行动作。"""
+        if self._selected != row:
+            self._selected = row
+            self._pending_overwrite = None
+            self._set_status("")
+        self._render_rows()
+
+    def _row_click(self, row: str) -> None:
+        """单击选中；350ms 内对同一行再次单击 = 双击，直接执行该行。"""
+        import time as _time
+        now = _time.monotonic()
+        if (self._last_click is not None
+                and now - self._last_click[0] < 0.35
+                and self._last_click[1] == row):
+            self._last_click = None
+            self._submit()
+            return
+        self._last_click = (now, row)
+        self._select(row)
+
+    def action_run_selected(self) -> None:
+        """Enter：执行当前选中行（焦点在行上时冒泡至此）。"""
+        self._submit()
+
     def _submit(self) -> None:
         if self._pending_overwrite:
             name = self._pending_overwrite
             self._finish_save(name)
             return
 
-        if self._mode == "save_here":
-            active = library.preset_current()
-            if not active:
-                self._mode = "save_as_new"
-                self.query_one("#chain-save-mode", Select).value = "save_as_new"
-                self.query_one("#chain-save-name", Input).focus()
-                self._set_status("Choose SAVE AS NEW and enter a name")
-                return
-            self._pending_overwrite = active
-            self._set_status(f'"{active}" already exists. Overwrite it?')
-            return
+        if self._selected == "here":
+            self._save_here()
+        else:
+            self._save_as()
 
+    def _save_here(self) -> None:
+        active = library.preset_current()
+        if not active:
+            self._select("as")
+            self.query_one("#chain-save-name", Input).focus()
+            self._set_status("没有当前 preset，请使用 SAVE AS 并输入名字")
+            return
+        self._pending_overwrite = active
+        self._set_status(f'"{active}" already exists. Overwrite it?')
+
+    def _save_as(self) -> None:
         name = self.query_one("#chain-save-name", Input).value.strip()
         if not name:
             self._set_status("Preset name required")
@@ -1224,15 +1303,8 @@ class ChainSaveModal(GigBuddyModal):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chain-save-name":
+            # Enter = 执行选中行（聚焦输入框时 ▶ 已跟随 SAVE AS）
             self._submit()
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id != "chain-save-mode":
-            return
-        self._mode = str(event.value)
-        self._pending_overwrite = None
-        self._set_status("")
-        self.query_one("#chain-save-name", Input).focus()
 
     def _confirm(self) -> None:
         self._submit()
@@ -1243,6 +1315,12 @@ class ChainSaveModal(GigBuddyModal):
                  self._confirm)]
 
     def on_click(self, event: MouseEvent) -> None:
+        # 行点击优先于 border hint：单击选中、双击执行
+        control = event.control
+        if control is not None and control.id in ("chain-save-here", "chain-save-as"):
+            self._row_click("here" if control.id == "chain-save-here" else "as")
+            event.stop()
+            return
         border_hint_click(self.query_one(ModalBox), event,
                           self._border_hint_actions())
 

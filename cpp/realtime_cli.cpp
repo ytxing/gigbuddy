@@ -78,8 +78,10 @@ private:
     int pos = 0;
 };
 
-// 去咔哒窗半程：热切换时 ~10.6ms 音量下沉（淡出 FADE_HALF + 淡入 FADE_HALF，@48k 每半程 ≈5.3ms）
-static constexpr int FADE_HALF = 256;
+// 交叉淡化窗长：新旧链在 ~32ms 内完成过渡（@48k），配合等功率曲线
+// （sin/cos）充分掩盖新节点 warm-up 瞬态与两链相位差；比 5-20ms 的
+// 线性交叉更能消除持续音上残余的微弱咔哒。
+static constexpr int FADE_HALF = 1536;
 
 // 旁路录制输出：把实时处理结果写为 16-bit PCM WAV（--record-out 启用）
 // 抽象意图：DSP 链（process_block）与物理输出解耦，本类是可插拔输出端之一
@@ -195,13 +197,13 @@ struct Ctx {
     // watcher consumes it when the matching transaction reaches the file.
     std::shared_ptr<PreparedChain> managedPreparedChain;
     std::string managedPreparedTransactionId;
-    // 去咔哒状态机（fadeState/fadeReady 主线程与回调协作；fadePos 仅回调私有）：
-    //   fadeState: 0=无 1=淡出(1→0) 2=淡入(0→1)；主线程只发 1，回调推进
-    //   fadeReady: 1=已到静音点（回调置位）——主线程据此等待后再交换，
-    //               保证旧输出先被淡出到 0，交换发生在静音处，新输出从 0 淡入
-    std::atomic<int> fadeState{0};
-    std::atomic<int> fadeReady{0};
-    int fadePos = FADE_HALF;
+    // 交叉淡化（crossfade）：链切换时旧链保留为淡出源、新链淡入，
+    // 输出 = 旧*(1-f) + 新*f —— 输出连续无静音凹陷（成熟音频方案；
+    // 相比旧的"淡出到 0 → 交换 → 淡入"，持续音上不再有电平突降的咔哒）。
+    // fadeOld 主线程写、回调读（atomic load/store）；fadePos 主线程置 0、
+    // 回调按帧推进（atomic）。
+    std::shared_ptr<PreparedChain> fadeOld;
+    std::atomic<int> fadePos{FADE_HALF};
     // 旁路录制端：启动后不变（回调线程只读指针，安全），nullptr 表示不录制
     WavOutput* wavOut = nullptr;
     // 干声文件输入源（链 input.source=file 时替代乐器输入；回调读，主线程交换）
@@ -211,6 +213,7 @@ struct Ctx {
     std::atomic<bool> loop{false};       // 循环播放
     std::atomic<float> playPosSec{0.0f}; // 播放位置（秒，level 回传给 TUI）
     std::vector<float> scratch;   // 选定通道的单声道缓冲（回调线程私有）
+    std::vector<float> scratch2;  // 交叉淡化时旧链处理缓冲（回调线程私有）
     int inCh = 0;                 // 选定输入通道
     int inChannels = 1;           // 打开的输入通道数
     std::atomic<float> inPeak{0.0f};   // 输入电平（VU 监控）
@@ -240,19 +243,6 @@ static std::shared_ptr<FirFilter> make_ir(const std::string& path, int sr) {
     auto f = std::make_shared<FirFilter>();
     f->set_ir(ir);
     return f;
-}
-
-// 请求去咔哒并等待静音点：回调淡出旧输出到 0 后置 fadeReady，主线程等它
-// 再交换，保证交换发生在静音处（超时 50ms 降级：直接交换，宁可有小咔哒不卡主线程）
-static void request_fade_and_wait(Ctx& c) {
-    c.fadeReady.store(0, std::memory_order_relaxed);
-    c.fadeState.store(1, std::memory_order_relaxed);
-    auto start = std::chrono::steady_clock::now();
-    while (c.fadeReady.load(std::memory_order_relaxed) == 0) {
-        if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(50))
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
 }
 
 // live 热切换：按配置更新完整 Slot chain 和全局参数（有变化才重载，加载失败保留旧值）
@@ -877,8 +867,12 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
         }
     }
     const bool sourceChanged = input.isFile != ctx.inIsFile.load(std::memory_order_relaxed);
-    if (current && (chainChanged || sourceChanged || inputPathChanged))
-        request_fade_and_wait(ctx);
+    if (current && (chainChanged || sourceChanged || inputPathChanged)) {
+        // 交叉淡化：保留旧链为淡出源，回调输出 = 旧*(1-f) + 新*f（无静音凹陷）。
+        // 交换直接进行（无需等待静音点）；fadePos 由回调按帧推进。
+        ctx.fadePos.store(0, std::memory_order_relaxed);
+        std::atomic_store(&ctx.fadeOld, current);
+    }
 
     // The only runtime publication point: all nodes and the input file have
     // been prepared, so readers see either the old complete state or this one.
@@ -934,37 +928,8 @@ static float block_peak(const float* buf, int n) {
     return p;
 }
 
-// 去咔哒：线性淡出(1→0)→淡入(0→1)。fadePos 回调线程私有；fadeState 主线程只发 1。
-// 淡出完成处置 fadeReady（静音点，主线程等它交换）；淡入完成处 CAS——若主线程
-// 在淡入期间又发请求（fadeState 被改回 1），CAS 失败则立即重新淡出，不丢更新。
-static void apply_fade(float* out, int frames, Ctx& c) {
-    int st = c.fadeState.load(std::memory_order_relaxed);
-    if (st == 0) return;
-    for (int i = 0; i < frames; i++) {
-        out[i] *= (float)c.fadePos / FADE_HALF;
-        if (st == 1) {
-            if (--c.fadePos <= 0) {
-                c.fadePos = 0;
-                st = 2;
-                c.fadeState.store(2, std::memory_order_relaxed);
-                c.fadeReady.store(1, std::memory_order_relaxed);  // 静音点：主线程可交换
-            }
-        } else {
-            if (++c.fadePos >= FADE_HALF) {
-                c.fadePos = FADE_HALF;
-                int expected = 2;
-                if (c.fadeState.compare_exchange_strong(expected, 0)) {
-                    st = 0;  // 淡入完成，无新请求
-                } else {
-                    st = 1;  // 主线程已发新请求 → 立即重新淡出
-                }
-            }
-        }
-    }
-}
-
 // 纯 DSP 链（无 PortAudio 依赖，输出端可插拔——pa_callback 与未来其它输出端共用）：
-// mono 输入(scratch) → gain → slot[0..n] → 去咔哒 fade → master/mute → out
+// mono 输入(scratch) → gain → slot[0..n] → 交叉淡化(crossfade) → master/mute → out
 static void process_block(const float* in, float* out, int frames, Ctx& c) {
     auto chain = std::atomic_load(&c.chain);
     const float inputGain = chain ? chain->gain : 1.0f;
@@ -973,7 +938,47 @@ static void process_block(const float* in, float* out, int frames, Ctx& c) {
     else if (in != c.scratch.data())
         std::copy(in, in + frames, c.scratch.begin());
     c.inPeak.store(block_peak(c.scratch.data(), frames), std::memory_order_relaxed);
-    if (chain) {
+
+    auto old = std::atomic_load(&c.fadeOld);
+    if (old) {
+        // 交叉淡化：旧链淡出、新链淡入，输出连续（成熟音频方案——持续音
+        // 上的切换不再经历"淡出到 0 → 交换 → 淡入"的静音凹陷咔哒）。
+        std::copy(c.scratch.begin(), c.scratch.begin() + frames, c.scratch2.begin());
+        for (auto& node : old->nodes) {
+            if (node.kind == NodeKind::Nam && node.nam)
+                node.nam->Process(c.scratch2.data(), c.scratch2.data(), frames);
+            else if (node.kind == NodeKind::Ir && node.ir)
+                node.ir->process(c.scratch2.data(), c.scratch2.data(), frames);
+        }
+        if (chain) {
+            for (auto& node : chain->nodes) {
+                if (node.kind == NodeKind::Nam && node.nam) {
+                    if (node.nam->HasQualityScaling() &&
+                        node.nam->GetQualityScaleFactor() != chain->quality) {
+                        node.nam->SetQualityScaleFactor(chain->quality);
+                    }
+                    node.nam->Process(c.scratch.data(), c.scratch.data(), frames);
+                } else if (node.kind == NodeKind::Ir && node.ir) {
+                    node.ir->process(c.scratch.data(), c.scratch.data(), frames);
+                }
+            }
+        }
+        int pos = c.fadePos.load(std::memory_order_relaxed);
+        // 等功率交叉淡化（equal-power）：旧链 × cos(θ)、新链 × sin(θ)。
+        // 相比线性混合，非同相信号（直通 vs 经模块）的交叉点幅度不塌陷，
+        // 持续音上的切换听感更干净。
+        const float theta = (float)M_PI_2 * (float)pos / FADE_HALF;
+        const float f = sinf(theta);
+        const float g = cosf(theta);
+        for (int i = 0; i < frames; i++)
+            out[i] = c.scratch2[i] * g + c.scratch[i] * f;
+        pos += frames;
+        if (pos >= FADE_HALF) {
+            pos = FADE_HALF;
+            std::atomic_store(&c.fadeOld, std::shared_ptr<PreparedChain>());
+        }
+        c.fadePos.store(pos, std::memory_order_relaxed);
+    } else if (chain) {
         for (auto& node : chain->nodes) {
             if (node.kind == NodeKind::Nam && node.nam) {
                 // Quality changes are applied by the audio thread at a block
@@ -994,7 +999,6 @@ static void process_block(const float* in, float* out, int frames, Ctx& c) {
     } else {
         std::copy(c.scratch.begin(), c.scratch.begin() + frames, out);
     }
-    apply_fade(out, frames, c);
     const float master = chain ? chain->master : 1.0f;
     if (chain && chain->mute) {
         std::fill(out, out + frames, 0.0f);
@@ -1312,6 +1316,7 @@ int main(int argc, char** argv) {
 
     Ctx ctx;
     ctx.scratch.assign(block, 0.0f);
+    ctx.scratch2.assign(block, 0.0f);
     ctx.runtimeSessionId = std::to_string(
         std::chrono::steady_clock::now().time_since_epoch().count()) + "-"
         + std::to_string(reinterpret_cast<uintptr_t>(&ctx));

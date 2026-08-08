@@ -169,7 +169,9 @@ def normalize_chain(candidate: Any, *, root: Path = PROJECT_ROOT,
 
     Paths in the returned value are absolute so existing TUI/DB lookup code can
     continue comparing them.  Unknown top-level fields are preserved; unknown
-    fields inside Slot/input objects are intentionally removed on write.
+    fields inside Slot/input objects are intentionally removed on write, except
+    the protocol-owned ``candidate``: a bypassed slot (``path:null``) keeps its
+    model reference so the UI can restore it without re-searching the library.
     """
     if not isinstance(candidate, dict):
         raise ChainProtocolError("chain must be an object")
@@ -246,8 +248,19 @@ def _serializable_chain(chain: dict[str, Any], *, root: Path) -> dict[str, Any]:
     result["slots"] = []
     for slot in normalized["slots"]:
         path = slot["path"]
-        result["slots"].append({"path": None if path is None else
-                                 str(Path(path).resolve().relative_to(root))})
+        entry: dict[str, str | None] = {
+            "path": None if path is None else
+            str(Path(path).resolve().relative_to(root)),
+        }
+        candidate = slot.get("candidate")
+        if candidate is not None:
+            # Bypassed slots persist their recovery candidate so the UI can
+            # show BYPASS (with the model name) instead of an empty slot.
+            candidate_path = Path(candidate)
+            entry["candidate"] = (
+                str(candidate_path.resolve().relative_to(root))
+                if candidate_path.is_absolute() else str(candidate_path))
+        result["slots"].append(entry)
     # Unknown input fields are readable compatibility data, but canonical
     # writes intentionally emit only the protocol-owned fields.
     input_value = {

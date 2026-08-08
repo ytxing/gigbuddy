@@ -1,254 +1,214 @@
-# GigBuddy 🎸 — Your one-stop NAM tone manager
+# GigBuddy 🎸
 
-*v0.2.15 — 2026-08-08*
+### Find a sound. Shape it. Play it now.
 
-Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
-a realtime NAM engine, and an SQLite tone library that external AI agents drive
-through a stable CLI. Tones come from TONE3000 (public API, anon key); rendering is
-NeuralAudio (MIT).
+*v1.0.0 · 2026-08-08*
 
-**Open-source stance**: pure-API data source (zero local tone-library dependency),
-fully MIT core stack.
+GigBuddy is a realtime NAM tone workspace for guitarists and bassists. Search
+the public TONE3000 catalog, audition a sound with a dry recording, build a
+signal chain, and hear the result through your interface without leaving the
+same workspace.
 
-## Architecture
+It is made for the moment when a tone is almost right: swap the capture, move
+the cabinet, bypass one stage, compare a preset, and keep the version that
+works. Your downloaded sounds stay in a local library, while the live engine
+keeps the playing experience immediate.
+
+## Why GigBuddy
+
+- **Go from idea to playable tone quickly.** Search TONE3000 in the app, pick a
+  model from a pack, and load it directly into the live chain.
+- **Audition before you commit.** Use the included official dry-input library
+  to compare captures with the same performance instead of relying on memory
+  or changing your playing between tests.
+- **Build chains like a pedalboard.** Use up to six ordered stages, including
+  NAM captures and cabinet IRs. Add, remove, reorder, bypass, and restore a
+  stage while keeping the rest of the chain intact.
+- **Keep playing while you refine.** The realtime engine applies complete chain
+  updates atomically and reports live input/output levels in the TUI.
+- **Save the sound, not just the settings.** Presets remember the chain, model
+  references, parameters, and notes. Library file moves do not invalidate a
+  preset.
+- **Make the workbench feel like your rig.** `gigbuddy` is the default theme;
+  press `t` to cycle `orange-tolex`, `tweed-brass`, `diamond-noir`,
+  `blackface-silver`, `british-green-oxblood`, and `surf-cream-coral`.
+
+## What is new in v0.2
+
+v0.2 turns the original tone-chain console into a complete tone workbench:
+
+- **Flexible chains:** the old fixed AMP/CAB view is now an ordered chain of up
+  to six Slots. A Slot can hold any supported NAM model or `.wav` IR, so the
+  signal path follows the way you actually build a rig.
+- **A library that remembers your work:** imported tones, model metadata, local
+  files, download state, and presets are kept together in one searchable local
+  library.
+- **A clearer way to compare:** LOCAL, TONE3000, and TOP CREATORS views share
+  live search, sorting, type filters, creator profiles, and pack-level install
+  flows.
+- **Presets that behave like real rigs:** the starter catalog ships with 20
+  curated guitar and bass chains, including classic Fender, Vox, Marshall,
+  Ampeg, Gallien-Krueger, and Darkglass sounds.
+- **A better practice loop:** the INPUT row can play, pause, stop, and loop dry
+  guitar or bass recordings, while AUDIO keeps level, mute, device, buffer,
+  sample-rate, and latency controls visible.
+- **A workspace that stays understandable:** focus, selection, installation,
+  preset editing, and destructive actions remain in the pane where they belong.
+
+## Start playing
+
+From a fresh checkout:
 
 ```
-┌─ Agent (external — Claude Code + gigbuddy skill, pi, anything) ─┐
-│  · query library:  gigbuddy tone list/search/show/import         │
-│  · change chain:   gigbuddy chain set (writes live_chain.json)   │
-└───────────────┬──────────────────────────────────────────────────┘
-                │ CLI + file handoff
-┌─ Tone Library UI (Textual TUI, no agent inside) ─────┬──────────┐
-│  browse/search local library (full metadata)          │          │
-│  import from TONE3000 (download + metadata → DB)      │          │
-│  chain control: pick tone → live_chain.json           │  SQLite  │
-│  level meter                                         │ data/     │
-└───────────────┬───────────────────────────────────────┴ gigbuddy │
-                │ live_chain.json / level.json               .db    │
-┌─ Engine (realtime_cli, PortAudio + NeuralAudio) ─────────────────┐
-│  --live hot-swap (atomic ordered Slot-chain swap)                 │
-│  --level-file telemetry                                          │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-- **Library DB** (`data/gigbuddy.db`): full TONE3000 metadata mirror — every search
-  field preserved. Schema: docs/library-schema.md. Query via CLI or SQLite directly.
-- **Agent ↔ UI round-trip**: `live_chain.json` carries the ordered Slot chain and
-  revision; managed TUI writes use a transaction/control sidecar and the engine
-  reports session, transaction, revision, status, and acknowledgement sequence in
-  `level.json`.
-- Offline rendering (`src/render.py` + `bin/nam_cli`) remains for wav output.
-
-## Quick start
-
-```bash
-# One command: Python environment, dependencies, database, starter presets,
-# official dry inputs, NeuralAudio sources, and the realtime engine.
+# Creates the Python environment, local library, starter presets,
+# official dry inputs, and the realtime engine.
 ./install.sh
 
-# If you only want to inspect the TUI, skip the native engine build.
+# Optional: browse the TUI without compiling the native engine.
 ./install.sh --no-engine --starter-dry
 
-# Start the TUI after the install.
+# Launch GigBuddy.
 .venv/bin/python -m tui
-.venv/bin/python -m tui --no-engine  # when install used --no-engine
 ```
 
-The default setup downloads the exact models needed by the built-in preset
-catalog and all 34 official TONE3000 dry-input WAV files. It is idempotent:
-existing database rows and non-empty files are reused. `--starter-dry` limits
-the download to the ten common guitar samples. The native engine build fetches
-`mikeoliphant/NeuralAudio` with its submodules and requires Homebrew PortAudio
-on macOS. Use `--no-engine` when that toolchain is not available.
+The default install prepares the exact models used by the built-in preset
+catalog and all 34 official TONE3000 dry-input WAV files. It is safe to rerun:
+existing database rows and non-empty files are reused. `--starter-dry` keeps the
+first download to ten common guitar samples.
 
-**Third-party dependency note.** The RTNeural checkout inside NeuralAudio
-vendors Eigen as a plain directory that currently points at Eigen master
-(3.4.90, a 3.5 pre-release), which is incompatible with NAM Core: it drops
-`unsupported/Eigen/FFT` (required by NAM `linear.cpp`) and removes
-`Eigen::placeholders::lastN` (used by NeuralAudio `LSTM.h`/`LSTMDynamic.h`).
-If `cpp/build.sh` fails on either symbol, replace
-`third_party/NeuralAudio/deps/RTNeural/modules/Eigen` with the Eigen 3.4.0
-source tarball from GitLab
-(`gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz`) and patch
-`Eigen::placeholders::lastN(...)` → `Eigen::lastN(...)` in the two LSTM headers
-before rebuilding. See the comment in `install.sh` at the clone step.
+To inspect the interface without an audio backend, launch with:
 
-The generated runtime data is kept under `data/` and is intentionally ignored
-by Git. To prepare the same starter content manually:
-
-```bash
-bin/gigbuddy preset bootstrap
-python3 src/tone3000.py dry data/dry_inputs
-bin/gigbuddy preset list
+```
+.venv/bin/python -m tui --no-engine
 ```
 
-To import an additional tone, search first and then use the real ID returned by
-the search:
+The native engine build currently targets macOS and uses Homebrew PortAudio,
+clang++, and CMake. The TUI and library remain useful with `--no-engine` when
+those tools are not available.
 
-```bash
+To wipe all local data, the Python environment, and the built engine and start
+fresh, run the one-line uninstall:
+
+```
+./uninstall.sh
+```
+
+## A first session
+
+1. Open **PRESETS** and load a starter rig, or open **TONE3000** and search for
+   a sound such as `super reverb`, `vox ac30`, or `darkglass`.
+2. Focus **INPUT**, press `enter`, and choose a dry guitar or bass recording.
+   Press `space` to play, `s` to stop, or `l` to loop.
+3. Select a Slot and use its pack view to choose the exact model or IR you want.
+   Press `enter` to load it into the focused Slot.
+4. Compare variations with `↑`/`↓`, move a stage with `alt+↑`/`alt+↓`, or press
+   `enter` on an active stage to bypass and restore it.
+5. Save the result from **PRESETS**. Use `s` to update the active preset or `n`
+   to save a new named rig with a note.
+
+The global command palette (`ctrl+p`) can focus Presets, open audio settings,
+change the theme, or find the main commands without memorizing every key.
+
+## Find and keep tones
+
+GigBuddy gives you three ways to start:
+
+- **LOCAL** is your downloaded library. It keeps the full TONE3000 metadata,
+  shows what is installed, and lets you install or uninstall at tone or model
+  level.
+- **TONE3000** is live search over the public catalog, with trending results,
+  sorting, type filters, and pack-level model selection.
+- **TOP CREATORS** lets you browse the official creator leaderboard, inspect a
+  creator profile, and jump straight into that creator's tones.
+
+Search can stay simple or become precise:
+
+```
+super reverb @tone3000
+author:tone3000 tag:clean super reverb
+make:"Two Rock Traditional Clean" @coretonecaptures
+tag:"edge of breakup" marshall
+```
+
+Search first, then import the real ID returned by TONE3000:
+
+```
 bin/gigbuddy tone search "fender super reverb"
 bin/gigbuddy tone import <tone-id>
 bin/gigbuddy tone list
 bin/gigbuddy tone show <tone-id>
 ```
 
-## TUI (realtime tone-chain console)
+Import is idempotent. Files are stored under `data/tones/`, while metadata stays
+queryable in `data/gigbuddy.db`. NAM captures use `.nam`; cabinet and other IR
+assets use `.wav`.
 
-The TUI starts the realtime engine by default. Use `--no-engine` when the engine
-is already running in another terminal.
+## Make a rig your own
 
-```bash
-# optional terminal 1: realtime engine (hot-swap + level telemetry)
-# 省略 --in/--out 使用系统默认音频设备；设备列表与选择见 TUI AUDIO SETTINGS 面板
-./bin/realtime_cli --live data/live_chain.json --level-file data/level.json
-
-# terminal 2: TUI (Textual; omit --no-engine when this engine is running)
-.venv/bin/python -m tui --no-engine
-```
-
-TUI features (v0.2):
-- **Library browser** (left): four view tabs — LOCAL (imported tones), TONE3000
-  (live search + trending + sortable results with per-tab SORT/TYPE filters) and
-  TOP CREATORS (6-column leaderboard: Rank/Creator/Tones/Downloads/Fav/Models,
-  Most Tones by default with its own SORT bar; enter/double-click a creator row
-  jumps to a TONE3000 `@author` search of that creator's tones). Search syntax:
-  `@author`, `#tag`, `author:name`, `tag:name`, `make:"full device name"`.
-- **Tone-chain panel** (right): INPUT plus 0–6 ordered Slots with derived
-  uppercase labels and state lamps. `tab/shift+tab` navigates Slots;
-  `↑/↓` steps a Slot through its pack's models and `alt+↑/alt+↓` reorders
-  adjacent Slots. `+` adds, `d` deletes, and `enter` toggles BYPASS/restore.
-  Parameters are fully editable: `g·G / m·M / q·Q` step, hold for repeated
-  stepping, click the center dot to restore the protocol default, and click the
-  value to type it directly (gain/master 0–10, quality 0–1).
-- **Detail pane** (right, under the chain): dual-mode — Description
-  (metadata) ↔ Selection (pack file list, hot-swap with enter) switched by
-  `[/]` or the view-tab strip. Focusing a Slot opens its pack; focusing a
-  TOP CREATORS row shows that author's profile (bio + verified badge); a
-  successful author verification is cached locally and the badge is reused in
-  every author display; remote tones show a downloadable file list whose rows
-  open the pack install screen.
-- **AUDIO**: the compact bar keeps live levels + MUTE; AUDIO SETTINGS has
-  input/output devices (System Default first), buffer, sample rate and latency.
-- **Dry input playback**: the INPUT row can play a dry guitar file
-  (space play/pause, s stop, l loop) — pick the source with enter.
-- **Presets**: the Presets pane owns `n` (Save As), `s` (save active), `e`
-  (edit a full Slot/parameter/note draft), `r` (rename), `d` (delete),
-  `enter` (load), and `ctrl+z`/`ctrl+shift+z` undo/redo preset application.
-  Preset writes are scoped to this pane; the global `ctrl+p` command palette
-  can focus the pane or open Save/Save As.
-  Preset search is local and one-line: `name:...`, `note:...`, `file:...`,
-  and `id:...` (model ID or tone ID), with `Updated` and `Name` sorting.
-- **Level meter** (bottom): 0.3s refresh from the engine.
-
-Search examples:
-
-```text
-super reverb @tone3000
-author:tone3000 tag:clean super reverb
-two rock clean @coretonecaptures
-make:"Two Rock Traditional Clean" @coretonecaptures
-tag:"edge of breakup" marshall
-```
-
-Engine hot-swap (`--live`): watches `data/live_chain.json` (`slots[]`, parameters,
-input and mute), swaps the complete chain atomically; `--level-file` feeds levels
-back as JSON.
-
-## gigbuddy CLI (agent-facing interface)
+The chain is deliberately simple to reason about:
 
 ```
-gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N] [--query Q] [--json]
-gigbuddy tone search <query> [--gear ...] [--limit N] [--json]   # TONE3000 live
-gigbuddy tone show <id> [--json]                                 # full metadata
-gigbuddy tone import <id>                                        # download + persist
-gigbuddy chain get                                               # cat live_chain.json
-gigbuddy chain set '<json>'                                      # write it (hot-swap)
-gigbuddy preset seed                                             # download starter models, then seed
-gigbuddy preset seed --replace                                   # delete all presets, download, rebuild
-gigbuddy preset seed --local-only                                # seed only already-downloaded models
-gigbuddy preset list                                             # named chain snapshots
-gigbuddy preset save <name> [--note "..."]                       # snapshot current chain
-gigbuddy preset load <name>                                      # apply (engine hot-swap)
-gigbuddy preset current                                          # active name; * means dirty
-gigbuddy preset rename <old> <new>                               # rename, preserving active
-gigbuddy preset note <name> [note]                               # set / clear description
-gigbuddy preset show <name> / delete <name>                      # inspect / remove
+INPUT → gain → Slot 1 → Slot 2 → … → Slot 6 → master → OUTPUT
 ```
 
-Presets store canonical ordered `slots[]` snapshots with model **logic
-references** (`model_id`) and paths resolved at load time — library renames
-never break a preset. Legacy flat `model`/`ir` presets are read and normalized
-in memory only; new writes contain `slots[]`. The active preset is shared by
-the CLI and TUI. In the PRESETS pane, use `space` / `a` / `d` / `esc` for
-select, select all, bulk delete, and clear; `n` / `r` / `e` create, rename, or
-edit the focused preset.
+Empty Slots are harmless signal-through positions. Slot order is the signal
+order, and the same model may be used more than once when you want to stack a
+stage. Gain, master, and NAM quality are chain-level controls you can adjust
+live; mute is a live output control and does not erase the saved master
+setting.
 
-LOCAL uses the same `space` / `a` / `d` / `esc` selection model. Uninstalling
-moves managed files to `data/.trash`, clears `models.local_path`, and retains
-tone/model metadata. Active-chain files are blocked; preset dependencies require
-an extra confirmation. The compact main AUDIO bar keeps live levels and MUTE
-visible; AUDIO SETTINGS opens input/output, buffer, sample rate, and latency.
+Presets let you capture a whole rig — chain, model references, parameters, and
+notes — and bring it back with one action, either overwriting the current
+preset or saving under a new name. They are shared by the TUI and CLI, store
+stable model references, and resolve the current local file path when loaded,
+so reorganizing your library does not silently break a saved rig. Older flat
+`model`/`ir` presets remain readable and are normalized to the v0.2 Slot format
+when used.
 
-Notes:
-- `gear` domain is `amp` / `cab` / `amp-cab` (no `ir`); IR tones are `gear=cab`, `platform=ir`.
-- Import is idempotent (files skip when present, rows upsert). Files are grouped
-  under `data/tones/<tone-id>-<title-slug>/` and keep TONE3000's **semantic model
-  name** (`models.name`, same as the site's zip download — spaces preserved);
-  use `tone show` for the real path. IR tones record architecture `"IR"` and
-  download `.wav` files.
-- The gigbuddy skill (`.claude/skills/gigbuddy`) drives this CLI end to end; its
-  anti-invention rules (tone ids only from real search output) apply to any agent use.
+## Optional automation
 
-## Directory structure
+GigBuddy works entirely from the TUI. If you want scripts or an external agent
+to drive it, the CLI exposes the same library, chain, and preset operations:
 
 ```
-cpp/            nam_cli.cpp (offline NAM render CLI)
-                realtime_cli.cpp (realtime engine: --live hot-swap + --level-file + VU)
-src/            library.py (SQLite schema + gigbuddy CLI) / tone3000.py (TONE3000 layer)
-                render.py (offline render pipeline)
-tui/            Textual UI: app.py (layout/hotkeys) / panels.py (chain/detail/meter)
-                library_panel.py (browser) / picker.py (tone picker) / live.py (file channel)
-scripts/        gen_test_wav.py (fallback test-signal generator)
-data/           (gitignored: dry inputs / outputs / tone cache / live_chain.json / level.json / gigbuddy.db)
-third_party/    (gitignored: NeuralAudio + deps, fetched by scripts)
-docs/           SPEC-v2.md (decoupled architecture) / chain-schema.md (chain DSL)
+gigbuddy tone search "marshall plexi" --json
+gigbuddy tone import <tone-id>
+gigbuddy preset list
+gigbuddy preset load <name>
+gigbuddy chain get
+gigbuddy chain set '{"slots": [], "gain": 1.0, "master": 1.0}'
 ```
 
-## Tone-chain format
+The CLI and TUI share the local database and `data/live_chain.json`. A running
+engine watches that file and applies valid chain changes without requiring a
+restart. The `gigbuddy` skill under `.claude/skills/gigbuddy` adds a guarded
+natural-language workflow for agents; it only uses tone IDs returned by real
+search results.
 
-Current `data/live_chain.json` uses an ordered `slots[]` array with 0–6 entries;
-each entry is `{ "path": "..." }` or `{ "path": null }`. The protocol also
-contains `gain`, `master`, `quality`, `mute`, `input`, and a non-negative
-`revision`. The managed-only `_transaction_id` is used for one candidate or
-rollback and is not part of preset data. `model`/`ir` are read-only legacy input;
-canonical writes remove them. Full rules are in
-`docs/ui-interaction-spec-v0.2.md` and `docs/adr/0001-slots-chain-protocol.md`.
+## Good to know
 
-## Known limitations (v0.2)
+- The first search, creator view, or download needs network access. Once a tone
+  is imported, its files and metadata are available locally.
+- `--no-engine` is a browse-and-edit mode; live audio and level telemetry need
+  the native engine and an available audio device.
+- The public TONE3000 API does not expose follower/following counts, so creator
+  profiles show the official public statistics that are available.
+- Core code is MIT. The runtime uses NeuralAudio, NAM Core, RTNeural, Eigen,
+  PortAudio, and Textual under their respective licenses.
 
-- **TOP CREATORS** reads TONE3000's official `user_public_counts` leaderboard,
-  the same source used by `tone3000.com/top-creators`. Tones, Downloads,
-  Favorites, and Models are stable server-side aggregates.
-- **Creator followers/following** are not shown: the public users API exposes
-  no follower fields and the website is behind Cloudflare.
-- **Remote data loads are network-bound** — the first TOP CREATORS visit waits
-  for one leaderboard request; displayed statistics are not rewritten later.
-- Notifications and a few table refreshes are timing-sensitive under heavy
-  load; rare test flakes have been observed in CI-style runs.
+## What's next
+
+- Local VST3 effects and pedalboard stages
+- Crossfade switching for even smoother changes between sounds
+- Render-versus-reference tone evaluation
+- Additional audio-stream output options
 
 ## License
 
-MIT (to be finalized). Dependencies: NeuralAudio (MIT), NAM Core (MIT), RTNeural (BSD-3),
-Eigen (MPL-2), math_approx (MIT), PortAudio (MIT-like), Textual (MIT).
+MIT (to be finalized). See the dependency licenses in the source tree.
 
-## Roadmap
+## Further reading
 
-- [x] MVP: render core (NeuralAudio) + amp/IR pipeline + TONE3000 retrieval layer
-- [x] Blueprint DSL v0.1 (docs/chain-schema.md) + GigBuddy skill (NL → chain → render)
-- [x] Realtime engine: hot-swap (--live), level telemetry, USB interface verified
-- [x] v2 decoupling: SQLite tone library (full metadata) + gigbuddy CLI + TUI browser
-      (agent removed from TUI; DB open to external agents)
-- [ ] Local VST3 effects (pedalboard, subprocess-isolated; activate placeholder nodes)
-- [ ] Crossfade switching (anti-click, guitarix delta-delay style)
-- [ ] Render-vs-reference automatic evaluation loop
-- [ ] AudioStream interface output
+- [v0.2 interaction guide](docs/ui-interaction-spec-v0.2.md)
+- [Tone-chain protocol](docs/adr/0001-slots-chain-protocol.md)
+- [Library schema](docs/library-schema.md)

@@ -733,6 +733,8 @@ def test_preset_list_and_delete(tmp_path):
 def test_preset_group_is_derived_from_name_only():
     assert library.preset_group("band-guitar-rhcp") == ("Band Gear", "Guitar")
     assert library.preset_group("classic-bass-ampeg-svt") == ("Classic Pairing", "Bass")
+    assert library.preset_group("fender-super-reverb-ts9") == ("Classic Amplifiers", "Guitar")
+    assert library.preset_group("darkglass-alpha-omega") == ("Classic Amplifiers", "Bass")
     assert library.preset_group("my-tone") == ("Custom", "Other")
 
 
@@ -740,7 +742,7 @@ def test_preset_seed_uses_library_models(tmp_path, monkeypatch):
     _put_models(tmp_path)
     monkeypatch.setattr(
         library, "SEED_CHAINS",
-        [("test-chain", "note", 1001, 1002)])
+        [("test-chain", "note", [(1001, False), (1002, False)])])
     assert library.preset_seed() == 1
     p = library.preset_get("test-chain")
     assert p["chain"]["slots"] == [
@@ -755,7 +757,7 @@ def test_preset_seed_uses_library_models(tmp_path, monkeypatch):
 def test_preset_seed_skips_missing_tones(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         library, "SEED_CHAINS",
-        [("ghost", "note", 999999, None)])
+        [("ghost", "note", [(999999, False)])])
     assert library.preset_seed() == 0
     assert "skipped" in capsys.readouterr().out
     assert library.preset_get("ghost") is None
@@ -766,7 +768,7 @@ def test_preset_seed_skips_stale_database_paths(tmp_path, monkeypatch, capsys):
     (library.TONES_DIR / "SR AKG 414.nam").unlink()
     monkeypatch.setattr(
         library, "SEED_CHAINS",
-        [("stale", "note", amp["id"], None)])
+        [("stale", "note", [(amp["id"], False)])])
 
     assert library.preset_seed() == 0
     assert library.preset_get("stale") is None
@@ -779,7 +781,7 @@ def test_preset_seed_replace_deletes_existing_presets(tmp_path, monkeypatch):
     library.preset_save("old")
     monkeypatch.setattr(
         library, "SEED_CHAINS",
-        [("new", "note", 1001, None)])
+        [("new", "note", [(1001, False)])])
 
     assert library.preset_seed(replace=True) == 1
     assert library.preset_get("old") is None

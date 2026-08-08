@@ -222,12 +222,12 @@ v0.2 沿用 v0.1.4 的最新参数操作规则：点击 `gain`、`master` 或 `q
 
 实现和验收规则：
 
-- `orange-tolex` 是 v0.2 的默认候选，因为它最直接承接图 1 的橙色箱体，同时保留深色工作台的长时间可读性。
+- `gigbuddy` 保留为 v0.2 默认主题，确保升级不改变用户已经熟悉的工作台；`orange-tolex` 是恢复的第一套可选主题。
 - `$primary` 负责当前面板边框、标题和主要光标；`$accent` 负责编辑光标、hover 反色和可执行 action token；二者不能交换职责。
 - `$secondary` 只能用于非当前面板光标、滚动条和安静边界；不能替代 `$success` 或 `$warning`。
 - `$warning` 需要同时与 `$success`、`$error` 可辨，且不能只靠色相表达状态；状态文字和符号仍按 4.1 节执行。
 - 每个主题至少验证正文对 `$background`、正文对 `$panel`、`$primary` 对 `$background`、`$accent` 对 `$background` 的对比度；失败时优先调亮文字或主题源色，不修改固定状态色。
-- `british-green-oxblood` 和 `surf-cream-coral` 是补充设计组合，不表示仓库已经支持对应主题；主题注册、`t` 切换、截图和 `NO_COLOR` 验收完成前不得宣称已实现。
+- 六套恢复的音箱灵感组合都作为 v0.2 可选主题注册；`gigbuddy` 仍是默认主题。主题切换使用 `t`，不改变布局、状态语义或固定状态色。
 
 ### 4.2 文本层级
 

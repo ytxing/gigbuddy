@@ -979,10 +979,18 @@ def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
     model_id = _preset_model_id(item.get("model_id"), index)
     raw_path = item.get("path")
     if raw_path is None:
-        if model_id is not None and not legacy:
+        # Bypassed slots keep the model reference with no active file: the
+        # engine skips them until the user activates the slot.
+        candidate = item.get("candidate")
+        if candidate is not None:
+            return {"model_id": model_id, "path": None,
+                    "candidate": _preset_storage_path(candidate),
+                    "bypass": True}
+        if model_id is not None and not legacy and not item.get("bypass"):
             raise ValueError(
                 f"Preset Slot {index + 1:02d} cannot have model_id without path")
-        return {"model_id": model_id, "path": None}
+        return {"model_id": model_id, "path": None,
+                **({"bypass": True} if item.get("bypass") else {})}
     return {"model_id": model_id,
             "path": _preset_storage_path(raw_path, index)}
 
@@ -1096,7 +1104,16 @@ def _preset_chain_from_live(cfg: dict) -> dict:
             raise ValueError(f"Live Slot {index + 1:02d} is invalid")
         path = item.get("path")
         if path is None:
-            slots.append({"model_id": None, "path": None})
+            candidate = item.get("candidate")
+            slots.append({
+                # 与 active 槽一致：candidate 路径反查 model id（preset 槽
+                # 以 Model ID 为身份；外部文件反查不到时为 None）。
+                "model_id": (_model_id_for_path(candidate)
+                             if candidate else None),
+                "path": None,
+                **({"candidate": _preset_storage_path(candidate),
+                    "bypass": True} if candidate else {}),
+            })
             continue
         slots.append({
             "model_id": _model_id_for_path(path),
@@ -1354,6 +1371,18 @@ def _resolved_preset_chain(preset: dict) -> dict:
     slots = []
     errors = []
     for index, slot in enumerate(ch["slots"]):
+        if slot.get("bypass"):
+            # Bypassed slot: keep the model reference, no active file. The
+            # recovery candidate (stored path, or resolved from model_id)
+            # rides along so the UI can show BYPASS with the model name
+            # instead of an empty slot.
+            model_id = slot.get("model_id")
+            candidate = slot.get("candidate") or (
+                _model_path(model_id) if model_id is not None else None)
+            slots.append({"model_id": model_id, "path": None,
+                          **({"candidate": _preset_storage_path(candidate)}
+                             if candidate else {})})
+            continue
         try:
             slots.append({"model_id": slot.get("model_id"),
                           "path": _resolve_preset_slot(slot, index)})
@@ -1424,7 +1453,12 @@ def preset_load_by_id(preset_id: int) -> dict | None:
     # missing later Slot must leave the current live file untouched.
     cur = chain_get()
     cfg: dict = {
-        "slots": [{"path": slot["path"]} for slot in resolved["slots"]],
+        "slots": [
+            {"path": slot["path"],
+             **({"candidate": slot["candidate"]}
+                if slot.get("candidate") else {})}
+            for slot in resolved["slots"]
+        ],
         "gain": resolved["gain"],
         "master": resolved["master"],
         "quality": resolved["quality"],
@@ -1439,17 +1473,103 @@ def preset_load_by_id(preset_id: int) -> dict | None:
 
 # Built-in catalog, resolved from exact local model ids at seed time.
 # (name, note, amp_model_id, ir_model_id|None)
+# Built-in catalog, resolved from exact local model ids at seed time.
+# (name, note, model_ids) — model_ids follow the chain signal order:
+# [drive/fuzz pedal, amp, cabinet IR]; a one- or two-slot chain is fine.
+# Every slot pair was verified against TONE3000: model ids, gain settings,
+# and popularity (downloads/favorites, verified authors preferred).
 SEED_CHAINS = [
-    ("band-guitar-rhcp", "Band Gear · Guitar · John Frusciante: Marshall Major 200 full rig", 383442, None),
-    ("band-guitar-green-day", "Band Gear · Guitar · Billie Joe: Marshall 1959BJA full rig", 684630, None),
-    ("band-bass-rhcp", "Band Gear · Bass · Flea: Gallien-Krueger RB800 direct", 419198, None),
-    ("band-bass-green-day", "Band Gear · Bass · Green Day style: Ampeg SVT-CL pushed direct (approximation)", 382795, None),
-    ("classic-guitar-beano", "Classic Pairing · Guitar · 1966 Marshall Bluesbreaker + G12 Alnico full rig", 677999, None),
-    ("classic-guitar-vox-ef86", "Classic Pairing · Guitar · Vox AC30/4 EF86 + 2x12 Alnico full rig", 383682, None),
-    ("classic-guitar-jtm45", "Classic Pairing · Guitar · Marshall JTM45 + Marshall Greenback 4x12", 494341, 239163),
-    ("classic-guitar-fender-super", "Classic Pairing · Guitar · Fender Super Reverb 1977 full rig", 379720, None),
-    ("classic-bass-gk-rb800", "Classic Pairing · Bass · Gallien-Krueger RB800 direct", 419198, None),
-    ("classic-bass-ampeg-svt", "Classic Pairing · Bass · Ampeg SVT-CL clean direct", 382790, None),
+    ("fender-super-reverb-ts9",
+     "Fender Super Reverb 1977 (TONE3000 official, 140K downloads) driven by an "
+     "Ibanez TS9 Tube Screamer at Drive 7 / Tone 7 / Level 7 - massive clean "
+     "headroom pushed into a tight SRV-style overdrive.",
+     [(381611, False), (379720, False)]),
+    ("fender-deluxe-reverb-morning-glory",
+     "Fender Deluxe Reverb '65 Reissue (69K downloads) with a JHS Morning Glory "
+     "v3 at Drive 2 / Tone 8 - transparent blackface sparkle pushed into "
+     "edge-of-breakup.",
+     [(419178, False), (383453, False)]),
+    ("fender-twin-reverb-bd2",
+     "Fender '65 Twin Reverb with Celestion G12-65 (17K downloads) and a Boss "
+     "Blues Driver BD-2 at Gain 900 / Tone 900 / Volume 1200 - big clean amp "
+     "with 60s blues drive.",
+     [(379749, False), (381338, False)]),
+    ("fender-tweed-deluxe-5e3",
+     "1960 Fender Tweed Deluxe 5E3 (official) - narrow-panel 1x12 combo, "
+     "cranked vintage compression and overdrive, no pedal needed.",
+     [(383783, False)]),
+    ("fender-deluxe-reverb-klon",
+     "Fender '65 Deluxe Reverb Reissue boosted with a J. Rockett Archer "
+     "(Klon-style) - blackface sparkle into singing sustain at the edge of "
+     "breakup.",
+     [(382101, False)]),
+    ("vox-ac30-ef86-ts808",
+     "Vox AC30/4 1961 Fawn EF86 (Amalgam Audio, verified, 30K downloads) with "
+     "an Ibanez TS808 at Hot / Level 6 / OD 6 / Tone 1 - EF86 chime pushed "
+     "into classic British overdrive.",
+     [(493737, False), (383682, False)]),
+    ("marshall-jcm800-klon",
+     "Marshall JCM800 with a Klon Centaur and a Marshall 1960BV cabinet "
+     "(SM57 x2) - Klon-driven high-gain rock in one capture.",
+     [(381187, False)]),
+    ("marshall-jcm800-ds1",
+     "Marshall JCM800 2203 Modified (2dor, verified, 38K downloads) with a "
+     "Boss DS-1 at Tone 5 / Volume 10 / Gain 7 - the classic 80s "
+     "distortion-into-marshall combination.",
+     [(381655, False), (567079, False)]),
+    ("marshall-plexi-ts9",
+     "Marshall JMP-50 Lead 1969 Plexi (Amalgam Audio, verified, 33K downloads) "
+     "with an Ibanez TS9 at Drive 0 / Tone 6 / Level 6 used as a clean boost - "
+     "golden-era Plexi crunch.",
+     [(381614, False), (418470, False)]),
+    ("marshall-1959bja-greenback",
+     "Marshall 1959BJA high input stage 4 into a Marshall 1960TV Greenback "
+     "4x12 (M201) - Green Day / Billie Joe territory.",
+     [(670781, False), (656897, False)]),
+    ("frusciante-big-muff-major",
+     "John Frusciante (RHCP) chain: Electro-Harmonix Op-Amp Big Muff at "
+     "Volume 6 / Tone 2 / Sustain 5 into a Marshall Major 200 (1982B cabinet) - "
+     "fuzz poured into a 200W Plexi.",
+     [(413497, False), (383442, False)]),
+    ("hendrix-fuzz-face-plexi",
+     "Jimi Hendrix chain: Dunlop Hendrix Fuzz Face (mid cut) into a Marshall "
+     "JMP-50 1969 Plexi - the 1969 Woodstock fuzz-into-plexi sound.",
+     [(420077, False), (418470, False)]),
+    ("page-tonebender-plexi",
+     "Led Zeppelin chain: Boss TB-2w Tone Bender at 01-9V into a Marshall "
+     "JMP-50 1969 Plexi - Page-style fuzz lead.",
+     [(432892, False), (418470, False)]),
+    ("ampeg-svt-cl",
+     "Ampeg SVT-CL 300W all-tube with a 6x10 cabinet (TONE3000 official, "
+     "41K downloads) - harmonically rich classic rock bass.",
+     [(379984, False)]),
+    ("ampeg-svt-cl-preamp",
+     "Ampeg SVT-CL bass preamp capture (Deathblossom Audio, verified) into an "
+     "Ampeg SVT 8x10 cabinet (SM57) - studio-grade preamp front end with the "
+     "classic all-tube bass cabinet tone.",
+     [(382790, False), (80912, False)]),
+    ("ampeg-b15-fliptop",
+     "1960s Ampeg B-15 Fliptop (TONE3000 official) - Motown vintage bass "
+     "combo tone.",
+     [(379842, False)]),
+    ("gk-rb800",
+     "Gallien-Krueger RB800 at G5.0 (Arlington Audio, 7.4K downloads) - "
+     "Flea-style transistor bass punch with the pack's Mid Contour tone-switch "
+     "IR (bypassed by default - shaping, not a cabinet IR; activate for the "
+     "switchable-cab character).",
+     [(419198, False), (72421, True)]),
+    ("hartke-lh1000",
+     "Hartke LH1000 rack bass head into a Gallien-Krueger 4x10 cabinet "
+     "(Studio Amp Captures, 11K downloads) - modern rock bass.",
+     [(413046, False)]),
+    ("darkglass-b7k-ultra",
+     "Darkglass Microtubes B7K Ultra (official Darkglass account) into an "
+     "Aguilar DB751 and DG412ES cabinet - light to medium modern bass drive.",
+     [(413366, False)]),
+    ("darkglass-alpha-omega",
+     "Darkglass Alpha Omega fuzz channel (official Darkglass account) into an "
+     "Aguilar DB751 and DG412ES cabinet (SM7B) - heavy modern metal bass.",
+     [(418277, False)]),
 ]
 
 # The catalog stores model IDs so a preset remains tied to one exact capture.
@@ -1457,16 +1577,36 @@ SEED_CHAINS = [
 # model. These mappings were resolved from TONE3000's public ``models`` table
 # and are deliberately kept separate from the canonical preset payload.
 STARTER_MODEL_TONES = {
-    383442: 51310,
-    684630: 78832,
-    419198: 2694,
-    382795: 45809,
-    677999: 77706,
-    383682: 53601,
-    494341: 33505,
-    379720: 19,
-    382790: 45809,
-    239163: 45022,
+    381611: 36827,   # Ibanez TS9
+    379720: 19,      # Fender Super Reverb 1977
+    419178: 2805,    # JHS Morning Glory v3
+    383453: 51649,   # Fender Deluxe Reverb '65
+    379749: 12505,   # Boss BD-2
+    381338: 35497,   # Fender '65 Twin + Celestion
+    383783: 54580,   # Fender Tweed Deluxe 5E3
+    382101: 43185,   # Fender DR + Klon
+    493737: 30104,   # Ibanez TS808
+    383682: 53601,   # Vox AC30/4 EF86
+    381187: 33296,   # Marshall JCM800 + Klon
+    381655: 38560,   # Boss DS-1
+    567079: 44209,   # Marshall JCM800 2203 Modified
+    381614: 36827,   # Ibanez TS9 (clean boost)
+    418470: 65578,   # Marshall JMP-50 1969 Plexi
+    670781: 76884,   # Marshall 1959BJA
+    656897: 75087,   # Marshall 1960TV Greenback cab
+    413497: 37818,   # EHX Op-Amp Big Muff
+    383442: 51310,   # Marshall Major 200
+    420077: 1531,    # Dunlop Hendrix Fuzz Face
+    432892: 2316,    # Boss TB-2w Tone Bender
+    379984: 28202,   # Ampeg SVT-CL
+    382790: 45809,   # Ampeg SVT-CL Preamp
+    80912: 1708,     # Ampeg SVT 8x10 cabinet IR (SM57)
+    379842: 26828,   # Ampeg B-15 Fliptop
+    419198: 2694,    # GK RB800
+    72421: 64815,    # GK RB800 Mid Contour cabinet IR
+    413046: 5867,    # Hartke LH1000
+    413366: 27698,   # Darkglass B7K Ultra
+    418277: 27697,   # Darkglass Alpha Omega
 }
 
 
@@ -1478,6 +1618,12 @@ def preset_group(name: str) -> tuple[str, str]:
         instrument = {"guitar": "Guitar", "bass": "Bass"}.get(parts[1])
         if instrument:
             return category, instrument
+    # v0.2 catalog: brand-prefixed names (fender/vox/marshall = guitar,
+    # ampeg/gk/hartke/darkglass = bass).
+    if parts[0] in {"fender", "vox", "marshall"}:
+        return "Classic Amplifiers", "Guitar"
+    if parts[0] in {"ampeg", "gk", "hartke", "darkglass"}:
+        return "Classic Amplifiers", "Bass"
     return "Custom", "Other"
 
 
@@ -1492,10 +1638,8 @@ def bootstrap_starter_presets(*, quiet: bool = False,
     """
     grouped: dict[int, list[int]] = {}
     unresolved: list[int] = []
-    for _name, _note, amp_model_id, ir_model_id in SEED_CHAINS:
-        for model_id in (amp_model_id, ir_model_id):
-            if model_id is None:
-                continue
+    for _name, _note, model_ids in SEED_CHAINS:
+        for model_id in model_ids:
             tone_id = STARTER_MODEL_TONES.get(model_id)
             if tone_id is None:
                 unresolved.append(model_id)
@@ -1674,8 +1818,8 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
 def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
     """Create the built-in recommendation presets from the local library.
 
-    Chains whose amp/IR are not in the library are skipped with a warning
-    (never fails the rest). Returns the number of presets written.
+    Chains whose model slots are not all in the library are skipped with a
+    warning (never fails the rest). Returns the number of presets written.
     """
     if replace:
         with connect() as conn:
@@ -1683,41 +1827,40 @@ def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
             conn.execute("DELETE FROM settings WHERE key = 'active_preset'")
             conn.commit()
     made = 0
-    for name, note, amp_id, ir_id in SEED_CHAINS:
-        amp_path = _installed_model_path(amp_id)
-        if not amp_path:
-            if not quiet:
-                print(f"[preset seed] skipped {name}: model {amp_id} is not available locally")
-            continue
-        chain = {
-            "slots": [{"model_id": amp_id,
-                       "path": _preset_storage_path(amp_path)}],
-            "gain": 1.0, "master": 1.0, "quality": 1.0,
-        }
-        if ir_id is not None:
-            ir_path = _installed_model_path(ir_id)
-            if not ir_path:
-                if not quiet:
-                    print(f"[preset seed] skipped {name}: IR model {ir_id} is not available locally")
+    for name, note, model_slots in SEED_CHAINS:
+        slots = []
+        for model_id, bypass in model_slots:
+            if bypass:
+                # 可选/塑形类 IR：默认 bypass（path=None，引擎跳过），
+                # 模型引用保留在 preset 里，激活时按 model_id 解析。
+                slots.append({"model_id": model_id, "path": None,
+                              "bypass": True})
                 continue
-            chain["slots"].append({
-                "model_id": ir_id,
-                "path": _preset_storage_path(ir_path),
-            })
-        chain = _canonical_preset_chain(chain)
-        now = datetime.now(timezone.utc).isoformat()
-        with connect() as conn:
-            conn.execute(
-                "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
-                "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
-                (name, note, json.dumps(chain, ensure_ascii=False), now, now))
-            conn.commit()
-        made += 1
-        if not quiet:
-            print(f"[preset seed] {name}: amp model {amp_id}"
-                  + (f" + ir model {ir_id}" if ir_id is not None else " (IR bypass)"))
+            model_path = _installed_model_path(model_id)
+            if not model_path:
+                if not quiet:
+                    print(f"[preset seed] skipped {name}: model {model_id} is not available locally")
+                break
+            slots.append({"model_id": model_id,
+                          "path": _preset_storage_path(model_path)})
+        else:
+            chain = {
+                "slots": slots,
+                "gain": 1.0, "master": 1.0, "quality": 1.0,
+            }
+            chain = _canonical_preset_chain(chain)
+            now = datetime.now(timezone.utc).isoformat()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
+                    "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
+                    (name, note, json.dumps(chain, ensure_ascii=False), now, now))
+                conn.commit()
+            made += 1
+            if not quiet:
+                print(f"[preset seed] {name}: {len(model_slots)} slot(s)")
     return made
 
 

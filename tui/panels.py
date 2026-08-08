@@ -276,8 +276,8 @@ class InputNodeWidget(NodeWidget):
     def action_open_source(self) -> None:
         self.post_message(self.SourceRequested())
 
-    # PLAY 块宽度 = 下方箭头切换按钮的 hover 块宽度（奇数内容宽，右缘对齐）。
-    PLAY_W = 9
+    # 右侧三块（STOP/LOOP/PLAY）统一宽度：高亮背景宽度一致，整组右对齐。
+    PLAY_W = 7
 
     def __init__(self) -> None:
         super().__init__("INPUT", "instrument")
@@ -286,8 +286,10 @@ class InputNodeWidget(NodeWidget):
         self.play_pos = 0.0
         self.play_loop = False
         self._play_hover = False
-        self._node_hover = False  # 悬停在左侧文本区（PLAY 块之外）
-        self._left_len = 0  # 行首文本的可视宽度（PLAY 块坐标命中用）
+        self._stop_hover = False
+        self._loop_hover = False
+        self._node_hover = False  # 悬停在左侧文本区（右侧块之外）
+        self._left_len = 0  # 行首文本的可视宽度（右侧块坐标命中用）
         self._update_border()
 
     def _update_border(self) -> None:
@@ -318,52 +320,98 @@ class InputNodeWidget(NodeWidget):
         self._update_border()   # 播放灯（边框）跟随状态
         self.refresh()
 
-    def _play_block(self) -> str:
-        """Right-pinned PLAY/PAUSE block: fixed PLAY_W cells so the hover
-        highlight lines up with the switch-arrow blocks below."""
-        word = "PAUSE" if self.play_state == live.PLAY_PLAYING else "PLAY"
-        pad = self.PLAY_W - len(word)
+    def _block_widths(self) -> tuple[int, int, int]:
+        """STOP / LOOP / PLAY 三块统一宽度（高亮背景一致，整组右对齐）。"""
+        return self.PLAY_W, self.PLAY_W, self.PLAY_W
+
+    def _block(self, word: str, width: int, hover: bool) -> str:
+        pad = width - len(word)
         text = " " * (pad // 2) + word + " " * (pad - pad // 2)
-        if self._play_hover:
+        if hover:
             return f"[b $background on $accent]{text}[/]"
         return f"[b]{text}[/]"
 
-    def _play_span(self) -> tuple[int, int]:
-        """PLAY 块实际显示区间（相对 widget 内容区 x）。
+    def _stop_block(self) -> str:
+        return self._block("STOP", self._block_widths()[0], self._stop_hover)
 
-        render 里 PLAY 块右对齐贴节点右缘：起点 = max(左缘, 宽 - PLAY_W)，
-        命中范围必须与显示位置一致，否则点击命中与显示漂移。
+    def _loop_block(self) -> str:
+        # LOOP 开启时持续高亮背景（比 hover 的 $accent 淡一档的 $primary）；
+        # hover 优先用亮色
+        width = self._block_widths()[1]
+        if self._loop_hover:
+            return self._block("LOOP", width, True)
+        if self.play_loop:
+            pad = width - len("LOOP")
+            text = " " * (pad // 2) + "LOOP" + " " * (pad - pad // 2)
+            return f"[b $background on $primary]{text}[/]"
+        return self._block("LOOP", width, False)
+
+    def _play_block(self) -> str:
+        """PLAY/PAUSE 块。PLAY 补空格到与 PAUSE 同宽（5 字符槽），
+        切换时块内文字中心不跳动（字长 4 vs 5 不再错位）。"""
+        word = "PAUSE" if self.play_state == live.PLAY_PLAYING else "PLAY"
+        if len(word) < 5:
+            word += " "
+        return self._block(word, self._block_widths()[2], self._play_hover)
+
+    def _block_spans(self) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+        """STOP / LOOP / PLAY 三块实际显示区间（相对 widget 内容区 x）。
+
+        render 里整组右对齐、块间空一格；命中范围必须与显示位置一致，
+        否则点击命中与显示漂移。
         """
+        stop_w, loop_w, play_w = self._block_widths()
         width = self.size.width or self._display_limit()
-        start = max(self._left_len, width - self.PLAY_W)
-        return start, start + self.PLAY_W
+        total = stop_w + 1 + loop_w + 1 + play_w
+        start = max(self._left_len, width - total)
+        return ((start, start + stop_w),
+                (start + stop_w + 1, start + stop_w + 1 + loop_w),
+                (start + stop_w + 1 + loop_w + 1,
+                 start + stop_w + 1 + loop_w + 1 + play_w))
 
     def on_click(self, event: MouseEvent) -> None:
         if not self.is_file:
-            return  # 乐器模式没有 PLAY 块，旧 _left_len 会误命中
-        span = self._play_span()
-        if span[0] <= event.x < span[1]:
+            return  # 乐器模式没有 PLAY/STOP/LOOP 块，旧 _left_len 会误命中
+        stop, loop, play = self._block_spans()
+        if stop[0] <= event.x < stop[1]:
+            event.stop()
+            self.post_message(self.PlaybackRequested("stop"))
+        elif loop[0] <= event.x < loop[1]:
+            event.stop()
+            self.post_message(self.PlaybackRequested("loop"))
+        elif play[0] <= event.x < play[1]:
             event.stop()
             self.post_message(self.PlaybackRequested("toggle"))
 
     def on_mouse_move(self, event: MouseMove) -> None:
         if not self.is_file:
-            if self._play_hover or self._node_hover:
+            if (self._play_hover or self._stop_hover or self._loop_hover
+                    or self._node_hover):
                 self._play_hover = False
+                self._stop_hover = False
+                self._loop_hover = False
                 self._node_hover = False
                 self.refresh()
             return
-        span = self._play_span()
-        hovered = span[0] <= event.x < span[1]
-        node_hover = not hovered
-        if hovered != self._play_hover or node_hover != self._node_hover:
-            self._play_hover = hovered
+        stop, loop, play = self._block_spans()
+        stop_hover = stop[0] <= event.x < stop[1]
+        loop_hover = loop[0] <= event.x < loop[1]
+        play_hover = play[0] <= event.x < play[1]
+        node_hover = not (stop_hover or loop_hover or play_hover)
+        if (stop_hover != self._stop_hover or loop_hover != self._loop_hover
+                or play_hover != self._play_hover
+                or node_hover != self._node_hover):
+            self._stop_hover = stop_hover
+            self._loop_hover = loop_hover
+            self._play_hover = play_hover
             self._node_hover = node_hover
             self.refresh()
 
     def on_leave(self, event: Leave) -> None:
-        if self._play_hover or self._node_hover:
+        if self._play_hover or self._stop_hover or self._loop_hover or self._node_hover:
             self._play_hover = False
+            self._stop_hover = False
+            self._loop_hover = False
             self._node_hover = False
             self.refresh()
 
@@ -383,16 +431,20 @@ class InputNodeWidget(NodeWidget):
                     parts.append("loop")
                 tail = " [dim]" + " ".join(parts) + "[/]"
                 tail_plain = " " + " ".join(parts)
-            # 文件名与行尾 PLAY 块之间按剩余宽度分配：PLAY 块固定 9 宽并
-            # 右对齐贴节点右缘 —— 与下方 AMP/CAB 行的箭头切换列右缘对齐。
-            # REQ-043：INPUT 类型与灯已移入边框标题，框内只有文件名。
+            # 文件名与行尾 STOP/LOOP/PLAY 块组之间按剩余宽度分配：三块
+            # 固定宽、块间空一格并右对齐。REQ-043：INPUT 类型与灯已移入
+            # 边框标题。
+            stop_w, loop_w, play_w = self._block_widths()
+            block_w = stop_w + 1 + loop_w + 1 + play_w
             label = self._window(
-                self.label, max(limit - self.PLAY_W - len(tail_plain), 1))
+                self.label, max(limit - block_w - len(tail_plain), 1))
             left = f"[b]{_escape(label)}[/]{tail}"
             self._left_len = cell_len(label) + len(tail_plain)
             width = self.size.width or limit
-            gap = max(0, width - self._left_len - self.PLAY_W)
-            return f"{hl}{left}{' ' * gap}{end}{self._play_block()}"
+            gap = max(0, width - self._left_len - block_w)
+            return (f"{hl}{left}{' ' * gap}{end}"
+                    f"{self._stop_block()} {self._loop_block()} "
+                    f"{self._play_block()}")
         return (
             f"{hl}[b]Instrument[/] "
             f"[dim]{_escape(self._window(self.label, limit))}[/]{end}")

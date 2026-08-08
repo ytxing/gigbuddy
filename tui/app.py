@@ -281,7 +281,55 @@ class _ManagedChainAdapter:
             expected_fingerprint=self._restore_file_fingerprint,
         )
 
-# Warm guitar-amp palette: tube-amber accents on a dark cabinet-brown base.
+# Guitar-amp inspired palettes. Keep the source tokens in one table so each
+# theme has the same semantic surface and only its visual material changes.
+_GUITAR_AMP_THEME_SPECS = (
+    ("orange-tolex", "#17110E", "#241912", "#312015", "#492A18",
+     "#F4E5D0", "#F07820", "#A8774B", "#FFB04A", "#E0A33A"),
+    ("tweed-brass", "#181510", "#282118", "#392C20", "#4B3A27",
+     "#F4E5C4", "#D2A65A", "#9A7549", "#EBC878", "#D7923F"),
+    ("diamond-noir", "#101315", "#181C1F", "#23292C", "#31383B",
+     "#EFE9DC", "#D7B65E", "#789A9C", "#B95F78", "#D89A4A"),
+    ("blackface-silver", "#111416", "#1A1E21", "#252A2D", "#343B3E",
+     "#EFF0EB", "#D4D8D4", "#90999A", "#9CC2C4", "#D8A248"),
+    ("british-green-oxblood", "#101612", "#18221A", "#253126", "#334333",
+     "#EDE4D3", "#D0AD68", "#789176", "#B85D5C", "#D69A46"),
+    ("surf-cream-coral", "#111719", "#1C2927", "#293A35", "#385047",
+     "#F5EAD8", "#95C3B1", "#B9A98D", "#E3795B", "#D9AA52"),
+)
+
+
+def _guitar_amp_theme(spec: tuple[str, ...]) -> Theme:
+    (name, background, surface, panel, boost, foreground, primary,
+     secondary, accent, warning) = spec
+    return Theme(
+        name=name,
+        dark=True,
+        background=background,
+        surface=surface,
+        panel=panel,
+        boost=boost,
+        foreground=foreground,
+        primary=primary,
+        secondary=secondary,
+        accent=accent,
+        success=FIXED_SEMANTIC_COLORS["success"],
+        warning=warning,
+        error=FIXED_SEMANTIC_COLORS["error"],
+        variables={
+            "block-cursor-background": accent,
+            "block-cursor-foreground": background,
+            "block-cursor-text-style": "bold",
+            "input-selection-background": f"{primary} 35%",
+            # Rich metadata tables need a concrete field color. Keep it tied
+            # to the theme foreground rather than inventing a second palette.
+            "field": foreground,
+        },
+    )
+
+
+# Keep the existing GigBuddy palette as the product default. The restored
+# themes are additional choices, not a replacement for the established name.
 GIGBUDDY_THEME = Theme(
     name="gigbuddy",
     dark=True,
@@ -293,19 +341,22 @@ GIGBUDDY_THEME = Theme(
     primary="#e59a3c",
     secondary="#8f6b46",
     accent="#f5b042",
-    success="#8fb573",
+    success=FIXED_SEMANTIC_COLORS["success"],
     warning="#e0b34a",
-    error="#d96a55",
+    error=FIXED_SEMANTIC_COLORS["error"],
     variables={
         "block-cursor-background": "#f5b042",
         "block-cursor-foreground": "#1b1512",
         "block-cursor-text-style": "bold",
         "input-selection-background": "#e59a3c 35%",
-        # metadata field-name warm beige, read by Python-side rich rendering
-        # (not used in CSS); other themes fall back to their foreground.
         "field": "#d3bf9e",
     },
 )
+
+GUITAR_AMP_THEMES = (GIGBUDDY_THEME,
+                     *(_guitar_amp_theme(spec)
+                       for spec in _GUITAR_AMP_THEME_SPECS))
+GUITAR_AMP_THEME_NAMES = tuple(theme.name for theme in GUITAR_AMP_THEMES)
 
 
 class HeaderStatus(MarqueeBar):
@@ -877,7 +928,8 @@ class GigBuddyApp(App):
             int, str, float, bool, bool] | None = None
         self._param_hold_worker_active = False
         self._param_hold_last_commit_at = 0.0
-        self.register_theme(GIGBUDDY_THEME)
+        for guitar_theme in GUITAR_AMP_THEMES:
+            self.register_theme(guitar_theme)
         # Pin danger/state colors across every theme (built-in ones included)
         # before the first CSS generation picks the theme.
         for th in self.available_themes.values():
@@ -1045,8 +1097,11 @@ class GigBuddyApp(App):
         self._mutation_anchors = {}
 
     def action_next_theme(self) -> None:
-        themes = list(self.available_themes)
-        i = themes.index(self.theme)
+        themes = list(GUITAR_AMP_THEME_NAMES)
+        # A caller may intentionally start with a built-in Textual theme via
+        # ``--theme``; the next explicit theme action should still recover to
+        # the restored guitar-amp sequence instead of raising ValueError.
+        i = themes.index(self.theme) if self.theme in themes else -1
         self.theme = themes[(i + 1) % len(themes)]
         self.notify(f"Theme: {self.theme}")
 
@@ -1313,7 +1368,11 @@ class GigBuddyApp(App):
             detail.refresh_pack_active(cfg)  # pack 视图的 ▶ 标记跟随外部链变更
         library_panel.check_active_tab()
         library_panel.refresh_rows()
-        preset_panel.refresh_presets()
+        # Incremental: external fingerprint changes (chain mtime, active preset)
+        # must not clear+rebuild the table, which resets the scroll and leaves
+        # a window where a pending mutation reconcile captures the reset
+        # viewport instead of the user's actual position.
+        preset_panel.refresh_presets(incremental=True)
 
     def _clear_external_bypass_candidates(self, cfg: dict) -> None:
         """Drop process-local bypass recovery after an external chain edit.
@@ -2279,7 +2338,9 @@ class GigBuddyApp(App):
                 current = live.read_chain()
                 cfg = dict(current)
                 cfg["slots"] = [
-                    {"path": slot.get("path")}
+                    {"path": slot.get("path"),
+                     **({"candidate": slot["candidate"]}
+                        if slot.get("candidate") else {})}
                     for slot in resolved.get("slots", ())
                 ]
                 for key in ("gain", "master", "quality"):
@@ -2743,7 +2804,7 @@ def main() -> None:
     parser.add_argument("--no-engine", action="store_true",
                         help="engine already running externally (skip spawn)")
     parser.add_argument("--theme", default=None,
-                        help="startup color theme (t cycles themes; default: built-in)")
+                        help="startup color theme (default: gigbuddy; t cycles guitar-amp themes)")
     args = parser.parse_args()
     GigBuddyApp(dev_in=args.dev_in, dev_out=args.dev_out, in_ch=args.ch,
                 spawn_engine=not args.no_engine, theme=args.theme).run()

@@ -517,7 +517,9 @@ def preset_slot_label(slot: dict | None,
     """Return the compact Model ID label used for a preset Slot.
 
     Filenames are storage details and should not make the Slot summary expand.
-    The resolved Slot supplies the ID for legacy path-only records.
+    The resolved Slot supplies the ID for legacy path-only records.  A
+    bypassed slot (``path:null + candidate``) shows its recovery model name so
+    it reads as BYPASS instead of NONE.
     """
     slot = slot if isinstance(slot, dict) else {}
     resolved_slot = resolved_slot if isinstance(resolved_slot, dict) else {}

@@ -1,9 +1,12 @@
 """In-process ordered Slot state for the v0.2 TUI.
 
-The live protocol deliberately stores only ``slots[].path``.  This module
-keeps the extra UI state that cannot be persisted: the current target and the
-recovery candidate for a bypassed Slot.  Internal Slot objects are used as
-the identity while the process is alive; no Slot id is exposed or written.
+The live protocol stores ``slots[].path`` plus an optional persisted
+``candidate`` on bypassed slots (``path:null`` keeps the model reference so
+the UI can show BYPASS with the model name until the user activates it).
+This module keeps the remaining UI-only state that is never persisted: the
+current target and any process-local recovery candidate.  Internal Slot
+objects are used as the identity while the process is alive; no Slot id is
+exposed or written.
 
 The class is intentionally independent from Textual and the file/runtime
 implementations.  Panels can issue state commands and a managed adapter can
@@ -159,6 +162,19 @@ def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(dict(value))
 
 
+def _slots_from_chain(chain: Mapping[str, Any],
+                      paths: Sequence[str | None]) -> list[_Slot]:
+    """Build Slot objects from a chain, carrying each slot's recovery
+    candidate (a persisted ``path:null + candidate`` is a bypassed slot that
+    keeps its model reference until the user activates it)."""
+    raw_slots = chain.get("slots") or []
+    return [
+        _Slot(path, candidate=raw_slots[index].get("candidate")
+              if index < len(raw_slots) else None)
+        for index, path in enumerate(paths)
+    ]
+
+
 def _slot_paths(chain: Mapping[str, Any]) -> list[str | None]:
     """Read ordered paths without assigning an identity to a persistent Slot."""
     if "slots" in chain:
@@ -245,7 +261,18 @@ def _chain_with_slots(chain: Mapping[str, Any], paths: Sequence[str | None]) -> 
     # always emitted through the ordered slots representation.
     output.pop("model", None)
     output.pop("ir", None)
-    output["slots"] = [{"path": path} for path in paths]
+    raw_slots = chain.get("slots") or []
+    normalized = []
+    for index, path in enumerate(paths):
+        slot: dict[str, object] = {"path": path}
+        if index < len(raw_slots):
+            candidate = raw_slots[index].get("candidate")
+            if candidate is not None:
+                # Bypassed slots keep their recovery candidate so the UI can
+                # show BYPASS (with the model name) instead of an empty slot.
+                slot["candidate"] = candidate
+        normalized.append(slot)
+    output["slots"] = normalized
     return output
 
 
@@ -278,7 +305,7 @@ class ChainState:
         _validate_chain_shape(initial)
         paths = _slot_paths(initial)
         self._chain = _chain_with_slots(initial, paths)
-        self._slots = [_Slot(path) for path in paths]
+        self._slots = _slots_from_chain(initial, paths)
         self._target: _Slot | None = None
         self._managed_fingerprint: str | None = None
         self._managed_revision: int | None = None
@@ -348,7 +375,23 @@ class ChainState:
         self._restore_state(checkpoint)
 
     def to_chain(self) -> dict[str, Any]:
-        return _chain_with_slots(self._chain, [slot.path for slot in self._slots])
+        """Serialize the current Slot objects into the canonical chain shape.
+
+        Slot objects are authoritative: a manual toggle bypass (or a persisted
+        preset bypass) keeps its recovery candidate here, so the next chain
+        write survives a restart instead of degrading the slot to Empty.
+        """
+        output = _copy_mapping(self._chain)
+        output.pop("model", None)
+        output.pop("ir", None)
+        slots: list[dict[str, object]] = []
+        for slot in self._slots:
+            entry: dict[str, object] = {"path": slot.path}
+            if slot.candidate is not None:
+                entry["candidate"] = slot.candidate
+            slots.append(entry)
+        output["slots"] = slots
+        return output
 
     def slot(self, index: int) -> SlotSnapshot:
         return self._slot_snapshot(index, self._slots[self._check_index(index)])
@@ -548,7 +591,7 @@ class ChainState:
         _validate_chain_shape(incoming)
         paths = _slot_paths(incoming)
         self._chain = _chain_with_slots(incoming, paths)
-        self._slots = [_Slot(path) for path in paths]
+        self._slots = _slots_from_chain(incoming, paths)
         self._target = None
         self._managed_fingerprint = None
         self._managed_revision = None
@@ -569,7 +612,7 @@ class ChainState:
         current_paths = [slot.path for slot in self._slots]
         target_index = self.target_index
         if paths != current_paths:
-            self._slots = [_Slot(path) for path in paths]
+            self._slots = _slots_from_chain(incoming, paths)
             self._target = (
                 self._slots[target_index]
                 if target_index is not None and target_index < len(self._slots)
@@ -616,7 +659,7 @@ class ChainState:
             self._chain_error = None
             return False
         self._chain = _chain_with_slots(incoming, paths)
-        self._slots = [_Slot(path) for path in paths]
+        self._slots = _slots_from_chain(incoming, paths)
         self._target = None
         self._managed_fingerprint = None
         self._managed_revision = None
