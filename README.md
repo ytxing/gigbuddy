@@ -23,15 +23,23 @@ keeps the playing experience immediate.
 - 🎧 **Compare sounds side by side.** Audition any capture with the same dry
   guitar or bass recording, then swap models and cabinets in the chain and
   A/B them instantly — no tab-hopping, no guesswork.
+- 🎤 **Play it with your own guitar.** Plug in and play for real — audition a
+  tone live with your instrument, or loop a dry recording and screen through
+  captures hands-free.
 - 🔧 **Shape the signal path like a pedalboard.** Build an ordered chain of up
-  to six Slots (NAM captures and cabinet IRs), then add, remove, reorder,
-  bypass, or restore a stage while the realtime engine keeps playing.
+  to six Slots ([NAM](https://www.tone3000.com/guides/neural-amp-modeler#what-is-nam)
+  captures and [cabinet IRs](https://www.tone3000.com/guides/neural-amp-modeler#what-s-the-difference-between-nam-and-ir-s)),
+  then add, remove, reorder, bypass, or restore a stage while the realtime
+  engine keeps playing.
 - 🎸 **Save the rig, not just the settings.** Presets capture the whole chain —
   model references, parameters, and notes — and bring it back with one action,
   overwriting the current preset or saving under a new name.
 - 📦 **One manager for everything.** Tones, models, files, download state, and
   presets live together in a searchable local library — install, uninstall,
   batch-select, and edit without leaving the workbench.
+- 🤖 **Agent-friendly.** GigBuddy ships a skill for AI agents: ask for a tone —
+  "the most-favorited Fender amp," "the most-downloaded bass overdrive" — and
+  an agent can search, filter, and build or refine your presets for you.
 - 🎨 **Make it feel like your rig.** Six amp-inspired themes — press `t` to
   cycle from orange tolex to tweed brass, blackface silver, British green, and
   surf cream.
@@ -61,6 +69,20 @@ v0.2 turns the original tone-chain console into a complete tone workbench:
   preset editing, and destructive actions remain in the pane where they belong.
 
 ## Start playing
+
+One line from the terminal — downloads, installs, and initializes everything
+(animated GigBuddy banner included):
+
+```
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.0/scripts/install.sh | bash
+```
+
+It installs into `~/.local/share/gigbuddy` and links `gigbuddy` / `gigbuddy-tui`
+into `~/.local/bin`. Remove everything with `~/.local/bin/gigbuddy`'s sibling:
+
+```
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.0/scripts/uninstall.sh | bash
+```
 
 From a fresh checkout:
 
@@ -149,6 +171,16 @@ queryable in `data/gigbuddy.db`. NAM captures use `.nam`; cabinet and other IR
 assets use `.wav`.
 
 ## Make a rig your own
+
+Every capture is built on [Neural Amp Modeler (NAM)](https://www.tone3000.com/guides/neural-amp-modeler#what-is-nam)
+— the community's most faithful amp-capture technology: every tone is a real
+amp through real mics, captured rather than approximated. GigBuddy is built
+around TONE3000's next-generation [A2 architecture](https://www.tone3000.com/blog/introducing-neural-amp-modeler-nam-architecture-2-a2),
+which TONE3000 calls "the most accurate and best sounding amp modeling
+technology in history" — it outplayed Neural DSP, ToneX, and Line 6 Proxy in
+their 1,000-participant [blind listening test](https://www.tone3000.com/blog/introducing-neural-amp-modeler-nam-architecture-2-a2#amp-modeler-blind-listening-test).
+NAM captures and cabinet IRs play different roles in a rig —
+[the difference, explained](https://www.tone3000.com/guides/neural-amp-modeler#what-s-the-difference-between-nam-and-ir-s).
 
 The chain is deliberately simple to reason about:
 
