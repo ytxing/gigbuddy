@@ -92,11 +92,7 @@ class PackInstallScreen(GigBuddyModal):
     PackInstallScreen > ModalBox { width: 96%; height: 92%; margin: 1 2; }
     #pack-split { height: 1fr; }
     #pack-left { width: 3fr; layout: vertical; }
-    #pack-right {
-        width: 2fr; min-width: 0; max-width: 100%;
-        border-left: solid $primary;
-        overflow-x: hidden; overflow-y: auto;
-    }
+    #pack-right { width: 2fr; border-left: solid $primary; }
     #pack-header { height: 3; padding: 0 1; color: $text; }
     #pack-table { height: 1fr; }
     #pack-status { height: 1; padding: 0 1; color: $text-muted; }
@@ -318,7 +314,7 @@ class PackInstallScreen(GigBuddyModal):
         if all_selected:
             self._selected.clear()
         else:
-            self._selected = supported
+            self._selected = {m["id"] for m in self._models}
         for i in range(table.row_count):
             row_key = table.coordinate_to_cell_key((i, 0)).row_key.value
             table.update_cell(row_key, "pick", "\\[x]" if int(row_key) in self._selected else "\\[ ]")

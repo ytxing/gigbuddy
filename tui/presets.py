@@ -354,7 +354,6 @@ class PresetPanel(Vertical):
         self._query = event.value
         self._fingerprint = None
         self.refresh_presets()
-        self.call_after_refresh(lambda: self._publish_highlight(force=True))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "preset-search":
@@ -1058,13 +1057,6 @@ class PresetNameModal(GigBuddyModal):
             box = self.query_one(ModalBox)
             set_border_hint_layout(
                 box, "name required",
-                [token for token, _action in self._border_hint_actions()])
-            return
-        if library.preset_get(name) and self._pending_overwrite != name:
-            self._pending_overwrite = name
-            box = self.query_one(ModalBox)
-            set_border_hint_layout(
-                box, f"'{name}' exists · enter again to overwrite",
                 [token for token, _action in self._border_hint_actions()])
             return
         if library.preset_get(name) and self._pending_overwrite != name:
