@@ -68,7 +68,7 @@ else
 fi
 
 echo "Preparing local database, starter presets, and dry inputs"
-echo "  (downloading 30 starter models — a few minutes on a typical connection)"
+echo "  (downloading 30 starter models — this can be a bit slow; please be patient)"
 PYTHONPATH="$ROOT/src" "$VENV_PYTHON" "$ROOT/scripts/bootstrap.py" \
     "${bootstrap_args[@]}"
 
@@ -121,7 +121,7 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
     fi
 
     echo "Building NAM and realtime engine"
-    echo "  (compiling NeuralAudio + NAM with clang++ -O3 — expect 2-5 minutes)"
+    echo "  (compiling NeuralAudio + NAM with clang++ -O3 — this can be a bit slow; please be patient)"
     "$ROOT/cpp/build.sh"
 else
     echo "Skipping engine build; launch the TUI with --no-engine"
