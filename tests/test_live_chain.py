@@ -4,6 +4,7 @@ import pytest
 
 from tui import live
 from tui.app import _ManagedChainAdapter
+from tui.chain_state import ChainState, SlotStatus
 
 
 @pytest.fixture
@@ -182,6 +183,38 @@ def test_managed_adapter_rejects_a_stale_ui_chain_base(chain_file):
     with pytest.raises(live.chain_protocol.ChainFileConflict):
         _ManagedChainAdapter(
             object(), expected_chain={"slots": [], "revision": 1})
+
+
+def test_managed_adapter_accepts_candidate_rehydrated_from_own_poll(
+        tmp_path, monkeypatch):
+    tones = tmp_path / "data" / "tones"
+    tones.mkdir(parents=True)
+    (tones / "amp.nam").write_bytes(b"amp")
+    chain_file = tmp_path / "data" / "live_chain.json"
+    monkeypatch.setattr(live, "ROOT", tmp_path)
+    monkeypatch.setattr(live, "CHAIN_FILE", chain_file)
+    chain_file.write_text(json.dumps({
+        "slots": [{"path": None, "candidate": "data/tones/amp.nam"}],
+        "gain": 1.0,
+        "master": 1.35,
+        "quality": 1.0,
+        "revision": 6,
+    }))
+
+    state = ChainState(live.read_chain())
+    state.reconcile(
+        {"slots": [{"path": None}], "gain": 1.0,
+         "master": 1.35, "quality": 1.0, "revision": 5},
+        fingerprint="external-write", revision=5)
+    assert state.slot(0).status is SlotStatus.EMPTY
+
+    state.mark_managed_write("own-write", 6)
+    assert state.reconcile(
+        live.read_chain(), fingerprint="own-write", revision=6) is False
+    assert state.slot(0).status is SlotStatus.BYPASS
+
+    # This is the constructor that raised in the reported preset-load trace.
+    _ManagedChainAdapter(object(), expected_chain=state.to_chain())
 
 
 def test_runtime_prepare_rejection_does_not_touch_chain_file(tmp_path, monkeypatch):

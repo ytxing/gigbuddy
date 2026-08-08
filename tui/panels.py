@@ -1839,13 +1839,26 @@ class ChainPanel(Vertical):
             except (TypeError, ValueError):
                 observed = None
             if observed != self._observed_chain_fingerprint:
+                observed_file_fingerprint = live.chain_file_fingerprint()
+                # A background parameter commit can land on disk before its
+                # UI callback runs. Promote that exact local write before
+                # reconciling, so the poll does not classify its candidate as
+                # an external empty-slot replacement.
+                if (observed_file_fingerprint is not None
+                        and observed_file_fingerprint
+                        == live.last_chain_write_fingerprint()):
+                    try:
+                        self._state.mark_managed_write(
+                            observed_file_fingerprint, chain.get("revision"))
+                    except ChainStateError:
+                        pass
                 self._state.reconcile(
                     chain,
                     # Compare the file that was actually observed with the
                     # managed write marker. Using the last write marker here
                     # would preserve bypass candidates after an external
                     # replacement merely because a previous TUI write exists.
-                    fingerprint=live.chain_file_fingerprint(),
+                    fingerprint=observed_file_fingerprint,
                     revision=chain.get("revision"))
                 self._observed_chain_fingerprint = observed
             if len(self._slot_widgets) != self.state.slot_count:
