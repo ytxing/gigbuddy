@@ -228,9 +228,17 @@ PY
 
 # 静态金色 banner：256 色金色（不支持 truecolor 的终端也正确显示）
 print_static_banner() {
-  local line
+  # 静态色与动画波浪的亮金（250,195,90）一致：
+  # truecolor 终端用 24bit，否则 256 色最接近（228 ≈ 255,203,95）。
+  local line color
+  if [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" \
+        || "$TERM" == *"truecolor"* || "$TERM" == *"direct"* ]]; then
+    color='38;2;250;195;90'
+  else
+    color='38;5;228'
+  fi
   for line in "$@"; do
-    printf '\033[38;5;172m%s\033[0m\n' "$line"
+    printf '\033[%sm%s\033[0m\n' "$color" "$line"
   done
   printf '\n\n\n'
 }
