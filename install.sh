@@ -87,8 +87,23 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
         # Eigen::placeholders::lastN（NeuralAudio LSTM.h/LSTMDynamic.h 使用）。
         # 若 cpp/build.sh 报这两个错误：用 Eigen 3.4.0 稳定版源码 tarball
         # （gitlab.com/libeigen/eigen/-/archive/3.4.0）替换
-        # third_party/NeuralAudio/deps/RTNeural/modules/Eigen 目录，并把上述
-        # 两个头文件里的 Eigen::placeholders::lastN(...) 改为 Eigen::lastN(...)。
+        # 依赖版本坑（自动化修补，替代人工操作）：RTNeural checkout 里
+        # vendored 的 Eigen 目录默认指向 master（3.4.90 = 3.5 预发布版），
+        # 与 NAM Core 不兼容——① 移除 unsupported/Eigen/FFT（NAM linear.cpp
+        # 依赖它）；② 移除 Eigen::placeholders::lastN（LSTM 头文件使用）。
+        # 检测 FFT 缺失即替换为 Eigen 3.4.0 稳定版，并修补 lastN 调用。
+        EIGEN_DIR="$ROOT/third_party/NeuralAudio/deps/RTNeural/modules/Eigen"
+        if [[ ! -f "$EIGEN_DIR/unsupported/Eigen/FFT" ]]; then
+            echo "Patching Eigen: RTNeural vendors 3.5-pre (incompatible); using 3.4.0"
+            rm -rf "$EIGEN_DIR"
+            curl -sSL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz \
+                | tar xz -C "$ROOT/third_party/NeuralAudio/deps/RTNeural/modules"
+            mv "$ROOT/third_party/NeuralAudio/deps/RTNeural/modules/eigen-3.4.0" "$EIGEN_DIR"
+            for header in LSTM.h LSTMDynamic.h; do
+                sed -i '' 's/Eigen::placeholders::lastN/Eigen::lastN/g' \
+                    "$ROOT/third_party/NeuralAudio/NeuralAudio/$header"
+            done
+        fi
     fi
 
     if command -v brew >/dev/null 2>&1; then
