@@ -132,7 +132,10 @@ def test_invalid_poll_keeps_last_valid_state_and_sets_recoverable_error():
 
     state.reconcile(state.to_chain(), fingerprint="external", revision=5)
     assert state.chain_error is None
-    assert state.slot(0).status is SlotStatus.EMPTY
+    # 本会话从未写过链（无 managed 记录）：磁盘的 bypass candidate 是
+    # 持久状态，poll 保留 BYPASS——只有 TUI 写过之后的未知改写才降级。
+    assert state.slot(0).status is SlotStatus.BYPASS
+    assert state.slot(0).candidate == "a"
 
 
 @pytest.mark.parametrize(

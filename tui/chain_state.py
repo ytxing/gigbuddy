@@ -669,7 +669,12 @@ class ChainState:
         self._chain = _chain_with_slots(incoming, paths)
         # 外部/未知写入：链里的 candidate 不可信，全部丢弃——每个
         # path:null 槽降级为 Empty（而不是保留本进程的 BYPASS 恢复候选）。
-        self._slots = _slots_from_chain(incoming, paths, carry_candidates=False)
+        # 例外：本会话从未写过链时（启动/首次 poll），磁盘的 bypass
+        # candidate 是持久状态（preset 或上次会话写入），应保留——否则
+        # state 与磁盘不一致，后续 managed 事务会因 fingerprint 冲突失败。
+        self._slots = _slots_from_chain(
+            incoming, paths,
+            carry_candidates=self._managed_fingerprint is None)
         self._target = None
         self._managed_fingerprint = None
         self._managed_revision = None
