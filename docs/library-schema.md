@@ -21,7 +21,11 @@ tone_tags/tags + tone_makes/makes) so they carry identical fields.
 | platform | Deprecated TONE3000 alias retained for old rows; new code reads `format` first |
 | downloads_count, favorites_count | |
 | a1_models_count, a2_models_count, custom_models_count | |
-| username, avatar_url, user_id | |
+| username, avatar_url, user_id | flattened compatibility view of the official embedded user |
+| user | JSON `EmbeddedUser` object (`id`, `username`, `avatar_url`, `url`) |
+| user_url | embedded user profile URL |
+| is_public | official visibility flag |
+| url | canonical TONE3000 tone URL (legacy mirror rows are filled deterministically) |
 | images | JSON array of URLs |
 | model_name | first model's metadata name (may be NULL) |
 | created_at, updated_at, published_at | ISO timestamps |
@@ -41,6 +45,8 @@ rollback journal until a measured TUI/import workload justifies switching to WAL
 |---|---|
 | id (PK) | TONE3000 model id |
 | tone_id (FK → tones.id) | |
+| created_at, updated_at | source model timestamps |
+| user_id | source creator id |
 | model_url | source URL |
 | name | TONE3000 `models.name` — the site display name; **this is the download filename** |
 | architecture_version | Canonical TONE3000 architecture: `1` (A1), `2` (A2), `custom`, or NULL for non-NAM |

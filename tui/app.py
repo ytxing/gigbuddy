@@ -438,6 +438,85 @@ class GigBuddyHeader(Header):
         event.stop()
 
 
+class HeaderStatus(MarqueeBar):
+    """Single-line status message overlaid in the header's top-left corner."""
+
+    def __init__(self, *, id: str = "header-status") -> None:
+        super().__init__("", id=id)
+
+    def show_status(self, message: str, severity: str) -> None:
+        self.content = message
+        self.remove_class(
+            "header-status--information",
+            "header-status--warning",
+            "header-status--error",
+        )
+        self.add_class(f"header-status--{severity}", "header-status--visible")
+        self._cap_width()
+
+    def _cap_width(self) -> None:
+        """Cap the strip below the centered title's left edge.
+
+        The title sits centered in the header; the notification strip must
+        never cover it (REQ-015/REQ-018), so its max width is the title's
+        left edge minus one column. The title's left edge depends on the
+        terminal width, so the cap is computed from the live layout instead
+        of a fixed CSS constant.
+        """
+        header = self.app.query_one(GigBuddyHeader)
+        title = header.query_one(HeaderTitle)
+        content = title.content_region
+        title_width = cell_len(str(title.render()))  # 终端列宽（em-dash 占 2 列）
+        left_edge = content.x + (content.width - title_width) // 2
+        cap = max(left_edge - 1, 16)
+        # MarqueeBar renders from its own width, so the strip width must be
+        # set explicitly (an auto width would measure a marquee of width 0).
+        self.styles.width = cap
+        self.styles.max_width = cap
+
+    def clear_status(self) -> None:
+        self.content = ""
+        self.remove_class(
+            "header-status--visible",
+            "header-status--information",
+            "header-status--warning",
+            "header-status--error",
+        )
+
+
+class GigBuddyHeader(Header):
+    """Single-line application header; the title is always centered.
+
+    Notifications live inside the header row as an overlay strip in the
+    top-left corner (REQ-015/REQ-018): overlay keeps them out of the flow (the
+    title never moves) and their width is capped below the title's left edge
+    (they never cover the centered title nor the library panel below).
+    """
+
+    def compose(self) -> ComposeResult:
+        icon = HeaderIcon().data_bind(Header.icon)
+        icon.ALLOW_SELECT = False
+        yield icon
+        yield HeaderStatus()
+        title = HeaderTitle()
+        title.ALLOW_SELECT = False
+        yield title
+        clock = (HeaderClock().data_bind(Header.time_format)
+                 if self._show_clock else HeaderClockSpace())
+        clock.ALLOW_SELECT = False
+        yield clock
+
+    def _on_click(self, event) -> None:
+        """Keep the application header single-line.
+
+        Textual's default Header click handler toggles ``-tall`` (height 3),
+        which shifts every panel when the title is clicked. GigBuddy uses the
+        header as a fixed status bar, so clicking it must have no layout effect.
+        """
+        event.prevent_default()
+        event.stop()
+
+
 def _parse_devices(output: str) -> tuple[list[str], list[str]]:
     """Parse `realtime_cli --list` lines into (input devices, output devices)."""
     ins, outs = [], []
@@ -1317,6 +1396,15 @@ class GigBuddyApp(App):
         self.query_one(LibraryPanel).remove_local_selection(tone_ids)
         self.notify(f"Uninstalled {event.count} file(s) · metadata retained")
 
+    def on_local_uninstall_screen_uninstalled(
+            self, event: LocalUninstallScreen.Uninstalled) -> None:
+        panel = self.query_one(LibraryPanel)
+        panel.clear_local_selection()
+        panel._fingerprint = None
+        panel.refresh_rows()
+        self.query_one(DetailPane).clear()
+        self.notify(f"Uninstalled {event.count} file(s) · metadata retained")
+
     def refresh_from_files(self) -> None:
         """0.3s tick: meters + chain panel + library rows follow the current state"""
         # The interval may fire once while Textual is tearing down a test or
@@ -1456,6 +1544,25 @@ class GigBuddyApp(App):
         except Exception as exc:
             self.notify(f"Chain unchanged: {exc}", severity="error")
             return None
+
+    def _clear_external_bypass_candidates(self, cfg: dict) -> None:
+        """Drop process-local bypass recovery after an external chain edit.
+
+        ``null`` is intentionally the persisted representation for both an
+        empty slot and a bypassed slot, so the value alone cannot identify who
+        wrote it.  ``tui.live`` records fingerprints for this process's own
+        atomic writes; a different fingerprint means the candidates are no
+        longer trustworthy and must not turn an external empty slot into
+        BYPASS on the next refresh.
+        """
+        if not (self._amp_model_backup or self._ir_backup):
+            return
+        current = live.chain_file_fingerprint()
+        expected = live.last_chain_write_fingerprint()
+        if expected is None or current == expected:
+            return
+        self._amp_model_backup = None
+        self._ir_backup = None
 
     def _bump(self, key: str, delta: float) -> None:
         cfg = live.read_chain()

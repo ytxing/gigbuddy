@@ -19,7 +19,254 @@ from textual.containers import Vertical
 from textual.coordinate import Coordinate
 from textual.events import Leave, MouseEvent, MouseMove
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Tree
+from textual.widgets import DataTable, Static, Tree
+
+from .marquee import ellipsis_window
+from .selection import ShiftSelectableScreenMixin
+
+
+def border_hint_label(widget) -> str:
+    """Return a subtitle's visible text without Rich markup.
+
+    Hover styling stores a styled ``Text`` back in ``border_subtitle``. The
+    border geometry and click hit-testing still need the plain cell string.
+    """
+    value = str(widget.border_subtitle or "")
+    try:
+        return Text.from_markup(value).plain
+    except Exception:
+        return value
+
+
+def border_hint_hit(widget, screen_x: int, screen_y: int) -> tuple[str, int] | None:
+    """Return the border subtitle and visual-cell offset under the pointer."""
+    if screen_y != widget.region.bottom - 1:
+        return None
+    label = border_hint_label(widget)
+    if not label:
+        return None
+    label_width = cell_len(label)
+    label_start = widget.region.x + max(1, widget.region.width - label_width - 2)
+    offset = screen_x - label_start
+    if offset < 0 or offset >= label_width:
+        return None
+    return label, offset
+
+
+def hint_span(label: str, token: str) -> tuple[int, int] | None:
+    """Return a token's visual-cell span in a border subtitle."""
+    start = label.casefold().find(token.casefold())
+    if start >= 0:
+        visual_start = cell_len(label[:start])
+        return visual_start, visual_start + cell_len(token)
+
+    # Narrow surfaces may display the key-only form (``enter``) while the
+    # action mapping still contains its descriptive token (``enter load``).
+    key = _compact_hint_action(token).casefold()
+    if not key:
+        return None
+    offset = 0
+    for segment in label.split("·"):
+        stripped = segment.strip()
+        leading = len(segment) - len(segment.lstrip())
+        if stripped.casefold().startswith(key + " ") or stripped.casefold() == key:
+            segment_start = offset + leading
+            segment_end = offset + len(segment.rstrip())
+            return cell_len(label[:segment_start]), cell_len(label[:segment_end])
+        offset += len(segment) + 1
+    return None
+
+
+def border_hint_segments(widget) -> tuple[str, ...]:
+    """Return the visible ``·``-separated operation segments."""
+    return tuple(
+        segment.strip()
+        for segment in border_hint_label(widget).split("·")
+        if segment.strip()
+    )
+
+
+def set_border_hint_layout(widget, state: str, actions: list[str] | tuple[str, ...]) -> str:
+    """Render one right-aligned hint block with state before actions.
+
+    Textual right-aligns a border subtitle. Keeping the label unpadded makes
+    the whole hint live in the lower-right corner; changing state text grows
+    to the left while the stable action tokens remain on the right. Action
+    labels are compacted as complete tokens before state text is shortened,
+    so a narrow pane never leaves a partial ``l loo…``-style command behind.
+
+    ``state`` is the changing part of the hint; ``actions`` are the stable
+    clickable suffix. The raw values are cached so a resize can recompute the
+    label after Textual has assigned the widget's real region width.
+    """
+    width = int(getattr(getattr(widget, "region", None), "width", 0) or 0)
+    if not width:
+        width = int(getattr(getattr(widget, "size", None), "width", 0) or 0)
+    raw_state = str(state or "")
+    raw_actions = tuple(str(action) for action in actions if action)
+    if not width:
+        label = " · ".join(part for part in (raw_state, " · ".join(raw_actions))
+                            if part)
+        widget.border_subtitle = label
+        widget._hint_layout_state = raw_state
+        widget._hint_layout_actions = raw_actions
+        widget._hint_hover_base = None
+        widget._hint_hover_token = None
+        return label
+    # Textual passes the border edge width minus two to its label renderer,
+    # which then reserves one cell for each corner. Reserve all six cells
+    # here so the visible subtitle is never truncated by the border renderer.
+    inner = max(width - 6, 1)
+    display_actions = _fit_hint_actions(raw_actions, inner)
+    action_text = " · ".join(display_actions)
+    if not action_text:
+        label = ellipsis_window(raw_state, inner)
+    elif not raw_state:
+        label = action_text
+    else:
+        separator_width = cell_len(" · ")
+        state_width = max(inner - cell_len(action_text) - separator_width, 0)
+        state_text = ellipsis_window(raw_state, state_width)
+        label = f"{state_text} · {action_text}" if state_text else action_text
+    widget.border_subtitle = label
+    widget._hint_layout_state = raw_state
+    widget._hint_layout_actions = raw_actions
+    widget._hint_hover_base = None
+    widget._hint_hover_token = None
+    return label
+
+
+def refresh_border_hint_layout(widget) -> str:
+    """Recompute a previously configured hint after a resize.
+
+    Compose-time dimensions are often zero. Call this from ``on_resize`` (or
+    after mount) so the visible action set matches the actual border width and
+    the click hit map never refers to a clipped token.
+    """
+    if not hasattr(widget, "_hint_layout_state"):
+        return border_hint_label(widget)
+    return set_border_hint_layout(
+        widget,
+        getattr(widget, "_hint_layout_state", ""),
+        getattr(widget, "_hint_layout_actions", ()),
+    )
+
+
+def _compact_hint_action(action: str) -> str:
+    """Return the key portion used when a complete action label will not fit."""
+    return action.strip().split(None, 1)[0] if action.strip() else ""
+
+
+def _fit_hint_actions(actions: tuple[str, ...], width: int) -> tuple[str, ...]:
+    """Fit action tokens without clipping a token in the middle.
+
+    Callers provide actions in priority order. First retain their descriptive
+    labels, then use key-only labels, and finally keep the rightmost suffix if
+    an exceptionally narrow surface cannot display every action. ``hint_span``
+    accepts the key-only form, so the compact labels remain clickable through
+    the same action mapping.
+    """
+    if not actions or width <= 0:
+        return ()
+    if cell_len(" · ".join(actions)) <= width:
+        return actions
+    compact = tuple(_compact_hint_action(action) for action in actions if action)
+    if cell_len(" · ".join(compact)) <= width:
+        return compact
+    for start in range(1, len(compact)):
+        candidate = compact[start:]
+        if cell_len(" · ".join(candidate)) <= width:
+            return candidate
+    return compact[-1:] if compact else ()
+
+
+def border_hint_action_hit(widget, screen_x: int, screen_y: int,
+                           tokens: tuple[str, ...] | list[str]) -> bool:
+    """Return whether the pointer is over one of the clickable hint tokens."""
+    hit = border_hint_hit(widget, screen_x, screen_y)
+    if hit is None:
+        return False
+    label, offset = hit
+    return border_hint_action_token(widget, screen_x, screen_y, tokens) is not None
+
+
+def border_hint_action_token(widget, screen_x: int, screen_y: int,
+                             tokens: tuple[str, ...] | list[str]) -> str | None:
+    """Return the specific action token under the pointer, if any."""
+    hit = border_hint_hit(widget, screen_x, screen_y)
+    if hit is None:
+        return None
+    label, offset = hit
+    for token in tokens:
+        span = hint_span(label, token)
+        if span is not None and span[0] <= offset < span[1]:
+            return token
+    return None
+
+
+def border_hint_click(widget, event, actions: list) -> bool:
+    """Run the action whose token was clicked in ``widget``'s border subtitle.
+
+    Shared by every clickable hint (chain panel, library, modals): returns
+    True when the click landed on a token and was consumed.
+    """
+    hit = border_hint_hit(widget, event.screen_x, event.screen_y)
+    if hit is None:
+        return False
+    label, offset = hit
+    for token, action in actions:
+        span = hint_span(label, token)
+        if span is not None and span[0] <= offset < span[1]:
+            event.stop()
+            action()
+            return True
+    return False
+
+
+def set_border_hint_hover(widget, token: str | None) -> None:
+    """Highlight only one action token in a border subtitle.
+
+    Textual exposes one CSS color for a border subtitle, so coloring the whole
+    subtitle cannot distinguish adjacent actions. Rich ``Text`` spans let the
+    hovered token use the active theme's accent/background while all other
+    tokens keep the muted subtitle style.
+    """
+    label = border_hint_label(widget)
+    previous = (getattr(widget, "_hint_hover_base", None),
+                getattr(widget, "_hint_hover_token", None))
+    if previous == (label, token):
+        return
+    widget._hint_hover_base = label
+    widget._hint_hover_token = token
+    if token is None:
+        widget.border_subtitle = label
+        return
+    span = hint_span(label, token)
+    if span is None:
+        widget.border_subtitle = label
+        widget._hint_hover_token = None
+        return
+    variables = getattr(getattr(widget, "app", None), "theme_variables", {}) or {}
+    accent = str(variables.get("accent") or "#e59a3c")
+    background = str(variables.get("background") or "#1b1512")
+    styled = Text(label)
+    styled.stylize(f"bold {background} on {accent}", *span)
+    widget.border_subtitle = styled
+
+
+def _is_blank_static_click(widget: Static, event: MouseEvent) -> bool:
+    """Recognize empty/trailing space without treating selectable text as blank."""
+    content = getattr(widget, "content", None)
+    if content is None or (isinstance(content, str) and not content.strip()):
+        return True
+    try:
+        content_region = widget.content_region
+        optimal_width = widget.get_content_width(content_region.size, widget.size)
+    except Exception:
+        return False
+    content_left = content_region.x - widget.region.x
+    return event.x < content_left or event.x >= content_left + min(
+        optimal_width, content_region.width)
 
 from .marquee import ellipsis_window, resolve_rich_style
 from .selection import ShiftSelectableScreenMixin
@@ -260,6 +507,61 @@ class ClickSelectTable(DataTable):
     single click when the clicked row is already the cursor row (highlight
     click), which both breaks single-click-focus and double-fires on a real
     double-click (base RowSelected + our chain>=2 action)."""
+
+    def configure_fixed_columns(self, widths: dict[str, int], *,
+                                minimums: dict[str, int] | None = None) -> None:
+        """Set a fixed column budget that can shrink with the viewport.
+
+        DataTable keeps a virtual width even when ``overflow-x`` is hidden.
+        Library surfaces therefore register their normal widths once and this
+        helper reduces them only when the pane is narrower than that budget.
+        The result is a genuinely single-axis table: ``max_scroll_x`` reaches
+        zero instead of merely hiding a scrollbar.
+        """
+        self._fixed_column_widths = dict(widths)
+        self._fixed_column_minimums = dict(minimums or {})
+        self._fit_fixed_columns()
+
+    def on_resize(self, event) -> None:
+        self._fit_fixed_columns()
+
+    def _fit_fixed_columns(self) -> None:
+        widths = getattr(self, "_fixed_column_widths", None)
+        if not widths or self.size.width <= 0 or not self.columns:
+            return
+        minimums = getattr(self, "_fixed_column_minimums", {})
+        # Leave one cell for a possible vertical scrollbar.  Horizontal
+        # scrolling is never needed, even while a table is loading rows.
+        available = max(int(self.size.width) - 1, 1)
+        columns = list(self.ordered_columns)
+        target = {
+            column.key.value: int(widths.get(column.key.value, column.width))
+            for column in columns
+        }
+        floor = {
+            key: max(1, min(int(value), target[key]))
+            for key, value in minimums.items()
+            if key in target
+        }
+        for key in target:
+            floor.setdefault(key, 1)
+        while sum(target.values()) > available:
+            candidates = [key for key in target if target[key] > floor[key]]
+            if not candidates:
+                break
+            key = max(candidates, key=lambda item: target[item] - floor[item])
+            target[key] -= 1
+        changed = False
+        for column in columns:
+            width = target[column.key.value]
+            if column.width != width:
+                column.width = width
+                changed = True
+        if changed:
+            self._require_update_dimensions = True
+            self.check_idle()
+            if self.scroll_x:
+                self.scroll_to(x=0, animate=False)
 
     async def _on_click(self, event) -> None:
         self._set_hover_cursor(True)

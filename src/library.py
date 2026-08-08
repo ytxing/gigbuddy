@@ -10,7 +10,8 @@ Field coverage note: search_tones_a2 also returns `total_count`, a search-level
 aggregation (same value on every row, not a tone attribute) — intentionally dropped.
 
 CLI:
-    gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N] [--json] [--query Q]
+    gigbuddy tone list [--gear amp|amp-cab|pedal|outboard|cab|space|experimental]
+                      [--limit N] [--json] [--query Q]
     gigbuddy tone search <query> [--limit N] [--json]   # TONE3000, then import prompt
     gigbuddy tone show <id> [--json]
     gigbuddy tone import <id>                             # T1: metadata only; download wired in T2
@@ -33,6 +34,8 @@ from uuid import uuid4
 
 import tone3000
 import chain_protocol
+
+__version__ = "0.1.0"
 
 __version__ = "0.1.0"
 
@@ -149,12 +152,13 @@ _IMPORT_LOCKS_GUARD = threading.Lock()
 TONE_COLUMNS = [
     "id", "title", "description", "tags", "gear", "makes", "format", "platform",
     "downloads_count", "favorites_count", "a1_models_count", "a2_models_count",
-    "custom_models_count", "username", "avatar_url", "user_id", "images",
+    "custom_models_count", "username", "avatar_url", "user_id", "user",
+    "user_url", "is_public", "url", "images",
     "model_name", "created_at", "updated_at", "published_at",
     "has_model_with_url", "irs_count", "models_count",
     "imported_at", "local_dir",
 ]
-JSON_COLUMNS = {"tags", "makes", "images"}  # stored as JSON text
+JSON_COLUMNS = {"tags", "makes", "images", "sizes", "links", "user"}  # stored as JSON text
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tones (
@@ -174,6 +178,10 @@ CREATE TABLE IF NOT EXISTS tones (
     username            TEXT,
     avatar_url          TEXT,
     user_id             TEXT,
+    user                TEXT,          -- JSON EmbeddedUser object
+    user_url            TEXT,
+    is_public           INTEGER,
+    url                 TEXT,          -- canonical TONE3000 tone URL
     images              TEXT,          -- JSON array
     model_name          TEXT,
     created_at          TEXT,
@@ -188,6 +196,9 @@ CREATE TABLE IF NOT EXISTS tones (
 CREATE TABLE IF NOT EXISTS models (
     id           INTEGER PRIMARY KEY,
     tone_id      INTEGER NOT NULL REFERENCES tones(id),
+    created_at   TEXT,
+    updated_at   TEXT,
+    user_id      TEXT,
     model_url    TEXT,
     name         TEXT,          -- TONE3000 models.name（网页/zip 下载文件名，语义命名）
     architecture TEXT,                -- legacy backend token
@@ -273,6 +284,7 @@ def upsert_tone(conn: sqlite3.Connection, row: dict, *, commit: bool = True) -> 
     one transaction while preserving the simple auto-commit behavior for CLI
     and direct callers.
     """
+    row = tone3000.normalize_tone(row)
     row = {k: row.get(k) for k in TONE_COLUMNS}
     row["imported_at"] = datetime.now(timezone.utc).isoformat()
     if row.get("local_dir"):
@@ -303,6 +315,8 @@ def upsert_model(conn: sqlite3.Connection, m: dict, *, commit: bool = True) -> N
            "VALUES (:id, :tone_id, :model_url, :name, :architecture, "
            ":architecture_version, :local_path) "
            "ON CONFLICT(id) DO UPDATE SET tone_id=excluded.tone_id, "
+           "created_at=excluded.created_at, updated_at=excluded.updated_at, "
+           "user_id=excluded.user_id, "
            "model_url=excluded.model_url, name=excluded.name, "
            "architecture=excluded.architecture, "
            "architecture_version=excluded.architecture_version, "
@@ -1142,7 +1156,7 @@ def preset_save(name: str, note: str | None = None, *, set_active: bool = True) 
         conn.execute(
             "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
+            "ON CONFLICT(name) DO UPDATE SET note=COALESCE(excluded.note, presets.note), "
             "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
             (name, stored_note, json.dumps(chain, ensure_ascii=False), now, now))
         if set_active:
@@ -1698,6 +1712,17 @@ def bootstrap_starter_presets(*, quiet: bool = False,
     return result
 
 
+def preset_group(name: str) -> tuple[str, str]:
+    """Derive TUI grouping from the catalog name prefix; no schema fields."""
+    parts = name.split("-", 2)
+    if len(parts) >= 2 and parts[0] in {"band", "classic"}:
+        category = "Band Gear" if parts[0] == "band" else "Classic Pairing"
+        instrument = {"guitar": "Guitar", "bass": "Bass"}.get(parts[1])
+        if instrument:
+            return category, instrument
+    return "Custom", "Other"
+
+
 def _first_local_model(tone_id: int, ir: bool = False) -> int | None:
     """First downloaded model id of a tone (amp: non-IR first; ir: IR wavs)."""
     with connect() as conn:
@@ -1781,7 +1806,8 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
 
         def remote_ids(t: dict) -> tuple[int, str, set[int]]:
             try:
-                ms = tone3000.models(t["id"], a2_only=False)
+                ms = [tone3000.normalize_model(m)
+                      for m in tone3000.models(t["id"], a2_only=False)]
             except Exception:
                 return t["id"], "partial", set()
             if model_is_ir({}, t):

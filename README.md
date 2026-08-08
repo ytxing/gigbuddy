@@ -1,4 +1,6 @@
-# GigBuddy 🎸
+# GigBuddy 🎸 — Your one-stop NAM tone manager
+
+*v0.1.0 — 2026-08-05*
 
 ### Find a sound. Shape it. Play it now.
 
@@ -280,6 +282,18 @@ in `install.sh` together when bumping.
 | PortAudio | Homebrew `portaudio` | MIT-like | audio I/O |
 
 **Toolchain**: Python 3.11+, clang++ (C++20), CMake, Homebrew, git.
+
+## Known limitations (v0.1)
+
+- **TOP CREATORS** reads TONE3000's official `user_public_counts` leaderboard,
+  the same source used by `tone3000.com/top-creators`. Tones, Downloads,
+  Favorites, and Models are stable server-side aggregates.
+- **Creator followers/following** are not shown: the public users API exposes
+  no follower fields and the website is behind Cloudflare.
+- **Remote data loads are network-bound** — the first TOP CREATORS visit waits
+  for one leaderboard request; displayed statistics are not rewritten later.
+- Notifications and a few table refreshes are timing-sensitive under heavy
+  load; rare test flakes have been observed in CI-style runs.
 
 ## License
 

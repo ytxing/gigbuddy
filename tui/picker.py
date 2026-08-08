@@ -29,6 +29,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import library  # noqa: E402
+import tone3000  # noqa: E402
 
 
 def _escape(text: str) -> str:

@@ -30,6 +30,10 @@ SAMPLE = {
     "id": 19, "title": "Fender Super Reverb 1977", "gear": "amp-cab", "platform": "nam",
     "username": "tone3000", "avatar_url": "http://a", "user_id": "u1",
     "description": "vintage clean", "tags": ["tube", "clean"], "makes": ["AKG c414"],
+    "sizes": ["standard"], "license": "cc-by", "links": ["https://example.com/rig"],
+    "user": {"id": "u1", "username": "tone3000", "avatar_url": "http://a",
+             "url": "https://www.tone3000.com/tone3000"},
+    "is_public": True, "url": "https://www.tone3000.com/tones/fender-super-reverb-1977-19",
     "images": ["http://i1"],
     "downloads_count": 135824, "favorites_count": 1463,
     "a1_models_count": 3, "a2_models_count": 3, "custom_models_count": 0,
@@ -228,7 +232,87 @@ def test_json_columns_roundtrip():
         row = library.get_tone(19)
     assert row["tags"] == ["tube", "clean"]
     assert row["makes"] == ["AKG c414"]
+    assert row["sizes"] == ["standard"]
+    assert row["links"] == ["https://example.com/rig"]
+    assert row["license"] == "cc-by"
     assert row["images"] == ["http://i1"]
+    assert row["user"]["username"] == "tone3000"
+    assert row["is_public"] == 1
+    assert row["url"].endswith("-19")
+
+
+def test_model_official_fields_roundtrip():
+    with library.connect() as conn:
+        library.upsert_tone(conn, SAMPLE)
+        library.upsert_model(conn, {
+            "id": 53, "tone_id": 19, "created_at": "2025-01-01",
+            "updated_at": "2025-01-02", "user_id": "u1",
+            "model_url": "https://example.com/model.nam", "name": "Model",
+            "size": "feather", "architecture_version": "1",
+            "local_path": "data/tones/model.nam",
+        })
+    model = library.get_tone(19)["models"][0]
+    assert model["created_at"] == "2025-01-01"
+    assert model["user_id"] == "u1"
+    assert model["size"] == "feather"
+
+
+def test_non_nam_models_are_not_exposed_to_amp_picker():
+    non_nam = {**SAMPLE, "id": 20, "format": "aida-x", "platform": None,
+               "gear": "amp"}
+    ir = {**SAMPLE, "id": 21, "format": "ir", "platform": None,
+          "gear": "outboard"}
+    with library.connect() as conn:
+        library.upsert_tone(conn, SAMPLE)
+        library.upsert_tone(conn, non_nam)
+        library.upsert_tone(conn, ir)
+        library.upsert_model(conn, {
+            "id": 201, "tone_id": 20, "model_url": "u201",
+            "name": "capture.aida", "architecture_version": None,
+            "local_path": "aida.aida",
+        })
+        library.upsert_model(conn, {
+            "id": 211, "tone_id": 21, "model_url": "u211",
+            "name": "space.wav", "architecture_version": None,
+            "local_path": "space.wav",
+        })
+    assert [m["id"] for m in library.list_local_models("amp")] == []
+    assert [m["id"] for m in library.list_local_models("ir")] == [211]
+
+
+def test_local_picker_uses_processing_suffix_for_legacy_rows():
+    legacy_tone = {**SAMPLE, "id": 22, "format": None, "platform": None,
+                   "gear": "amp"}
+    with library.connect() as conn:
+        library.upsert_tone(conn, legacy_tone)
+        library.upsert_model(conn, {
+            "id": 221, "tone_id": 22, "model_url": "u221",
+            "architecture_version": None, "architecture": None,
+            "local_path": "legacy.wav",
+        })
+        library.upsert_model(conn, {
+            "id": 222, "tone_id": 22, "model_url": "u222",
+            "architecture_version": None, "architecture": None,
+            "local_path": "legacy.nam",
+        })
+    assert [m["id"] for m in library.list_local_models("ir")] == [221]
+    assert [m["id"] for m in library.list_local_models("amp")] == [222]
+
+
+def test_import_rejects_non_nam_engine_format(monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda _tid: {
+        **SAMPLE, "format": "proteus", "platform": None,
+    })
+    called = False
+
+    def fail_download(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("unsupported format must not be downloaded")
+
+    monkeypatch.setattr(tone3000, "download", fail_download)
+    assert library.import_tone(19, quiet=True) is None
+    assert called is False
 
 
 def test_list_filters():
@@ -563,7 +647,9 @@ def test_import_failure_does_not_remove_another_task_file(monkeypatch):
 
 
 def test_import_ir_downloads_wav(monkeypatch):
-    ir_row = {**SAMPLE, "gear": "cab"}
+    # The official format field, rather than the deprecated gear token,
+    # determines IR handling when both are present.
+    ir_row = {**SAMPLE, "gear": "cab", "format": "ir", "platform": None}
     calls = {}
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(ir_row))
     monkeypatch.setattr(tone3000, "download",
@@ -671,6 +757,59 @@ def test_preset_resolved_chain_follows_model_path_migration(tmp_path):
     assert library.preset_resolved_chain("moving")["slots"] == [
         {"model_id": 1001, "path": str(moved)}
     ]
+
+
+def test_preset_manage_keeps_active_pointer_consistent(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+    library.preset_save("old", note="keep me")
+
+    renamed = library.preset_rename("old", "new")
+    assert renamed["name"] == "new"
+    assert library.preset_current() == "new"
+    assert library.preset_get("old") is None
+
+    updated = library.preset_update_note("new", "changed")
+    assert updated["note"] == "changed"
+    library.preset_save("new")
+    assert library.preset_get("new")["note"] == "changed"
+
+    assert library.preset_delete("new") is True
+    assert library.preset_current() is None
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        library.preset_save("   ")
+
+
+def test_preset_active_dirty_and_quality_roundtrip(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"], "gain": 0.8,
+                       "master": 0.65, "quality": 0.7})
+    library.preset_save("working")
+    assert library.preset_current() == "working"
+    assert library.preset_is_dirty() is False
+    assert library.preset_get("working")["chain"]["quality"] == 0.7
+
+    library.chain_set({"model": amp["local_path"], "gain": 0.9,
+                       "master": 0.65, "quality": 0.7})
+    assert library.preset_is_dirty() is True
+    loaded = library.preset_load("working")
+    assert loaded["quality"] == 0.7
+    assert library.preset_is_dirty() is False
+
+
+def test_preset_resolved_chain_follows_model_path_migration(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+    library.preset_save("moving")
+
+    moved = tmp_path / "renamed.nam"
+    moved.write_bytes(b"amp")
+    with library.connect() as conn:
+        conn.execute("UPDATE models SET local_path = ? WHERE id = ?", (str(moved), amp["id"]))
+        conn.commit()
+
+    assert library.preset_resolved_chain("moving")["model"] == str(moved)
 
 
 def test_preset_manage_keeps_active_pointer_consistent(tmp_path):

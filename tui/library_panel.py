@@ -28,6 +28,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import library  # noqa: E402
+import tone3000  # noqa: E402
 
 from .install_screen import PackInstallScreen  # noqa: E402
 from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
@@ -107,6 +108,23 @@ class ToneHighlighted(Message):
         super().__init__()
         self.tone = tone
         self.remote = remote
+
+
+class VerifiedAuthor(Message):
+    """A live author verification landed; refresh visible author cells."""
+
+    def __init__(self, username: str) -> None:
+        super().__init__()
+        self.username = username
+
+
+class CreatorFocused(Message):
+    """TOP CREATORS 行聚焦 → detail 显示作者信息 + 该作者 top 音色列表
+    （REQ-012：取代"聚合首 tone"的随机单音色映射）。"""
+
+    def __init__(self, username: str) -> None:
+        super().__init__()
+        self.username = username
 
 
 class VerifiedAuthor(Message):
@@ -1243,6 +1261,191 @@ class LibraryPanel(Vertical):
                 name="creators-more", exclusive=True)
             return
         else:
+            return
+        self.run_worker(partial(worker), name=name, exclusive=True)
+
+    def _search_creator(self, name: str) -> None:
+        """REQ-033：作者行 Enter/双击 → 跳 TONE3000 tab，搜索栏填
+        @author 并触发真实搜索（显示该作者全部音色结果）。"""
+        # 用户路径切 tab（post Clicked 不会被 Textual 的 tab 回滚吞掉）
+        tab = self.query_one("#--content-tab-pane-tone")
+        tab.post_message(tab.Clicked(tab))
+        query = f"@{name}"
+        self.query_one("#tone-search", Input).value = query
+        # _query 同步设置：tab 切换后 check_active_tab 的加载（exclusive）
+        # 会取消本 worker 并用 _query 重新加载——同一 query，结果一致。
+        self._query = query
+        self.run_worker(partial(self._show_search, query), name="search",
+                        exclusive=True)
+
+    def _set_search_spec(self, query: str, spec: SearchSpec) -> None:
+        """Keep the raw input and its normalized form together."""
+        self._query = query
+        self._search_spec = spec
+        self._users = list(spec.authors)
+        self._tags = list(spec.tags)
+        self._makes = list(spec.makes)
+
+    def _parse_or_notify(self, query: str) -> SearchSpec | None:
+        try:
+            return parse_search(query)
+        except SearchSyntaxError as exc:
+            self.notify(f"Search syntax: {exc}", severity="error")
+            return None
+
+    def _effective_authors(self, spec: SearchSpec) -> list[str]:
+        if spec.authors:
+            return list(spec.authors)
+        return [self._author_filter] if self._author_filter else []
+
+    def _selected_order(self) -> str:
+        return {
+            "trending": "trending",
+            "best-match": "best-match",
+            "downloads": "downloads-all-time",
+            "newest": "newest",
+        }.get(self._sort, "trending")
+
+    @staticmethod
+    def _status_row(table: DataTable, message: str) -> None:
+        """Put transient network state inside the list, without a fake cursor."""
+        table.cursor_type = "none"
+        # Never put the banner in a fixed-width column: fixed columns crop
+        # their cells at column width without an ellipsis, so "Loading top
+        # creators…" rendered as "Loadin" on a narrow pane (TOP CREATORS
+        # puts its message in the Rank column otherwise). The first
+        # auto-width column grows to fit the message and stays on the left
+        # side of the viewport crop.
+        cols = list(table.ordered_columns)
+        target = next((i for i, col in enumerate(cols) if col.auto_width), 0)
+        cells = [""] * len(cols)
+        cells[target] = f"[dim]{message}[/dim]"
+        table.add_row(*cells, key="__status__")
+
+    @staticmethod
+    def _has_real_rows(table: DataTable) -> bool:
+        return any(row.key.value != "__status__" for row in table.ordered_rows)
+
+    def _show_status_if_empty(self, table: DataTable, message: str) -> None:
+        """Show a loading/error row only when no valid rows can be retained."""
+        if self._has_real_rows(table):
+            return
+        table.clear()
+        self._status_row(table, message)
+
+    @staticmethod
+    def _network_error(action: str, error: Exception) -> str:
+        """Keep volatile transport diagnostics out of the main list surface."""
+        text = str(error).lower()
+        if "ssl" in text or "tls" in text:
+            return f"{action} unavailable — secure connection closed. Press r to retry."
+        if "timeout" in text or "timed out" in text:
+            return f"{action} timed out. Press r to retry."
+        return f"{action} unavailable. Check your connection, then press r to retry."
+
+    def retry_active(self) -> None:
+        """Refresh the active remote view (r key): drop its cache entry and
+        re-fetch. Doubles as the retry path after a failed load — the error
+        banners say "Press r to retry", which this satisfies."""
+        active = getattr(self, "_active_pane", "pane-local")
+        if active == "pane-tone":
+            if self._tone_cache_key is not None:
+                self._tone_cache.pop(self._tone_cache_key, None)
+            self.run_worker(partial(self._reload_tone_table, refresh=True),
+                            name="search", exclusive=True)
+        elif active == "pane-creators":
+            self._creator_cache = None
+            self.run_worker(partial(self._show_top_creators, refresh=True),
+                            name="creators", exclusive=True)
+
+    def _update_tone_subtitle(self, *, loading: bool = False,
+                              error: bool = False) -> None:
+        if loading:
+            # The banner is its own short complete line: a narrow pane can
+            # only truncate it to an ellipsis-suffixed "Loa…", never to a
+            # bare partial word like the "loadin" that cropping the old
+            # "N · loading… · Enter install" string produced.
+            self._tone_error = False
+            set_border_hint_layout(
+                self, "loading…",
+                [token for token, _action in self._border_hint_actions()])
+            return
+        loaded = len(self._remote_tones)
+        count = f"{loaded}/{self._tone_total}" if self._tone_total else str(loaded)
+        if error:
+            self._tone_error = True
+            state = f"{count} · load failed"
+        elif self._tone_has_more:
+            self._tone_error = False
+            state = count
+        else:
+            self._tone_error = False
+            state = f"{count} · all loaded"
+        # REQ-038：Enter 打开二级菜单详情页（不是直连 install）
+        set_border_hint_layout(
+            self, state,
+            [token for token, _action in self._border_hint_actions()])
+
+    def _load_more_from_hint(self) -> None:
+        """Load the active table's next page from its clickable hint token."""
+        self._maybe_load_more_from_viewport(self._table(), force=True)
+
+    @staticmethod
+    def _was_at_scroll_bottom(table: DataTable) -> bool:
+        """Capture explicit bottom-of-viewport intent before an async append."""
+        return (table.max_scroll_y > 0
+                and table.scroll_y >= table.max_scroll_y - 1)
+
+    @staticmethod
+    def _restore_scroll_bottom(table: DataTable, was_at_bottom: bool) -> None:
+        """Re-pin a table after its virtual height grows.
+
+        ``DataTable.add_row`` updates the virtual size during refresh.  The
+        immediate scroll can therefore see the old maximum; repeat it after
+        the refresh so a wheel-driven load-more stays at the new bottom.
+        """
+        if not was_at_bottom:
+            return
+
+        def pin() -> None:
+            table._suppress_load_more_scroll = True
+            try:
+                table.scroll_to(y=table.max_scroll_y, animate=False,
+                                immediate=True)
+            except Exception:
+                pass
+            finally:
+                table._suppress_load_more_scroll = False
+
+        pin()
+        table.call_after_refresh(pin)
+
+    def _maybe_load_more_from_viewport(self, table: LibraryTable, *, force: bool = False) -> None:
+        """Load another page when the cursor or viewport reaches the tail."""
+        if table.id == "lib-table-tone":
+            has_more, loading = self._tone_has_more, self._tone_loading
+        elif table.id == "lib-table-local":
+            has_more, loading = self._local_has_more, self._local_loading
+        elif table.id == "lib-table-creators":
+            has_more, loading = self._creator_has_more, self._creator_loading
+        else:
+            return
+        if not has_more or loading:
+            return
+        near_cursor = table.cursor_row >= max(
+            0, table.row_count - LOAD_AHEAD_ROWS)
+        at_bottom = force or (
+            table.max_scroll_y > 0 and table.scroll_y >= table.max_scroll_y - 1)
+        if not (near_cursor or at_bottom):
+            return
+        if table.id == "lib-table-tone":
+            worker, name = self._load_more_tones, "search-more"
+        elif table.id == "lib-table-local":
+            worker, name = self._load_more_local, "local-more"
+        else:
+            self.run_worker(
+                partial(self._load_more_creators),
+                name="creators-more", exclusive=True)
             return
         self.run_worker(partial(worker), name=name, exclusive=True)
 
@@ -2506,6 +2709,7 @@ class LibraryPanel(Vertical):
         if spec is None:
             return
         if event.input.id == "local-search":
+            self.clear_local_selection()
             if query:
                 self._show_local_filter(query, spec)
             else:

@@ -7,8 +7,8 @@
 CLI:
     tone3000.py search <query>              # 关键词搜索（全部架构）
     tone3000.py top [limit]                 # 全站下载排行
-    tone3000.py models <tone_id>            # 列出 tone 的 A2 模型
-    tone3000.py download <tone_id> <dest>   # 下载全部 A2 .nam 到目录
+    tone3000.py models <tone_id>            # 列出 tone 的可用模型
+    tone3000.py download <tone_id> <dest>   # 下载指定 tone 的模型
     tone3000.py dry <dest> [name...]        # 下载试听干音素材（MIT，mayer/brit/rollin 等）
 """
 import json
@@ -340,12 +340,69 @@ def user_stats(username: str) -> dict | None:
     return {**info, "stats": stats}
 
 
-def models(tone_id, a2_only=True):
-    """tone 的全部模型；a2_only=True 时过滤 A2 (SlimmableContainer)。IR 等非 A2 音色传 False
+def top_creators(sort_by="tones", page_size=100, page_number=1):
+    """Official TONE3000 creator leaderboard.
+
+    The website's ``/top-creators`` page reads ``user_public_counts`` directly;
+    use the same stable aggregate fields instead of rebuilding creator totals
+    from arbitrary pages of tone search results.
+    """
+    column = {
+        "tones": "public_tones_count",
+        "downloads": "downloads_count",
+        "favorites": "favorites_count",
+        "models": "public_models_count",
+    }.get(sort_by, "public_tones_count")
+    page_size = max(1, int(page_size))
+    page_number = max(1, int(page_number))
+    return _get(
+        f"{API}/user_public_counts",
+        select="*",
+        order=f"{column}.desc,username.asc",
+        limit=page_size,
+        offset=(page_number - 1) * page_size,
+        **{column: "gt.0"},
+    )
+
+
+def _attach_usernames(rows: list[dict]) -> None:
+    """按 user_id 批量联查 users，就地补 username/avatar_url（REQ-023）。"""
+    user_ids = sorted({r.get("user_id") for r in rows if r.get("user_id")},
+                      key=str)
+    if not user_ids:
+        return
+    users = _get(f"{API}/users", id=f"in.({','.join(str(i) for i in user_ids)})",
+                 select="id,username,avatar_url", limit=len(user_ids))
+    by_id = {str(u["id"]): u for u in users}
+    for row in rows:
+        u = by_id.get(str(row.get("user_id")))
+        if u:
+            row["username"] = u.get("username")
+            row["avatar_url"] = u.get("avatar_url")
+
+
+def user(username: str) -> dict | None:
+    """用户资料（bio/display_name/avatar/verified 依据等）；查不到返回 None。
+
+    TOP CREATORS 聚焦作者行时展示作者信息用（REQ-012）；verified 徽章仍走
+    verify_username 的独立判定。
+    """
+    rows = _get(f"{API}/users", username=f"eq.{username}", limit=1)
+    return rows[0] if rows else None
+
+
+def models(tone_id, a2_only=None):
+    """List a tone's models with official architecture semantics.
+
+    ``a2_only`` is a compatibility switch used by the pre-v1 caller.  ``True``
+    selects A2 only, ``False`` returns every model, and ``None`` (the official
+    default when the architecture query is omitted) selects A1 + Custom plus
+    non-NAM models.  IR and other non-NAM models have a null
+    ``architecture_version``.
 
     name 取 models 表顶层字段（TONE3000 网页/zip 下载的文件名即此 name 原样）。
-    用 JSONB 投影只取 architecture，不拉全量 model_json（多模型 tone 的全量
-    响应可达 19MB+、耗时 60s+，见 scripts/import_handoff.py 踩坑记录）。
+    The canonical v1 field is selected directly; the JSONB projection remains
+    as a fallback for old REST rows that only expose ``model_json.architecture``.
     """
     ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
               select=("id,model_url,name,"
@@ -357,9 +414,13 @@ def models(tone_id, a2_only=True):
     return [m for m in ms if _is_a2_model(m)]
 
 
-def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
+def download(tone_id, dest_dir, tag=None, a2_only=None, ext=None,
              return_paths=False, progress=None, quiet=False, model_ids=None):
-    """下载 tone 的模型到 dest_dir；a2_only=False 下载全部（含 IR wav）；ext 强制扩展名
+    """Download models to ``dest_dir`` with the official architecture default.
+
+    ``a2_only=None`` follows the API default (A1 + Custom plus non-NAM),
+    ``False`` downloads every architecture/model, and ``True`` is retained for
+    legacy A2-only callers. ``ext`` can force an IR suffix.
 
     文件名优先采用 models.name；旧响应没有 name 时采用 model_url 的 basename。
     不添加序号、不改写语义名称。model_ids 限制只下载指定模型（部分安装）。
@@ -390,14 +451,25 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
             url_path = urllib.parse.urlparse(m.get("model_url") or "").path
             fname = Path(urllib.parse.unquote(url_path)).name
         fname = fname or f"model-{m['id']}"
-        # ext is used for IR downloads. Preserve an existing .nam/.wav suffix
-        # instead of producing names such as cab.wav.wav.
+        # Use the requested pack suffix when supplied; otherwise derive the
+        # engine suffix from each Model. This keeps mixed legacy amp-cab packs
+        # correct even when their parent Tone is labeled NAM.
+        version = model_architecture_version(m)
         if ext:
-            suffix = f".{ext.lstrip('.')}".lower()
-            if not fname.lower().endswith((".nam", ".wav")):
-                fname = f"{fname}{suffix}"
-        elif not fname.lower().endswith((".nam", ".wav")):
-            fname = f"{fname}.nam"
+            desired_suffix = f".{ext.lstrip('.')}".lower()
+        elif is_ir_model(m):
+            desired_suffix = ".wav"
+        elif version is not None:
+            desired_suffix = ".nam"
+        else:
+            desired_suffix = None
+        if desired_suffix:
+            current_suffix = Path(fname).suffix.lower()
+            if current_suffix in (".nam", ".wav"):
+                if current_suffix != desired_suffix:
+                    fname = f"{fname[:-len(current_suffix)]}{desired_suffix}"
+            else:
+                fname = f"{fname}{desired_suffix}"
         out = dest / fname
         if progress:
             progress(i - 1, len(ms), fname)
@@ -451,9 +523,24 @@ def tone_by_id(tone_id, with_models=False):
     if t.get("is_deleted"):
         return None
     # username / avatar_url live on the users table
-    u = _get(f"{API}/users", id=f"eq.{t['user_id']}", select="username,avatar_url", limit=1)
-    t["username"] = (u[0].get("username") if u else None)
-    t["avatar_url"] = (u[0].get("avatar_url") if u else None)
+    try:
+        u = _get(f"{API}/users", id=f"eq.{t['user_id']}",
+                 select="id,username,avatar_url,url", limit=1)
+    except urllib.error.HTTPError as exc:
+        # The legacy users view has no EmbeddedUser.url column.  Keep the
+        # fallback narrow and synthesize the public profile route below.
+        if exc.code not in (400, 404):
+            raise
+        u = _get(f"{API}/users", id=f"eq.{t['user_id']}",
+                 select="id,username,avatar_url", limit=1)
+    if u:
+        t["username"] = u[0].get("username")
+        t["avatar_url"] = u[0].get("avatar_url")
+        t["user"] = dict(u[0])
+        t["user_url"] = u[0].get("url") or (
+            f"https://www.tone3000.com/{u[0]['username']}"
+            if u[0].get("username") else None)
+        t["user"]["url"] = t["user_url"]
     # tags: tone_tags join -> names
     ids = [r["tag_id"] for r in _get(f"{API}/tone_tags", tone_id=f"eq.{tone_id}", select="tag_id", limit=300)]
     if ids:
@@ -469,12 +556,14 @@ def tone_by_id(tone_id, with_models=False):
     else:
         t["makes"] = []
     # model_name: first model's metadata name (NAM A2 metadata carries it)
-    ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
-              select="id,name:model_json->metadata->>name", limit=50)
+    ms = _get(
+        f"{API}/models", tone_id=f"eq.{tone_id}",
+        select="id,name,model_json->metadata->>name", limit=50)
     t["model_name"] = None
     for m in ms:
-        if m.get("name"):
-            t["model_name"] = m["name"]
+        name = m.get("name") or m.get("metadata_name")
+        if name:
+            t["model_name"] = name
             break
     return _canonical_tone(t)
 
@@ -510,6 +599,8 @@ def tones_for_model_ids(model_ids):
 
 
 def fmt(t):
+    gear = normalize_gear(t.get("gear")) or "?"
+    format_ = tone_format(t) or "?"
     return (f"{t['id']:>7} | dl={t.get('downloads_count', 0):>6} fav={t.get('favorites_count', 0):>5} "
             f"a1={t.get('a1_models_count', 0):>3} a2={t.get('a2_models_count', 0):>3} "
             f"custom={t.get('custom_models_count', 0):>3} ir={t.get('irs_count', 0):>3} | "
