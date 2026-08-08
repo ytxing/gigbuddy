@@ -4,7 +4,6 @@ Loading writes data/live_chain.json (engine hot-swap); saving snapshots the
 current chain. Both go through src/library.py preset_* functions so the CLI,
 TUI and external agents share one code path.
 """
-import asyncio
 import sys
 from pathlib import Path
 from typing import Callable

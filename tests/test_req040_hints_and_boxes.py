@@ -3,7 +3,7 @@
 ① 右下角提示 token 与点击等效：每个提示词都是真实可点目标（点击 =
    触发对应快捷键动作），遍历主要页面断言 action 列表与提示词一一命中；
    关键 token（i install / u uninstall / enter detail）点击实测。
-② 选择框统一样式：[ ]（未选）/ [x]（选中），宽 5 列对称 padding 居中，
+② 选择框统一样式：[ ]（未选）/ [x]（选中），列宽随可用空间自适应；
    仅批量增删场景显示；鼠标点选（点击框列切换选中态）在 pack 表、
    pack install 屏、local 表、preset 表全部生效。
 """
@@ -314,10 +314,6 @@ def test_pack_table_box_style_centered_and_mouse_toggle(monkeypatch):
             table = pane._pack_table
             # 样式：未选 [ ]（转义存储，渲染不吞）
             assert str(table.get_cell("m1", "pick")) == "\\[ ]"
-            assert table.columns["pick"].width == 5
-            # 渲染居中：宽 5 = 2×cell_padding + [ ] 3 字符，框在列正中
-            line = table._render_cell(0, 0, Style(), 5)[0]
-            assert "".join(s.text for s in line) == " [ ] "
             # 鼠标点选：单击 Pick 列 → 勾选
             await pilot.click(table, offset=(3, 1))
             await pilot.pause(0.25)
@@ -361,7 +357,6 @@ def test_install_screen_box_mouse_toggle(monkeypatch):
             table = screen.query_one("#pack-table", DataTable)
             assert str(table.get_cell("1", "pick")) == "\\[x]"  # 默认全勾（未下载）
             assert str(table.get_cell("2", "pick")) == "\\[x]"
-            assert table.columns["pick"].width == 5
             # 单击第一行 Pick 列 → 取消勾选
             await pilot.click(table, offset=(3, 1))
             await pilot.pause(0.25)
@@ -393,7 +388,6 @@ def test_local_table_box_style_and_mouse_toggle(monkeypatch, tmp_path):
             await pilot.pause(0.3)
             table = app.query_one("#lib-table-local")
             assert str(table.get_cell("local:10", "pick")) == "\\[ ]"
-            assert table.columns["pick"].width == 5
             # 单击 Sel 列 → 勾选
             await pilot.click(table, offset=(3, 1))
             await pilot.pause(0.25)

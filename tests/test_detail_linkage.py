@@ -266,12 +266,8 @@ def test_creators_sort_select_reorders(monkeypatch):
     run(scenario())
 
 
-def test_creator_bio_normalized_for_banner(monkeypatch):
-    """REQ-026: 作者简介进 banner（summary marquee）前换行/多空格压成
-    一行；详情页多行区保留原始换行。"""
-    import tui.panels as panels_mod
-    assert panels_mod._single_line(
-        "Line one\n\n  spaced\tout  text ") == "Line one spaced out text"
+def test_creator_bio_remains_multiline_in_detail(monkeypatch):
+    """Creator detail keeps the author's original line structure readable."""
     messy_bio = "Tone maker.\n\nLoves\n   plexi amps\tand IRs.  "
     alice = {"id": 201, "title": "Alice One", "gear": "amp",
              "downloads_count": 30, "username": "alice",
@@ -304,7 +300,7 @@ def test_creator_bio_normalized_for_banner(monkeypatch):
             assert "Tone maker." in body and "Loves" in body
             assert "\n" in _detail_text(app).strip() or "  " in body
             # REQ-033：Enter 跳 @作者 搜索（不再是作者页）——聚焦视图
-            # 的 bio 单行化由 _single_line 单元断言覆盖
+            # 的 bio 仍然只在详情正文中显示，不再额外生成 banner 摘要。
 
     run(scenario())
 

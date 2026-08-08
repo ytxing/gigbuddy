@@ -94,17 +94,6 @@ def is_ir_tone(tone: dict | None) -> bool:
     return str(tone.get("gear") or "").strip().lower() in {"cab", "space", "ir"}
 
 
-def tone_uses_a2_filter(tone: dict | None) -> bool:
-    """Whether a Tone should use the legacy NAM-A2 model filter.
-
-    The old Supabase RPC is an A2 search path. Official non-NAM formats have
-    ``architecture_version = null`` and therefore must request all models.
-    Rows with no format retain the historical A2 default for compatibility.
-    """
-    fmt = tone_format(tone)
-    return fmt in (None, "nam") and not is_ir_tone(tone)
-
-
 def normalize_architecture(value: str | None) -> str | None:
     """Map legacy architecture labels to API Architecture enum values."""
     if value is None:
@@ -530,36 +519,6 @@ def user(username: str) -> dict | None:
     """
     rows = _get(f"{API}/users", username=f"eq.{username}", limit=1)
     return rows[0] if rows else None
-
-
-def user_stats(username: str) -> dict | None:
-    """作者资料 + 四项统计（作者页多行介绍用，REQ-020）。
-
-    stats: tones = 远程真实数（search usernames 的 total_count）；
-    downloads/favorites/models = tones_counts 按 user 的前 200 条求和
-    （PostgREST 聚合端点 400 被禁，这是可用的近似真实值）。
-    """
-    info = user(username)
-    if not info:
-        return None
-    stats = {"tones": None, "downloads": 0, "favorites": 0, "models": 0}
-    uid = info.get("id")
-    try:
-        hits = _get(f"{API}/tones_counts", user_id=f"eq.{uid}",
-                    select="downloads_count,favorites_count,models_count",
-                    limit=200)
-        stats["downloads"] = sum(h.get("downloads_count") or 0 for h in hits)
-        stats["favorites"] = sum(h.get("favorites_count") or 0 for h in hits)
-        stats["models"] = sum(h.get("models_count") or 0 for h in hits)
-    except Exception:
-        pass
-    try:
-        hits = search("", page_size=1, usernames=[username])
-        stats["tones"] = next((h.get("total_count") for h in hits
-                               if h.get("total_count") is not None), None)
-    except Exception:
-        pass
-    return {**info, "stats": stats}
 
 
 def models(tone_id, a2_only=None):

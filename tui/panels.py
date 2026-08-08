@@ -48,16 +48,6 @@ def _escape(text: str) -> str:
     return text.replace("[", "\\[")
 
 
-def _single_line(text: str) -> str:
-    """单行化：换行/制表/连续空白 → 单个空格，首尾 trim。
-
-    REQ-026：作者简介（bio）含大量换行/多空格，放进单行 banner
-    （marquee 滚动）时难看得要命——展示前压成一行。详情页多行文本区
-    保留原始换行（多行可读性更好），不做此处理。
-    """
-    return " ".join(str(text).split())
-
-
 class NodeWidget(Static):
     """Chain node (AMP / IR): click to focus, then ↑/↓ steps through the sibling
     models in the same tone folder (engine hot-swaps via live_chain.json).

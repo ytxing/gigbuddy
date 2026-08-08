@@ -86,12 +86,6 @@ _TABLE_PANE = {
 }
 
 
-def _parse_query(q: str) -> tuple[str, list[str], list[str]]:
-    """Compatibility view of the shared parser for older callers/tests."""
-    spec = parse_search(q)
-    return spec.text, list(spec.authors), list(spec.tags)
-
-
 class ToneSelected(Message):
     """A row in the library was selected — app shows the detail pane"""
 
