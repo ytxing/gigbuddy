@@ -22,6 +22,7 @@ from enum import Enum
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -261,6 +262,34 @@ def _validate_chain_shape(chain: Mapping[str, Any]) -> None:
 
 def _persistent_slots(chain: Mapping[str, Any]) -> list[dict[str, str | None]]:
     return [{"path": path} for path in _slot_paths(chain)]
+
+
+def _persistent_slots_equivalent(left: Mapping[str, Any],
+                                 right: Mapping[str, Any]) -> bool:
+    """Compare Slot paths by resolved value, not by literal spelling.
+
+    The managed adapter normalizes candidate paths to absolute form before
+    preparing; a restore sets the slot path from the persisted (relative)
+    candidate, so literal comparison would falsely reject it as a path
+    change.  ``None`` paths (empty/bypassed) must match exactly.
+    """
+    a = _persistent_slots(left)
+    b = _persistent_slots(right)
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b):
+        px, py = x["path"], y["path"]
+        if px == py:
+            continue
+        if px is None or py is None:
+            return False
+        try:
+            if Path(px).resolve() == Path(py).resolve():
+                continue
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def _chain_with_slots(chain: Mapping[str, Any], paths: Sequence[str | None]) -> dict[str, Any]:
@@ -752,7 +781,7 @@ class ChainState:
                 raise ChainStateError("prepared chain revision does not match its plan")
             if revision is not None and prepared.revision != revision:
                 raise ChainStateError("prepared revision does not match requested revision")
-            if _persistent_slots(prepared_chain) != _persistent_slots(candidate_chain):
+            if not _persistent_slots_equivalent(prepared_chain, candidate_chain):
                 raise ChainStateError("prepare cannot change Slot order or paths")
         except Exception:
             self._restore_state(before)
