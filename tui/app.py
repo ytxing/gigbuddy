@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable
 import uuid
 import webbrowser
 from pathlib import Path
@@ -29,6 +30,7 @@ from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.events import MouseEvent, MouseMove
 from textual.theme import Theme
 from textual.widgets import Footer, Header, Static
 from textual.widgets._header import (HeaderClock, HeaderClockSpace, HeaderIcon,
@@ -52,14 +54,18 @@ from .marquee import MarqueeBar  # noqa: E402
 from .metadata import signed_fixed  # noqa: E402
 from .mutations import (MutationCommitted, MutationRefreshCoordinator,
                         ViewAnchor)  # noqa: E402
-from .panels import (AudioSettingsScreen, ChainPanel, DetailPane, DeviceBar,
-                     AddSlotButton, ChainSlotWidget, DeviceChanged,
-                     InterfaceBar, MeterBar, NodeSwitchButton, NodeWidget)  # noqa: E402
+from .panels import (AudioActionButton, AudioSettingsScreen, ChainPanel,
+                     DetailPane, DeviceBar, AddSlotButton, ChainSlotWidget,
+                     DeviceChanged, InterfaceBar, MeterBar, NodeSwitchButton,
+                     NodeWidget)  # noqa: E402
 from .picker import TonePickerScreen  # noqa: E402
 from .presets import (ChainSaveModal, ClearSlotsConfirm, PresetDeleteModal,
                       PresetEditModal, PresetLoadConfirm, PresetNameModal,
                       PresetNoteModal, PresetPanel, PresetRenameModal)  # noqa: E402
-from .selection import ShiftSelectableScreen  # noqa: E402
+from .modals import (GigBuddyModal, ModalBox, border_hint_action_token,
+                     border_hint_click, set_border_hint_hover,
+                     set_border_hint_layout)  # noqa: E402
+from .selection import NonSelectableStatic, ShiftSelectableScreen  # noqa: E402
 from .uninstall_screen import LocalUninstallScreen  # noqa: E402
 
 # Success, error and idle state colors are fixed across every theme. Warning is
@@ -353,6 +359,81 @@ GIGBUDDY_THEME = Theme(
     },
 )
 
+# 16 色安全深色主题：给不支持 truecolor 的终端使用（16 色命名色，
+# 任何终端都能正确渲染；金色用 yellow 近似）。与 textual-dark 一起
+# 构成受限终端的唯二可选主题。
+COMPAT_DARK_THEME = Theme(
+    name="compat-dark",
+    dark=True,
+    background="#000000",
+    surface="#141414",
+    panel="#1a1a1a",
+    boost="#242424",
+    foreground="#ffffff",
+    primary="#ffff00",
+    secondary="#b3b3b3",
+    accent="#ffff00",
+    success="#00ff00",
+    warning="#ffff00",
+    error="#ff0000",
+    variables={
+        "block-cursor-background": "#ffff00",
+        "block-cursor-foreground": "#000000",
+        "block-cursor-text-style": "bold",
+        "input-selection-background": "#ffff00",
+        "field": "#ffff00",
+    },
+)
+
+class QuitConfirmModal(GigBuddyModal):
+    """Second-stage quit confirmation: the QUIT button asks before exiting."""
+
+    CSS = """
+    QuitConfirmModal > ModalBox {
+        width: 50%; height: auto; margin: 12 25;
+        border: round $error; border-title-color: $error;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        box = ModalBox()
+        box.border_title = "QUIT"
+        with box:
+            yield NonSelectableStatic(
+                "Are you sure you want to quit GigBuddy?")
+
+    def on_mount(self) -> None:
+        box = self.query_one(ModalBox)
+        set_border_hint_layout(box, "", ["cancel", "enter quit"])
+
+    def on_unmount(self) -> None:
+        # 弹窗移除后焦点会被 Textual 恢复给 Quit 按钮——移走它，避免
+        # 空格键（按钮激活键）立即重开弹窗。
+        self.app.set_focus(None)
+
+    def action_cancel(self) -> None:
+        """Esc / border-hint cancel: close without quitting."""
+        self.dismiss()
+
+    def _confirm(self) -> None:
+        """Enter / border-hint confirm: exit the app."""
+        self.app.exit()
+
+    def _border_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
+        return [("cancel", self.dismiss), ("enter quit", self._confirm)]
+
+    def on_click(self, event: MouseEvent) -> None:
+        border_hint_click(self.query_one(ModalBox), event,
+                          self._border_hint_actions())
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        box = self.query_one(ModalBox)
+        set_border_hint_hover(
+            box, border_hint_action_token(
+                box, event.screen_x, event.screen_y,
+                [token for token, _ in self._border_hint_actions()]))
+
+
 GUITAR_AMP_THEMES = (GIGBUDDY_THEME,
                      *(_guitar_amp_theme(spec)
                        for spec in _GUITAR_AMP_THEME_SPECS))
@@ -493,6 +574,30 @@ class GigBuddyApp(App):
     GigBuddyHeader #header-status.header-status--warning { color: $warning; }
     GigBuddyHeader #header-status.header-status--error { color: $error; }
     Footer { background: $panel; }
+    .footer-key:hover {
+        background: $panel-lighten-1;
+        color: $text;
+    }
+    #footer-row {
+        height: 1; layout: horizontal;
+        background: $panel;
+    }
+    #footer-row Footer {
+        dock: none; height: 1; width: 1fr;
+    }
+    #app-quit {
+        height: 1; width: 16;
+        color: $error;
+        text-style: bold;
+        content-align: center middle;
+        background: $boost;
+        border-top: none; border-right: none;
+        border-bottom: none; border-left: none;
+    }
+    #app-quit:hover {
+        background: $error;
+        color: $background;
+    }
     #top { layout: horizontal; height: 1fr; }
 
     /* panels: quiet warm border, amber when something inside has focus.
@@ -672,8 +777,8 @@ class GigBuddyApp(App):
     }
     InterfaceBar MeterBar { height: 2; width: 1fr; border: none; padding: 0 1; }
     InterfaceBar #runtime-status {
-        width: auto; min-width: 22; height: 1; color: $text-muted;
-        content-align: center middle; margin-right: 1;
+        width: auto; height: 1; color: $text-muted;
+        content-align: center middle; margin-right: 3;
     }
     InterfaceBar .audio-action {
         height: 3; width: 18; content-align: center middle;
@@ -849,16 +954,16 @@ class GigBuddyApp(App):
         # 链参数步进（v0.1.1 交互契约）：App 全局生效，任何界面位置按
         # g/G/m/M/q/Q 都能步进；聚焦 ChainParams 时由它的 edit_guard
         # 遮蔽成 no-op，避免编辑态误步进。
-        Binding("g", "bump_gain(-0.05)", "gain -"),
-        Binding("G", "bump_gain(+0.05)", "gain +"),
-        Binding("m", "bump_master(-0.05)", "master -"),
-        Binding("M", "bump_master(+0.05)", "master +"),
+        Binding("g", "bump_gain(-0.05)", "gain -", show=False),
+        Binding("G", "bump_gain(+0.05)", "gain +", show=False),
+        Binding("m", "bump_master(-0.05)", "master -", show=False),
+        Binding("M", "bump_master(+0.05)", "master +", show=False),
         # REQ-017: preset 应用改的是链配置（live_chain.json）——undo/redo
         # 即链配置快照的恢复/还原（ctrl+shift+z = redo；无 y 键冲突）
         Binding("ctrl+z", "undo_chain", "undo preset"),
         Binding("ctrl+shift+z", "redo_chain", "redo preset"),
-        Binding("q", "bump_quality(-0.05)", "quality -"),
-        Binding("Q", "bump_quality(+0.05)", "quality +"),
+        Binding("q", "bump_quality(-0.05)", "quality -", show=False),
+        Binding("Q", "bump_quality(+0.05)", "quality +", show=False),
         # no single-key quit: Ctrl+C twice (from any screen/modal) exits
         Binding("ctrl+c", "request_quit", "quit (×2)", show=False,
                 priority=True),
@@ -876,7 +981,9 @@ class GigBuddyApp(App):
                     yield DetailPane()
             with Vertical(id="bottom"):
                 yield InterfaceBar()
-        yield Footer()
+        with Horizontal(id="footer-row"):
+            yield AudioActionButton("ctrl+c ×2 quit", "quit", "app-quit")
+            yield Footer()
         yield Static("Minimum terminal size: 80x32", id="unsupported-size")
 
     def __init__(self, dev_in: str = "", dev_out: str = "", in_ch: int = 0,
@@ -930,10 +1037,16 @@ class GigBuddyApp(App):
         self._param_hold_last_commit_at = 0.0
         for guitar_theme in GUITAR_AMP_THEMES:
             self.register_theme(guitar_theme)
+        self.register_theme(COMPAT_DARK_THEME)
+        self._limited_color = False
         # Pin danger/state colors across every theme (built-in ones included)
         # before the first CSS generation picks the theme.
         for th in self.available_themes.values():
             th.variables.update(FIXED_SEMANTIC_COLORS)
+            # Footer hover 高亮：用各主题的 boost 色（比 panel 亮一档）
+            th.variables.setdefault(
+                "block-hover-background",
+                th.variables.get("boost", "#3d2e1f"))
         self.theme = theme or GIGBUDDY_THEME.name
 
     def get_default_screen(self):
@@ -948,6 +1061,8 @@ class GigBuddyApp(App):
         Bound at app level, so it works from every screen and modal; the
         command palette's Quit entry exits immediately. A selected detail
         table takes the usual terminal shortcut precedence over quitting.
+        ctrl+c is always the two-press quit — the Quit button's confirmation
+        modal is only opened by activating the button itself.
         """
         selected = self.screen.get_selected_text()
         if selected:
@@ -1097,23 +1212,28 @@ class GigBuddyApp(App):
         self._mutation_anchors = {}
 
     def _apply_compatible_theme(self) -> None:
-        """Terminal color-depth fallback: 16-color/no-color terminals render
-        the truecolor guitar-amp themes badly (some show as red). Detect the
-        terminal's color system via the Rich console and switch to the
-        built-in 16-color-safe ``textual-dark`` theme when truecolor is not
-        available. 256-color terminals keep the guitar-amp themes (Textual
-        approximates them acceptably)."""
+        """Terminal color-depth fallback: terminals without truecolor render
+        the guitar-amp themes badly (some show as red). Detect the terminal's
+        color system via the Rich console; when truecolor is unavailable,
+        lock the theme to the two 16-color-safe options (``textual-dark`` and
+        ``compat-dark``) and start on ``textual-dark``."""
         try:
             color_system = str(self.console.color_system or "").casefold()
         except Exception:
             color_system = ""
-        if color_system != "truecolor" and self.theme != "textual-dark":
-            self.theme = "textual-dark"
-            self.notify(
-                "Terminal color support is limited — using the compatible theme")
+        self._limited_color = color_system != "truecolor"
+        if self._limited_color:
+            if self.theme not in (COMPAT_DARK_THEME.name, "textual-dark"):
+                self.theme = "textual-dark"
+                self.notify(
+                    "Terminal color support is limited — using the compatible theme")
 
     def action_next_theme(self) -> None:
-        themes = list(GUITAR_AMP_THEME_NAMES)
+        # 受限终端（无 truecolor）：只允许在 16 色安全的两个主题间循环
+        if getattr(self, "_limited_color", False):
+            themes = [COMPAT_DARK_THEME.name, "textual-dark"]
+        else:
+            themes = list(GUITAR_AMP_THEME_NAMES)
         # A caller may intentionally start with a built-in Textual theme via
         # ``--theme``; the next explicit theme action should still recover to
         # the restored guitar-amp sequence instead of raising ValueError.
@@ -1312,6 +1432,10 @@ class GigBuddyApp(App):
 
     def on_interface_bar_settings_requested(self, _event: InterfaceBar.SettingsRequested) -> None:
         self.action_open_audio_settings()
+
+    def on_interface_bar_quit_requested(self, _event: InterfaceBar.QuitRequested) -> None:
+        """QUIT button: open the second-stage confirmation before exiting."""
+        self.push_screen(QuitConfirmModal())
 
     def action_open_audio_settings(self) -> None:
         self.push_screen(AudioSettingsScreen(

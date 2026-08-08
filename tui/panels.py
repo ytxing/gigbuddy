@@ -4574,6 +4574,8 @@ class AudioActionButton(Static):
     def action_activate(self) -> None:
         if self.action_kind == "settings":
             self.post_message(InterfaceBar.SettingsRequested())
+        elif self.action_kind == "quit":
+            self.post_message(InterfaceBar.QuitRequested())
         else:
             self.post_message(DeviceChanged("mute", ""))
 
@@ -4588,13 +4590,16 @@ class InterfaceBar(Horizontal):
     class SettingsRequested(Message):
         pass
 
+    class QuitRequested(Message):
+        pass
+
     def __init__(self) -> None:
         super().__init__()
         self.border_title = "LEVEL"
 
     def compose(self) -> ComposeResult:
         yield MeterBar()
-        self.runtime = Static("RUNTIME ?", id="runtime-status")
+        self.runtime = Static("", id="runtime-status")
         yield self.runtime
         yield AudioActionButton("AUDIO SETTINGS", "settings", "audio-settings")
         self.mute = AudioActionButton("MUTE", "mute", "audio-mute")
@@ -4607,19 +4612,15 @@ class InterfaceBar(Horizontal):
     def set_runtime_status(self, file_revision: object,
                            runtime_revision: int | None,
                            status: str) -> None:
-        """Show file/runtime alignment without overstating external engines."""
-        if not isinstance(file_revision, int) or isinstance(file_revision, bool):
-            text = "FILE ? · RUNTIME UNKNOWN"
-        elif status == "rejected":
-            runtime = ("?" if runtime_revision is None
-                       else str(runtime_revision))
-            text = f"FILE {file_revision} · RUNTIME {runtime} · REJECTED"
+        """Show the engine apply state only (APPLIED / PENDING / REJECTED)."""
+        if status == "rejected":
+            text = "REJECTED"
         elif runtime_revision is None or status == "unknown":
-            text = f"FILE {file_revision} · RUNTIME UNKNOWN"
+            text = "UNKNOWN"
         elif runtime_revision == file_revision:
-            text = f"FILE {file_revision} · RUNTIME {runtime_revision} · APPLIED"
+            text = "APPLIED"
         else:
-            text = f"FILE {file_revision} · RUNTIME {runtime_revision} · PENDING"
+            text = "PENDING"
         self.runtime.update(text)
 
 
