@@ -72,7 +72,8 @@ stop_banner() {
 }
 
 start_banner() {
-  if [[ -t 1 && "${GIGBUDDY_VERBOSE:-0}" != "1" ]] && command -v python3 >/dev/null 2>&1; then
+  if [[ -t 1 && "${GIGBUDDY_VERBOSE:-0}" != "1" && -n "${TERM:-}" && "$TERM" != "dumb" ]] \
+     && command -v python3 >/dev/null 2>&1; then
     # 动画进程独占终端；安装主流程只通过状态文件更新步骤文字。
     printf '\033[2J\033[H'
     local lines cols tty_size
@@ -82,26 +83,49 @@ start_banner() {
       lines=$(tput lines 2>/dev/null || printf '24')
       cols=$(tput cols 2>/dev/null || printf '80')
     fi
-    STATUS_ROW=9
-    # 动画 8 行 + 状态区至少 8 行；横幅 96 列，终端须更宽避免行尾折行。
-    if (( lines >= STATUS_ROW + 8 && cols > 96 )); then
-      export GB_BANNER_ROW="$STATUS_ROW"
-      export GB_STATUS_FILE="$STATUS_FILE"
-    # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动，
-    # 后台持续播放，直到安装流程调用 stop_banner。
-    python3 - <<'PY' &
+    # 字体分层：终端越大用越大的金色字体（Rebel / Small Block / miniwi）
+    local banner_lines=() status_row=0
+    if (( lines >= 17 && cols > 96 )); then
+      banner_lines=(
+        '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████'
+        '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███'
+        ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███'
+        '▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████'
+        '▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███'
+        '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███'
+        ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████'
+        '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒'
+      )
+      status_row=9
+    elif (( lines >= 13 && cols > 28 )); then
+      banner_lines=(
+        '▞▀▖▜▘▞▀▖▛▀▖▌ ▌▛▀▖▛▀▖▌ ▌'
+        '▌▄▖▐ ▌▄▖▙▄▘▌ ▌▌ ▌▌ ▌▝▞'
+        '▌ ▌▐ ▌ ▌▌ ▌▌ ▌▌ ▌▌ ▌ ▌'
+        '▝▀ ▀▘▝▀ ▀▀ ▝▀ ▀▀ ▀▀  ▘'
+      )
+      status_row=5
+    elif (( lines >= 12 && cols > 22 )); then
+      banner_lines=(
+        '▄▖▄▖▄▖▄ ▖▖▄ ▄ ▖▖'
+        '▌ ▐ ▌ ▙▘▌▌▌▌▌▌▌▌'
+        '▙▌▟▖▙▌▙▘▙▌▙▘▙▘▐'
+      )
+      status_row=4
+    fi
+    if (( ${#banner_lines[@]} >= 3 )); then
+      # 真彩色能力检测：金色 24bit 需要 truecolor；否则 256 色静态近似
+      if [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" \
+            || "$TERM" == *"truecolor"* || "$TERM" == *"direct"* ]]; then
+        export GB_BANNER_ROW="$status_row"
+        export GB_STATUS_FILE="$STATUS_FILE"
+        export GB_BANNER_LINES="$(printf '%s\n' "${banner_lines[@]}")"
+        # 霓虹灯呼吸：字符不动，横幅上均匀分布 3 个明暗浪，金色系内流动，
+        # 后台持续播放，直到安装流程调用 stop_banner。
+        python3 - <<'PY' &
 import math, os, signal, sys, time
 
-LINES = (
-  '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████',
-  '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███',
-  ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███',
-  '▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████',
-  '▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███',
-  '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███',
-  ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████',
-  '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒',
-)
+LINES = tuple(os.environ['GB_BANNER_LINES'].split('\n'))
 W = max(len(l) for l in LINES)
 R = len(LINES)
 WAVES = 3                       # 均匀分布的明暗浪数量
@@ -152,28 +176,63 @@ while running:
     f += 1
     time.sleep(0.1)
 PY
-    BANNER_PID=$!
-    return
+        BANNER_PID=$!
+        # 动画子进程存活验证：启动后短暂检查，崩溃则回退静态金色
+        sleep 0.3
+        if ! kill -0 "$BANNER_PID" 2>/dev/null; then
+          BANNER_PID=""
+          print_static_banner "${banner_lines[@]}"
+        fi
+        return
+      fi
+    fi
   fi
+  # 非交互终端、无 python3、不支持 truecolor、或终端太矮：静态金色版
+  local s_lines s_cols s_size
+  s_size=$(stty size </dev/tty 2>/dev/null || true)
+  read -r s_lines s_cols <<<"$s_size"
+  if [[ ! "$s_lines" =~ ^[1-9][0-9]*$ || ! "$s_cols" =~ ^[1-9][0-9]*$ ]]; then
+    s_lines=$(tput lines 2>/dev/null || printf '24')
+    s_cols=$(tput cols 2>/dev/null || printf '80')
   fi
-  # 非交互终端、没有 python3、或终端太矮：静态金色版
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
+  local static_lines=()
+  if (( s_lines >= 12 && s_cols > 96 )); then
+    static_lines=(
       '   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       '  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       ' ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       '▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       '▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       '▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       ' ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████'
-    printf '\033[38;2;184;134;11m%s\033[0m\n' \
       '  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒'
-    printf '\n\n\n'
+    )
+  elif (( s_lines >= 10 && s_cols > 28 )); then
+    static_lines=(
+      '▞▀▖▜▘▞▀▖▛▀▖▌ ▌▛▀▖▛▀▖▌ ▌'
+      '▌▄▖▐ ▌▄▖▙▄▘▌ ▌▌ ▌▌ ▌▝▞'
+      '▌ ▌▐ ▌ ▌▌ ▌▌ ▌▌ ▌▌ ▌ ▌'
+      '▝▀ ▀▘▝▀ ▀▀ ▝▀ ▀▀ ▀▀  ▘'
+    )
+  elif (( s_lines >= 8 && s_cols > 22 )); then
+    static_lines=(
+      '▄▖▄▖▄▖▄ ▖▖▄ ▄ ▖▖'
+      '▌ ▐ ▌ ▙▘▌▌▌▌▌▌▌▌'
+      '▙▌▟▖▙▌▙▘▙▌▙▘▙▘▐'
+    )
+  fi
+  if (( ${#static_lines[@]} >= 3 )); then
+    print_static_banner "${static_lines[@]}"
+  fi
+}
+
+# 静态金色 banner：256 色金色（不支持 truecolor 的终端也正确显示）
+print_static_banner() {
+  local line
+  for line in "$@"; do
+    printf '\033[38;5;172m%s\033[0m\n' "$line"
+  done
+  printf '\n\n\n'
 }
 
 INSTALL_LOG="$(mktemp -t gigbuddy-install.XXXXXX)"
