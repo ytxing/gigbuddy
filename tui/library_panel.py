@@ -562,6 +562,7 @@ class LibraryPanel(Vertical):
         self._sort = "trending"
         self._last_active = "pane-local"  # initial state: first tick is a no-op
         self._type_filter = "all"
+        self._author_filter: str | None = None
         self._query = ""
         self._search_spec = SearchSpec()
         self._view_states = {
@@ -1517,6 +1518,7 @@ class LibraryPanel(Vertical):
         search.value = ""
         self.query_one("#local-search", Input).value = ""
         self.query_one("#tone-search", Input).value = ""
+        self._author_filter = None
         self._set_search_spec("", SearchSpec())
         if self._mode != "local":
             self.activate_view_tab("pane-local")
@@ -2047,6 +2049,8 @@ class LibraryPanel(Vertical):
     def _tone_status_hint(self, spec: SearchSpec) -> str:
         """The hint shown in the #tone-status line for the current view."""
         extra = []
+        if self._author_filter and not spec.authors:
+            extra.append(f"author {self._author_filter}")
         if spec.authors:
             extra.append("@" + ", @".join(spec.authors))
         if spec.tags:
@@ -2120,7 +2124,7 @@ class LibraryPanel(Vertical):
         else:
             self._tone_request_id += 1
             request_id = self._tone_request_id
-            key = (query, self._type_filter, self._sort)
+            key = (query, self._type_filter, self._sort, self._author_filter)
             self._tone_cache_key = key
             self._tone_error = False
         self._set_search_spec(query, spec)
