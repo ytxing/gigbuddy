@@ -2,16 +2,51 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.0.0}"
+REPO_REF="${GIGBUDDY_REF:-v1.0.1}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
 PYTHON_BIN="${GIGBUDDY_PYTHON:-python3}"
 
+ROLLBACK_FILE="$(mktemp -t gigbuddy-rollback.XXXXXX)"
+
 die() {
   stop_banner
+  rollback_install
   printf 'GigBuddy install failed: %s\n' "$*" >&2
   exit 1
+}
+
+rollback_install() {
+  # 安装失败时撤销本次安装做的改动，恢复到安装前状态：
+  # - 本次新建的安装目录 → 整个删除
+  # - 更新已有安装 → checkout 回原 HEAD，删除本次新建的 .venv/data/third_party
+  #   （安装前已存在的保留，幂等重跑不受影响）
+  # - 本次新建的 ~/.local/bin wrapper 链接 → 删除
+  [[ -f "$ROLLBACK_FILE" ]] || return 0
+  . "$ROLLBACK_FILE"
+  if [[ "${WAS_NEW_CLONE:-0}" == "1" ]]; then
+    rm -rf -- "$INSTALL_ROOT"
+  elif [[ -n "${PREV_HEAD:-}" ]]; then
+    git -C "$INSTALL_ROOT" checkout --quiet --detach "$PREV_HEAD" 2>/dev/null || true
+    for dir_name in .venv data third_party; do
+      case "$dir_name" in
+        .venv) had=HAD_VENV ;;
+        data) had=HAD_DATA ;;
+        third_party) had=HAD_THIRDPARTY ;;
+      esac
+      if [[ "${!had:-0}" != "1" && -d "$INSTALL_ROOT/$dir_name" ]]; then
+        rm -rf -- "$INSTALL_ROOT/$dir_name"
+      fi
+    done
+  fi
+  for command_name in gigbuddy gigbuddy-tui; do
+    link="$BIN_DIR/$command_name"
+    if [[ -f "$link" ]] && grep -q "$INSTALL_ROOT" "$link" 2>/dev/null; then
+      rm -f -- "$link"
+    fi
+  done
+  rm -f "$ROLLBACK_FILE"
 }
 
 step() {
@@ -202,6 +237,15 @@ if ! brew --prefix portaudio >/dev/null 2>&1; then
   run_quiet brew install --quiet portaudio
 fi
 
+# 记录安装前状态，供失败回滚使用（rollback_install）
+if [[ -d "$INSTALL_ROOT/.git" ]]; then
+  printf 'WAS_NEW_CLONE=0\nPREV_HEAD=%s\n' \
+    "$(git -C "$INSTALL_ROOT" rev-parse HEAD 2>/dev/null || true)" \
+    > "$ROLLBACK_FILE"
+else
+  printf 'WAS_NEW_CLONE=1\n' > "$ROLLBACK_FILE"
+fi
+
 if [[ -e "$INSTALL_ROOT" && ! -d "$INSTALL_ROOT/.git" ]]; then
   die "install path exists but is not a GigBuddy checkout: $INSTALL_ROOT"
 fi
@@ -221,6 +265,13 @@ else
 fi
 
 printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
+
+# 记录 install.sh 将创建的目录是否存在（失败时只删本次新建的）
+{
+  printf 'HAD_VENV=%s\n' "$([[ -d "$INSTALL_ROOT/.venv" ]] && printf 1 || printf 0)"
+  printf 'HAD_DATA=%s\n' "$([[ -d "$INSTALL_ROOT/data" ]] && printf 1 || printf 0)"
+  printf 'HAD_THIRDPARTY=%s\n' "$([[ -d "$INSTALL_ROOT/third_party" ]] && printf 1 || printf 0)"
+} >> "$ROLLBACK_FILE"
 
 step "Installing GigBuddy (venv, library, starter presets, dry inputs, engine)"
 run_quiet "$INSTALL_ROOT/install.sh"
@@ -242,6 +293,8 @@ write_wrapper() {
 write_wrapper gigbuddy "\"$INSTALL_ROOT/bin/gigbuddy\" \"\$@\""
 write_wrapper gigbuddy-tui "\"$INSTALL_ROOT/.venv/bin/python\" -m tui \"\$@\""
 
+# 安装成功：不再需要回滚状态
+rm -f "$ROLLBACK_FILE"
 stop_banner
 printf '\nGigBuddy ready\n'
 printf '  %s/gigbuddy\n' "$BIN_DIR"

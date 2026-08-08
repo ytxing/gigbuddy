@@ -1,6 +1,6 @@
 ---
 name: gigbuddy
-description: 用户想要某个吉他音色/某风格音色链时使用——检索 TONE3000 NAM 模型(.nam)与箱体 IR，import 进本地音色库（SQLite），组装音色链 JSON 交给实时引擎热切换或离线渲染。触发场景："给我一个XX音色"、"找XX的音色链"、"渲染XX风格"、"帮我搭一个XX链" / find guitar tones, build tone chains.
+description: Use when the user wants a guitar tone or a tone chain for a style — search TONE3000 NAM models (.nam) and cabinet IRs, import them into the local tone library (SQLite), and assemble a chain JSON for the realtime engine hot-swap or offline render. Triggers: "give me an XX tone", "find an XX chain", "render XX style", "build me an XX chain".
 ---
 
 # GigBuddy: NL → tone chain → library / render
@@ -56,12 +56,16 @@ bin/gigbuddy preset delete <name>
 
 5. **Assemble the chain** (per `docs/ui-interaction-spec-v0.2.md`) and hand it to the engine:
    ```bash
-   bin/gigbuddy chain set '{"slots": [{"path": "data/tones/<id>-<title-slug>/<exact-basename>.nam"}, {"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
+   bin/gigbuddy chain set '{"slots": [{"path": "data/tones/<id>-<title-slug>/<exact-basename>.nam"}, {"path": "..."}], "gain": 1.0, "master": 1.0, "quality": 1.0}'
    ```
    Every tone id must come from real search output and every file path from real
    import output. New writes use only ordered `slots[]`; old flat `model`/`ir`
    input is read-only compatibility. `chain set` writes `data/live_chain.json`
    atomically — the running engine hot-swaps within ~0.3s and the TUI reflects it.
+   A slot may be `{"path": null, "candidate": "<model path>"}` — a **bypassed**
+   slot: the engine skips it until the user activates it, but the UI keeps the
+   model reference. Use this for optional/tonal-shaping IRs (e.g. an amp's
+   tone-switch impulses) that should not be active by default.
 
 6. **Optional offline render** (when the user asks for a rendered wav file):
    ```bash
@@ -74,65 +78,91 @@ bin/gigbuddy preset delete <name>
 7. **Report**: chain JSON, local file paths, confidence annotations
    (confirmed = from real search/import output).
 
-## 批量 preset 生成
+## Batch preset generation
 
-触发场景：用户要"一系列 preset / 风格包 / 给我 N 个不同风格的链"（如"来 5 个风格包：清音、crunch、金属、布鲁斯、爵士"）。
+Trigger: the user asks for a "series of presets / style pack / N chains in
+different styles" (e.g. "5 style packs: clean, crunch, metal, blues, jazz").
 
-核心语义：`preset save <name>` **快照当前 live chain**（`data/live_chain.json` 的 `slots[]` 与 `gain/master/quality`；库内文件保留 `model_id` 逻辑引用，外部路径原样保留），不是“从参数构造链”。批量生成 = **逐风格循环**：`chain set` 写入链 → `preset save` 快照 → 下一个。`chain set` 是整体覆盖写（不是合并），每次必须给完整 `slots[]` 和链级参数。
+Core semantics: `preset save <name>` **snapshots the current live chain**
+(`slots[]` plus `gain/master/quality` from `data/live_chain.json`; library files
+keep a `model_id` logical reference, external paths are kept verbatim) — it does
+**not** construct a chain from parameters. Batch generation = a **two-phase loop**:
 
-工作流：
-
-1. **解析意图 → 风格清单**：从用户描述归纳 N 个风格，每个风格明确：① amp 搜索词（风格/乐手/设备）② 期望性格（clean / overdrive / high-gain）③ 是否需要 cab IR。在报告中先列清单让用户确认（可一次性全部生成）。
-
-2. **逐风格搜索并记录真实 id**：
+**Phase 1 — search and import every style first** (fewer round trips; all real
+ids are known before any chain is written):
+1. Parse the intent into a style list; for each style record: ① amp search terms
+   (style/artist/gear) ② expected character (clean/overdrive/high-gain) ③ whether
+   a cab IR is needed. List the styles for the user to confirm before generating
+   (can generate all at once).
+2. Search each style and record real ids:
    ```bash
    bin/gigbuddy tone search "<amp terms>" --gear amp --limit 10
-   bin/gigbuddy tone search "<cab terms>" --gear cab --limit 10   # 需要 IR 时
-   bin/gigbuddy tone search "<terms>" --author <user> --tag <tag> # 可选精确过滤
+   bin/gigbuddy tone search "<cab terms>" --gear cab --limit 10   # when an IR is needed
+   bin/gigbuddy tone search "<terms>" --author <user> --tag <tag> # optional precise filter
    ```
-   与单链流程一致：偏好 `gear=amp/amp-cab`、高下载、标题贴合；amp-cab 一体 tone 不再单独找 cab。**记录真实 tone_id**（Hard rules）。
-
-3. **Import 并读描述分析**（`tone show` 的 description 是 note 的素材来源）：
+   Same preference as the single-chain flow: `gear=amp/amp-cab`, high downloads,
+   title matching; amp-cab all-in-one tones need no separate cab. **Record real
+   tone_ids** (Hard rules).
+3. Import and read the description for analysis (`tone show`'s description is the
+   source material for the note):
    ```bash
-   bin/gigbuddy tone import <id>        # 幂等，重复导入无副作用
-   bin/gigbuddy tone show <id>          # 本地库全字段：description/tags/gear…
+   bin/gigbuddy tone import <id>        # idempotent
+   bin/gigbuddy tone show <id>          # full local fields: description/tags/gear…
    ```
-   从 description/tags 归纳该音色的性格、适用场景、音色特点（如"通透清音、适合 funk/雷鬼"），作为该 preset note 的分析结论。搜索 hit 本身不含 description——描述一律以 import 后的 `tone show` 为准。
+   Summarize character, use cases, and tone traits from description/tags (e.g.
+   "transparent clean, fits funk/reggae") as the analysis conclusion for that
+   preset's note. Search hits carry no description — always use the imported
+   `tone show` output.
 
-4. **组装链并批量快照**（循环每个风格）：
-   ```bash
-   bin/gigbuddy chain set '{"slots": [{"path": "data/tones/<id>-<title-slug>/<exact-basename>.nam"}, {"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
-   bin/gigbuddy preset save "<风格>-<特征>" --note "<分析摘要：性格/适用场景/音色特点>"
-   ```
-   命名建议：小写 ASCII 连字符 `<风格>-<特征>`（如 `blues-clean-70s`、`metal-modern-gain`、`jazz-clean-neck`）；同名会覆盖——批量前先 `preset list` 检查是否与既有 preset 冲突，冲突时换名或先问用户。注意 `preset save` 会把刚保存的 preset 设为 active preset（`preset current` 可见），批量保存后 active 指向最后一条——按需用 `preset load` 切回。
+**Phase 2 — assemble and snapshot per style**:
+```bash
+bin/gigbuddy chain set '{"slots": [{"path": "data/tones/<id>-<title-slug>/<exact-basename>.nam"}, {"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'
+bin/gigbuddy preset save "<style>-<character>" --note "<analysis summary: character/use cases/tone traits>"
+```
+Naming: lowercase ASCII hyphenated `<style>-<character>` (e.g. `blues-clean-70s`,
+`metal-modern-gain`, `jazz-clean-neck`); same-name saves overwrite — run
+`preset list` before the batch to check for conflicts, rename or ask the user on
+collision. Note that `preset save` sets the saved preset as active
+(`preset current` reflects it); after the batch the active preset is the last
+one — `preset load` to switch back as needed.
 
-5. **验证**：
-   ```bash
-   bin/gigbuddy preset list                 # 全部 preset + active 标记
-   bin/gigbuddy preset show <name> --json   # 单条：slots/model_id/路径/gain/master/note
-   bin/gigbuddy preset load <name>          # 抽查：应用到 live chain（引擎 ~0.3s 热换）
-   ```
-   检查：每条 preset 的 model_id/路径来自真实输出、note 与分析结论一致、amp-cab 判断正确。
+**Verify**:
+```bash
+bin/gigbuddy preset list                 # all presets + active marker
+bin/gigbuddy preset show <name> --json   # one row: slots/model_id/paths/gain/master/note
+bin/gigbuddy preset load <name>          # spot check: apply to the live chain (engine ~0.3s hot-swap)
+```
+Check: every model_id/path comes from real output, the note matches the analysis,
+and the amp-cab decision is correct.
 
-后续维护（同样走 CLI）：改 note 不动链用 `preset note <name> "<新文本>"`（省略文本即清空）；改名 `preset rename <old> <new>`；删除 `preset delete <name>`。
+Maintenance (same CLI): `preset note <name> "<new text>"` to change a note without
+touching the chain (omit text to clear); `preset rename <old> <new>` to rename;
+`preset delete <name>` to remove.
 
 ## Hard rules
 
 - **Never invent tone_id / file paths** — every resource reference must come from
   real `tone search` / `tone import` output in this session; if nothing matches,
   change keywords and re-search, don't fabricate.
+- **Never import or use A1 (WaveNet) models** — A1 is the deprecated architecture,
+  filtered out of the product (download, browse, display, use). Only A2 and IR
+  (plus Custom where applicable) are valid; an A1-only tone has no usable models.
 - On import/render failure, fix the chain config first, then retry — no skipping.
 - Check the local library first when the user asks about a tone already imported
   (`bin/gigbuddy tone list --query <q>` / `tone show <id>`).
 - amp/cab sample-rate and format are handled by the engine/render layer — no manual
   conversion.
 - When the user didn't specify a dry input, use the default and say so in the report.
+- Optional/tonal-shaping IRs (an amp's tone-switch impulses, non-cabinet shaping)
+  go into a **bypassed** slot (`{"path": null, "candidate": "<model path>"}`) —
+  they are not cabinet IRs and should not be active by default; real cabinet IRs
+  are active slots.
 
 ## Example
 
-User: "给我一个 RHCP 那种清音链"
+User: "Give me an RHCP-style clean chain"
 1. `bin/gigbuddy tone search "frusciante clean" --limit 10` → pick amp tone (record id)
 2. `bin/gigbuddy tone search "v30 cab" --gear cab --limit 10` → pick cab (or skip if amp-cab)
 3. `bin/gigbuddy tone import <amp_id>` (+ `<cab_id>` if used) → note local file paths
-4. `bin/gigbuddy chain set '{"slots": [{"path": "..."}], "gain": 1.0, "master": 0.8, "quality": 1.0}'`
+4. `bin/gigbuddy chain set '{"slots": [{"path": "..."}], "gain": 1.0, "master": 1.0, "quality": 1.0}'`
 5. Report chain + files + confidence.
