@@ -293,7 +293,8 @@ printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
 } >> "$ROLLBACK_FILE"
 
 step "Installing GigBuddy (venv, library, starter presets, dry inputs, engine — downloading models and compiling can take a while; please be patient)"
-run_quiet "$INSTALL_ROOT/install.sh"
+# 根 install.sh 的阶段标题同步进 banner 状态区（GIGBUDDY_STATUS_FILE 钩子）
+GIGBUDDY_STATUS_FILE="$STATUS_FILE" run_quiet "$INSTALL_ROOT/install.sh"
 
 step "Linking commands"
 mkdir -p "$BIN_DIR"

@@ -8,6 +8,15 @@ SKIP_PRESETS=0
 SKIP_DRY_INPUTS=0
 DRY_INPUTS="all"
 
+# 阶段提示：正常打印，同时（若远程安装器传入状态文件）追加到状态区，
+# 让安装动画实时显示当前进行到哪一步。
+stage() {
+    echo "$1"
+    if [[ -n "${GIGBUDDY_STATUS_FILE:-}" ]]; then
+        printf '==> %s\n' "$1" >> "$GIGBUDDY_STATUS_FILE"
+    fi
+}
+
 usage() {
     cat <<'EOF'
 Usage: ./install.sh [options]
@@ -49,11 +58,11 @@ fi
 
 VENV_PYTHON="$ROOT/.venv/bin/python"
 if [[ ! -x "$VENV_PYTHON" ]]; then
-    echo "Creating $ROOT/.venv"
+    stage "Creating Python environment"
     "$PYTHON_BIN" -m venv "$ROOT/.venv"
 fi
 
-echo "Installing Python dependencies"
+stage "Installing Python dependencies"
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install -r "$ROOT/requirements.txt"
 
@@ -67,8 +76,8 @@ else
     bootstrap_args+=(--dry-inputs "$DRY_INPUTS")
 fi
 
-echo "Preparing local database, starter presets, and dry inputs"
-echo "  (downloading 30 starter models — this can be a bit slow; please be patient)"
+stage "Preparing local database, starter presets, and dry inputs"
+stage "  (downloading 30 starter models — this can be a bit slow; please be patient)"
 PYTHONPATH="$ROOT/src" "$VENV_PYTHON" "$ROOT/scripts/bootstrap.py" \
     "${bootstrap_args[@]}"
 
@@ -78,18 +87,12 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
             echo "git is required to fetch NeuralAudio." >&2
             exit 1
         }
-        echo "Fetching NeuralAudio and its submodules"
+        stage "Fetching NeuralAudio and its submodules"
         git clone --recurse-submodules \
             https://github.com/mikeoliphant/NeuralAudio \
             "$ROOT/third_party/NeuralAudio"
         # 固定引擎依赖版本（与 README 依赖清单一致，避免上游漂移）
         git -C "$ROOT/third_party/NeuralAudio" checkout --quiet 49100f9
-        # 依赖版本坑：RTNeural checkout 里 vendored 的 Eigen 目录默认指向
-        # master（3.4.90 = 3.5 预发布版），与 NAM Core 不兼容——① 移除
-        # unsupported/Eigen/FFT（NAM linear.cpp 依赖它）；② 移除
-        # Eigen::placeholders::lastN（NeuralAudio LSTM.h/LSTMDynamic.h 使用）。
-        # 若 cpp/build.sh 报这两个错误：用 Eigen 3.4.0 稳定版源码 tarball
-        # （gitlab.com/libeigen/eigen/-/archive/3.4.0）替换
         # 依赖版本坑（自动化修补，替代人工操作）：RTNeural checkout 里
         # vendored 的 Eigen 目录默认指向 master（3.4.90 = 3.5 预发布版），
         # 与 NAM Core 不兼容——① 移除 unsupported/Eigen/FFT（NAM linear.cpp
@@ -120,11 +123,11 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
         exit 1
     fi
 
-    echo "Building NAM and realtime engine"
-    echo "  (compiling NeuralAudio + NAM with clang++ -O3 — this can be a bit slow; please be patient)"
+    stage "Building NAM and realtime engine"
+    stage "  (compiling NeuralAudio + NAM with clang++ -O3 — this can be a bit slow; please be patient)"
     "$ROOT/cpp/build.sh"
 else
-    echo "Skipping engine build; launch the TUI with --no-engine"
+    stage "Skipping engine build; launch the TUI with --no-engine"
 fi
 
 echo
