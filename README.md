@@ -33,6 +33,8 @@ keeps the playing experience immediate.
   press `t` to cycle `orange-tolex`, `tweed-brass`, `diamond-noir`,
   `blackface-silver`, `british-green-oxblood`, and `surf-cream-coral`.
 
+![Browsing TONE3000 — live search with trending results, sort and type filters](docs/screenshots/tone3000-browse.png)
+
 ## What is new in v0.2
 
 v0.2 turns the original tone-chain console into a complete tone workbench:
