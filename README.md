@@ -16,22 +16,25 @@ keeps the playing experience immediate.
 
 ## Why GigBuddy
 
-- **Go from idea to playable tone quickly.** Search TONE3000 in the app, pick a
-  model from a pack, and load it directly into the live chain.
-- **Audition before you commit.** Use the included official dry-input library
-  to compare captures with the same performance instead of relying on memory
-  or changing your playing between tests.
-- **Build chains like a pedalboard.** Use up to six ordered stages, including
-  NAM captures and cabinet IRs. Add, remove, reorder, bypass, and restore a
-  stage while keeping the rest of the chain intact.
-- **Keep playing while you refine.** The realtime engine applies complete chain
-  updates atomically and reports live input/output levels in the TUI.
-- **Save the sound, not just the settings.** Presets remember the chain, model
-  references, parameters, and notes. Library file moves do not invalidate a
-  preset.
-- **Make the workbench feel like your rig.** `gigbuddy` is the default theme;
-  press `t` to cycle `orange-tolex`, `tweed-brass`, `diamond-noir`,
-  `blackface-silver`, `british-green-oxblood`, and `surf-cream-coral`.
+- ⚡ **Find tones in seconds.** Search, filter, and sort the whole TONE3000
+  catalog right inside the app — by keyword, author, tag, make, gear type, or
+  trending — instead of paging through the website and downloading one capture
+  at a time.
+- 🎧 **Compare sounds side by side.** Audition any capture with the same dry
+  guitar or bass recording, then swap models and cabinets in the chain and
+  A/B them instantly — no tab-hopping, no guesswork.
+- 🔧 **Shape the signal path like a pedalboard.** Build an ordered chain of up
+  to six Slots (NAM captures and cabinet IRs), then add, remove, reorder,
+  bypass, or restore a stage while the realtime engine keeps playing.
+- 🎸 **Save the rig, not just the settings.** Presets capture the whole chain —
+  model references, parameters, and notes — and bring it back with one action,
+  overwriting the current preset or saving under a new name.
+- 📦 **One manager for everything.** Tones, models, files, download state, and
+  presets live together in a searchable local library — install, uninstall,
+  batch-select, and edit without leaving the workbench.
+- 🎨 **Make it feel like your rig.** Six amp-inspired themes — press `t` to
+  cycle from orange tolex to tweed brass, blackface silver, British green, and
+  surf cream.
 
 ![Browsing TONE3000 — live search with trending results, sort and type filters](docs/screenshots/tone3000-browse.png)
 
