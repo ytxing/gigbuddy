@@ -294,14 +294,21 @@ printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
   printf 'HAD_THIRDPARTY=%s\n' "$([[ -d "$INSTALL_ROOT/third_party" ]] && printf 1 || printf 0)"
 } >> "$ROLLBACK_FILE"
 
-step "Creating Python environment"
+step "Creating Python environment (uv)"
+UV_BIN="${GIGBUDDY_UV:-uv}"
+if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+  step "Installing uv (Python manager)"
+  run_quiet bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  export PATH="$HOME/.local/bin:$PATH"
+  UV_BIN="uv"
+fi
 if [[ ! -x "$INSTALL_ROOT/.venv/bin/python" ]]; then
-  run_quiet "$PYTHON_BIN" -m venv "$INSTALL_ROOT/.venv"
+  run_quiet "$UV_BIN" venv --python 3.12 "$INSTALL_ROOT/.venv"
 fi
 
 step "Installing Python dependencies"
-run_quiet "$INSTALL_ROOT/.venv/bin/python" -m pip install --quiet --upgrade pip
-run_quiet "$INSTALL_ROOT/.venv/bin/python" -m pip install --quiet -r "$INSTALL_ROOT/requirements.txt"
+run_quiet "$UV_BIN" pip install --python "$INSTALL_ROOT/.venv/bin/python" \
+  -r "$INSTALL_ROOT/requirements.txt"
 
 step "Downloading starter presets and dry inputs (this can take a while; please be patient)"
 run_quiet env PYTHONPATH="$INSTALL_ROOT/src" \

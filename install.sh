@@ -41,26 +41,24 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if [[ -z "$PYTHON_BIN" ]]; then
-    if command -v python3.12 >/dev/null 2>&1; then
-        PYTHON_BIN="$(command -v python3.12)"
-    elif command -v python3 >/dev/null 2>&1; then
-        PYTHON_BIN="$(command -v python3)"
-    else
-        echo "Python 3 is required; install Python 3.12 or set PYTHON_BIN." >&2
-        exit 1
-    fi
+# 统一用 uv 管理 Python 环境：系统有 Python 3.12 用它，没有则自动下载；
+# 系统 Python 有无都不影响——uv 全权托管（新手零配置）。
+UV_BIN="${GIGBUDDY_UV:-uv}"
+if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+    stage "Installing uv (Python manager)"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    UV_BIN="uv"
 fi
 
 VENV_PYTHON="$ROOT/.venv/bin/python"
 if [[ ! -x "$VENV_PYTHON" ]]; then
-    stage "Creating Python environment"
-    "$PYTHON_BIN" -m venv "$ROOT/.venv"
+    stage "Creating Python environment (uv)"
+    "$UV_BIN" venv --python 3.12 "$ROOT/.venv"
 fi
 
 stage "Installing Python dependencies"
-"$VENV_PYTHON" -m pip install --upgrade pip
-"$VENV_PYTHON" -m pip install -r "$ROOT/requirements.txt"
+"$UV_BIN" pip install --python "$VENV_PYTHON" -r "$ROOT/requirements.txt"
 
 bootstrap_args=()
 if [[ "$SKIP_PRESETS" -eq 1 ]]; then
