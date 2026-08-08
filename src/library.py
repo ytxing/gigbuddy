@@ -1601,10 +1601,16 @@ def local_models_by_tone(path: str) -> list[dict] | None:
 
 
 def downloaded_model_ids_by_tone() -> dict[int, set[int]]:
-    """tone_id → set of locally downloaded model ids (one SQL pass)."""
+    """tone_id → set of locally downloaded model ids (one SQL pass).
+
+    A1 (WaveNet) 模型是产品过滤掉的废弃架构：本地老数据不计入已下载集合，
+    否则下载状态比对与 Files 计数会把它们当成有效文件。
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT tone_id, id FROM models WHERE local_path IS NOT NULL").fetchall()
+            "SELECT tone_id, id FROM models WHERE local_path IS NOT NULL "
+            "AND LOWER(COALESCE(architecture_version, architecture, '')) "
+            "NOT IN ('1', 'a1', 'wave', 'wavenet')").fetchall()
     out: dict[int, set[int]] = {}
     for r in rows:
         out.setdefault(r["tone_id"], set()).add(r["id"])
@@ -1638,9 +1644,13 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
                     # model URL; an IR tone still defines the whole set as IR.
                     ids = {m["id"] for m in ms}
             else:
-                # Amp/pedal packs may contain both WaveNet (A1) and
-                # SlimmableContainer (A2); both are user-selectable files.
-                ids = {m["id"] for m in ms if not model_is_ir(m, t)}
+                # Amp/pedal packs may contain WaveNet (A1) and
+                # SlimmableContainer (A2). A1 is product-filtered (never
+                # downloaded), so it must not count toward the remote set:
+                # including it would make every local install look partial.
+                ids = {m["id"] for m in ms
+                       if not model_is_ir(m, t)
+                       and not tone3000._is_a1_model(m)}
             return t["id"], "all" if ids else "partial", ids
 
         with ThreadPoolExecutor(max_workers=6) as ex:

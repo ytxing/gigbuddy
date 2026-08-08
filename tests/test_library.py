@@ -826,7 +826,7 @@ def test_mark_download_state(monkeypatch, tmp_path):
     ]
     remote_models = {
         19: [{"id": 1001, "architecture": "SlimmableContainer"},
-             {"id": 9000, "architecture": "WaveNet"}],             # A1 is part of the set
+             {"id": 9000, "architecture": "WaveNet"}],             # A1 filtered out
         123: [{"id": 9002, "architecture": "IR"},                  # have it
               {"id": 9001, "architecture": "IR"}],                 # missing
     }
@@ -836,7 +836,9 @@ def test_mark_download_state(monkeypatch, tmp_path):
 
     out = library.mark_download_state(hits)
     by_id = {t["id"]: t for t in out}
-    assert by_id[19]["download_state"] == "partial"  # A1 still missing
+    # A1（WaveNet）是废弃架构，产品过滤：A2 已全下即 all，不再因缺 A1
+    # 显示 partial。
+    assert by_id[19]["download_state"] == "all"
     assert by_id[19]["downloaded"] == 2
     assert by_id[999]["download_state"] == "none"  # no local models, no API call
     assert by_id[123]["download_state"] == "partial"  # 1 of 2 IRs

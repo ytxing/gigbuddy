@@ -103,6 +103,32 @@ def test_slot_focus_opens_slot_pack_and_tracks_three_states(monkeypatch, tmp_pat
     run(scenario())
 
 
+def test_adding_empty_slot_clears_previous_detail_pack(monkeypatch, tmp_path):
+    """Adding an Empty Slot must not leave the old Pack context visible."""
+
+    _current, _first, _second, _models, _tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            detail = app.query_one(DetailPane)
+            panel.slot_widgets[0].focus()
+            await pilot.pause()
+            assert detail._pack_mode
+
+            await pilot.click(panel.add_slot)
+            await pilot.pause()
+            assert panel.state.slot(1).status is SlotStatus.EMPTY
+            assert detail._pack_mode is False
+            assert detail._view_mode == "empty"
+            assert "NONE" in str(detail._summary.content)
+
+    run(scenario())
+
+
 def test_slot_pack_loads_by_index_and_esc_restores_slot_focus(
         monkeypatch, tmp_path):
     current, _first, second, _models, _tone = _patch_canonical_chain(

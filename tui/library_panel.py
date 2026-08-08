@@ -1881,11 +1881,11 @@ class LibraryPanel(Vertical):
         if not silent:
             status = self.query_one("#tone-status", MarqueeBar)
             if key[2] == "favorites":
-                status.content = "(most favorited · enter detail)"
+                status.content = "most favorited · enter detail"
             else:
                 status.content = (
-                    f"({self._tone_status_hint(self._search_spec)}"
-                    " · ✓ downloaded · ◐ partial · ○ new)")
+                    f"{self._tone_status_hint(self._search_spec)}"
+                    " · ✓ downloaded · ◐ partial · ○ new")
         if silent:
             return
         self._update_tone_subtitle()
@@ -2031,7 +2031,7 @@ class LibraryPanel(Vertical):
         if silent:
             return  # prefetch done: cache filled, UI chrome untouched
         status.content = (
-            f"({self._tone_status_hint(spec)} · ✓ downloaded · ◐ partial · ○ new)")
+            f"{self._tone_status_hint(spec)} · ✓ downloaded · ◐ partial · ○ new")
         self._update_tone_subtitle()
         if not append and not table.row_count:
             # 空结果：没有可显示的 tone，此时才清 detail（不再是搜索瞬间）
@@ -2089,7 +2089,17 @@ class LibraryPanel(Vertical):
                 self._update_tone_subtitle(loading=True)
                 # 同 _show_search：加载期间不清 detail（REQ-011）
             try:
-                hits = await asyncio.to_thread(library.tone3000.top_favorites, 50)
+                # 解析当前搜索框输入并应用到收藏榜：text → title/description
+                # ilike，authors → users 表反查 user_id 过滤（_show_search 的
+                # 同款语义）。解析失败（已 notify 语法错误）时降级复用上次
+                # 成功解析的 _search_spec（与 _query 由 _set_search_spec
+                # 同步），初始为空 SearchSpec() 即无过滤全局榜，行为与
+                # 修复前一致。tag:/make: 无 tones_counts 字段支持，忽略。
+                spec = self._parse_or_notify(self._query) or self._search_spec
+                hits = await asyncio.to_thread(
+                    library.tone3000.top_favorites, 50,
+                    text=spec.text or None,
+                    usernames=self._effective_authors(spec) or None)
             except Exception as e:
                 if not self._tone_alive(generation, request_id) or silent:
                     return
@@ -2125,7 +2135,7 @@ class LibraryPanel(Vertical):
             self._save_tone_cache(key)
             if silent:
                 return
-            status.content = "(most favorited · enter detail)"
+            status.content = "most favorited · enter detail"
             if not table.row_count:
                 # 空结果才清 detail（REQ-011）
                 self._highlighted_key = None
@@ -2416,9 +2426,11 @@ class LibraryPanel(Vertical):
                          "partial": "[bold $warning]◐[/] ",
                          "none": "[dim]○[/] "}.get(state, "")
         title = f"{marker_markup}{escape(title)}"
-        # Files is the complete model set; the Arch column above explains its
-        # A1/A2/Custom/IR composition instead of hiding non-A2 files.
-        total = t.get("models_count") or t.get("a2_models_count") or 0
+        # Files 只数可用模型（A2 + Custom + IR）；A1（WaveNet）已从产品
+        # 过滤，算进总数会让下载状态永远显示 partial。
+        total = ((t.get("a2_models_count") or 0)
+                 + (t.get("custom_models_count") or 0)
+                 + (t.get("irs_count") or 0))
         files = str(total)
         if t.get("downloaded") is not None and total:
             files = f"{t['downloaded']}/{total}"

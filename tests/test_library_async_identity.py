@@ -36,3 +36,23 @@ def test_tone_worker_identity_requires_the_current_pane_and_query():
     panel._view_states["pane-tone"]["query"] = "clean"
     panel._active_pane = "pane-creators"
     assert not LibraryPanel._tone_alive(panel, 3, 8)
+
+
+def test_tone_cache_is_fifo_bounded():
+    panel = SimpleNamespace(
+        _tone_cache={},
+        _remote_tones={},
+        _tone_total=None,
+        _tone_page=0,
+        _tone_has_more=False,
+    )
+
+    for index in range(21):
+        panel._remote_tones = {index: {"id": index}}
+        panel._tone_total = 21
+        panel._tone_page = index + 1
+        LibraryPanel._save_tone_cache(panel, (f"query-{index}", "all", "trending"))
+
+    assert len(panel._tone_cache) == 20
+    assert ("query-0", "all", "trending") not in panel._tone_cache
+    assert ("query-20", "all", "trending") in panel._tone_cache

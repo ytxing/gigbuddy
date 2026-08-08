@@ -127,6 +127,39 @@ def test_global_step_keys_fire_off_params_row_and_guard_shadows_them(
     run(scenario())
 
 
+def test_value_edit_commits_and_escape_cancels(monkeypatch, tmp_path):
+    """Keep the two essential value-edit outcomes: apply and cancel."""
+
+    _patch_chain(monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(220, 55)) as pilot:
+            await pilot.pause(0.3)
+            params = app.query_one(ChainPanel).params
+            _index, start, end = params._value_spans[0]
+            value_x = params.content_region.x + (start + end) // 2
+
+            await pilot.click(offset=(value_x, params.region.y))
+            await pilot.pause()
+            assert params._editing == 0
+            await pilot.press("backspace", "backspace", "7")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert params._editing is None
+            assert live.read_chain().get("gain") == 1.7
+
+            await pilot.click(offset=(value_x, params.region.y))
+            await pilot.pause()
+            assert params._editing == 0
+            await pilot.press("escape")
+            await pilot.pause()
+            assert params._editing is None
+            assert live.read_chain().get("gain") == 1.7
+
+    run(scenario())
+
+
 def test_click_token_dot_and_blank_do_not_move_focus(monkeypatch, tmp_path):
     """Clicking any non-value part of the row never steals focus; the dot
     restores the default value (REQ-027)."""

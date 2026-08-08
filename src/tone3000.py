@@ -225,17 +225,37 @@ def top(limit=50):
                 order="downloads_count.desc", limit=limit))
 
 
-def top_favorites(limit=50):
+def top_favorites(limit=50, text=None, usernames=None):
     """收藏排行：search_tones_a2 RPC 无收藏排序（400），走 tones_counts 聚合表。
 
     行形状与 search 结果兼容。REQ-023：行缺 username/avatar_url（此前表格
     显示 @?）——按 user_id 批量联查 users 补上（一次 in 过滤请求）。
+
+    text: 关键词，title/description 走 PostgREST ``or=(...ilike...)`` 过滤。
+    usernames: 作者名列表（精确），先按 username 联查 users 表拿 user_id，
+         再用 ``user_id=in.(...)`` 过滤；作者不存在时直接返回空列表。
+    tones_counts 无 tag/make 字段，favorites 视图不支持 tag:/make: 过滤
+    （与 search RPC 不同），调用方需自行忽略这两个维度。
     """
-    rows = _canonical_tones(_get(f"{API}/tones_counts",
-                select="id,title,description,gear,downloads_count,favorites_count,"
-                       "a1_models_count,a2_models_count,custom_models_count,"
-                       "irs_count,models_count,created_at,user_id",
-                order="favorites_count.desc", limit=limit))
+    params = dict(
+        select="id,title,description,gear,downloads_count,favorites_count,"
+               "a1_models_count,a2_models_count,custom_models_count,"
+               "irs_count,models_count,created_at,user_id",
+        order="favorites_count.desc", limit=limit)
+    if usernames:
+        user_ids = [u["id"] for u in _get(
+            f"{API}/users", username=f"in.({','.join(usernames)})",
+            select="id", limit=300)]
+        if not user_ids:
+            return []  # 作者不存在，无需再查排行
+        params["user_id"] = f"in.({','.join(user_ids)})"
+    if text:
+        # ilike 通配符（*、%）与转义符（\）剔除，or= 表达式结构字符
+        # （( ) ,）一并替换为空格，用户输入按字面匹配、不破坏过滤表达式
+        safe = re.sub(r"[*%\\(),]", " ", text).strip()
+        if safe:
+            params["or"] = f"(title.ilike.*{safe}*,description.ilike.*{safe}*)"
+    rows = _canonical_tones(_get(f"{API}/tones_counts", **params))
     _attach_usernames(rows)
     return rows
 

@@ -10,6 +10,7 @@ semantics). Undo/redo restores that domain from a snapshot stack:
 - empty stacks do nothing (a notify only).
 """
 import asyncio
+from types import SimpleNamespace
 
 import library
 import library as lib
@@ -98,6 +99,18 @@ def test_undo_restores_preset_config_and_redo_reapplies(monkeypatch, tmp_path):
             cfg = live.read_chain()
             assert cfg["slots"] == [{"path": str(tones / "amp-b.nam")}]
     run(scenario())
+
+
+def test_undo_stack_keeps_the_latest_50_snapshots():
+    holder = SimpleNamespace(_undo_stack=[], _CHAIN_UNDO_LIMIT=50)
+
+    for index in range(51):
+        GigBuddyApp._push_undo(holder, {"slots": [{"path": f"m{index}"}]})
+
+    assert len(holder._undo_stack) == 50
+    assert holder._undo_stack[0]["slots"][0]["path"] == "m1"
+    assert holder._undo_stack[-1]["slots"][0]["path"] == "m50"
+
 
 def test_undo_with_empty_stack_is_a_noop(monkeypatch, tmp_path):
     """No preset applied yet → ctrl+z must not touch the chain file."""
