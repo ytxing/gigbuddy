@@ -211,7 +211,8 @@ if [[ -d "$INSTALL_ROOT/.git" ]]; then
     die "install path is not a GigBuddy checkout: $INSTALL_ROOT"
   fi
   step "Updating GigBuddy to $REPO_REF"
-  run_quiet git -C "$INSTALL_ROOT" fetch --quiet --tags origin
+  # --force: release tag 可能被前移（修复后重发），本地旧 tag 必须可被覆盖
+  run_quiet git -C "$INSTALL_ROOT" fetch --quiet --tags --force origin
   run_quiet git -C "$INSTALL_ROOT" checkout --quiet --detach "$REPO_REF"
 else
   step "Downloading GigBuddy $REPO_REF"
