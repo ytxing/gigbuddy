@@ -242,6 +242,31 @@ search results.
 - Render-versus-reference tone evaluation
 - Additional audio-stream output options
 
+## Dependencies
+
+Pinned versions (v1.0.2). Update `requirements.txt` and the NeuralAudio commit
+in `install.sh` together when bumping.
+
+**Python runtime** (`requirements.txt`):
+
+| Package | Version | License | Role |
+|---|---|---|---|
+| textual | 8.2.8 | MIT | TUI framework |
+| numpy | 2.5.1 | BSD-3-Clause | offline rendering |
+
+**Native engine** (fetched by `install.sh`, pinned in-tree):
+
+| Component | Version | License | Role |
+|---|---|---|---|
+| NeuralAudio | commit `49100f9` | MIT | NAM inference runtime |
+| NAM Core | (NeuralAudio submodule) | MIT | amp-model DSP |
+| RTNeural | (NeuralAudio submodule) | BSD-3-Clause | neural inference |
+| Eigen | 3.4.0 | MPL-2.0 | linear algebra (patched for NAM) |
+| math_approx | (NeuralAudio dep) | MIT | fast math |
+| PortAudio | Homebrew `portaudio` | MIT-like | audio I/O |
+
+**Toolchain**: Python 3.11+, clang++ (C++20), CMake, Homebrew, git.
+
 ## License
 
 MIT (to be finalized). See the dependency licenses in the source tree.

@@ -68,6 +68,7 @@ else
 fi
 
 echo "Preparing local database, starter presets, and dry inputs"
+echo "  (downloading 30 starter models — a few minutes on a typical connection)"
 PYTHONPATH="$ROOT/src" "$VENV_PYTHON" "$ROOT/scripts/bootstrap.py" \
     "${bootstrap_args[@]}"
 
@@ -81,6 +82,8 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
         git clone --recurse-submodules \
             https://github.com/mikeoliphant/NeuralAudio \
             "$ROOT/third_party/NeuralAudio"
+        # 固定引擎依赖版本（与 README 依赖清单一致，避免上游漂移）
+        git -C "$ROOT/third_party/NeuralAudio" checkout --quiet 49100f9
         # 依赖版本坑：RTNeural checkout 里 vendored 的 Eigen 目录默认指向
         # master（3.4.90 = 3.5 预发布版），与 NAM Core 不兼容——① 移除
         # unsupported/Eigen/FFT（NAM linear.cpp 依赖它）；② 移除
@@ -118,6 +121,7 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
     fi
 
     echo "Building NAM and realtime engine"
+    echo "  (compiling NeuralAudio + NAM with clang++ -O3 — expect 2-5 minutes)"
     "$ROOT/cpp/build.sh"
 else
     echo "Skipping engine build; launch the TUI with --no-engine"
