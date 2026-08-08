@@ -1,5 +1,7 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
+**🌐 Language:** [English](README.md) · [中文](README.zh-CN.md)
+
 [![macOS](https://img.shields.io/badge/platform-macOS%20only-000000.svg)](https://github.com/ytxing/gigbuddy)
 [![NAM A2](https://img.shields.io/badge/NAM-A2%20architecture-e59a3c.svg)](https://www.tone3000.com/blog/introducing-neural-amp-modeler-nam-architecture-2-a2)
 [![Release](https://img.shields.io/github/v/release/ytxing/gigbuddy)](https://github.com/ytxing/gigbuddy/releases)
