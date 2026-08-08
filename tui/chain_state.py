@@ -163,14 +163,22 @@ def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _slots_from_chain(chain: Mapping[str, Any],
-                      paths: Sequence[str | None]) -> list[_Slot]:
+                      paths: Sequence[str | None], *,
+                      carry_candidates: bool = True) -> list[_Slot]:
     """Build Slot objects from a chain, carrying each slot's recovery
     candidate (a persisted ``path:null + candidate`` is a bypassed slot that
-    keeps its model reference until the user activates it)."""
+    keeps its model reference until the user activates it).
+
+    ``carry_candidates=False`` drops every candidate: used when a polled
+    chain was written by an unknown/external writer, whose ``candidate``
+    field is not trustworthy — every ``path:null`` becomes an Empty Slot
+    (reconcile docstring contract).
+    """
     raw_slots = chain.get("slots") or []
     return [
-        _Slot(path, candidate=raw_slots[index].get("candidate")
-              if index < len(raw_slots) else None)
+        _Slot(path, candidate=(raw_slots[index].get("candidate")
+                               if index < len(raw_slots) else None)
+              if carry_candidates else None)
         for index, path in enumerate(paths)
     ]
 
@@ -659,7 +667,9 @@ class ChainState:
             self._chain_error = None
             return False
         self._chain = _chain_with_slots(incoming, paths)
-        self._slots = _slots_from_chain(incoming, paths)
+        # 外部/未知写入：链里的 candidate 不可信，全部丢弃——每个
+        # path:null 槽降级为 Empty（而不是保留本进程的 BYPASS 恢复候选）。
+        self._slots = _slots_from_chain(incoming, paths, carry_candidates=False)
         self._target = None
         self._managed_fingerprint = None
         self._managed_revision = None

@@ -220,7 +220,9 @@ def test_commit_prepares_full_candidate_then_records_managed_write():
 
     committed = state.commit(adapter, lambda draft: draft.toggle_bypass(0))
 
-    assert committed["slots"] == [{"path": None}, {"path": None}]
+    # 提交链持久化 bypass 的恢复候选（v0.2.14 语义：重启后可恢复原模型）
+    assert committed["slots"] == [
+        {"path": None, "candidate": "a"}, {"path": None}]
     assert adapter.calls[1][0] == "prepare"
     assert adapter.calls[1][1]["revision"] == 3
     assert adapter.calls[2][0] == "write"
