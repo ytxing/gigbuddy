@@ -73,10 +73,8 @@ v0.2 turns the original tone-chain console into a complete tone workbench:
 One line from the terminal — downloads, installs, and initializes everything:
 
 ```
-curl -s -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/ytxing/gigbuddy/contents/scripts/install.sh?ref=v1.0.2" | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
 ```
-
-(Fetched via the GitHub API — no CDN cache, always the exact tagged script.)
 
 It installs into `~/.local/share/gigbuddy` and links `gigbuddy` / `gigbuddy-tui`
 into `~/.local/bin`. Run interactively and you can choose another location —
@@ -85,7 +83,7 @@ agent skill available inside your own project folder); set `GIGBUDDY_HOME` to
 skip the prompt. Remove everything with `~/.local/bin/gigbuddy`'s sibling:
 
 ```
-curl -s -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/ytxing/gigbuddy/contents/scripts/uninstall.sh?ref=v1.0.2" | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/uninstall.sh | bash
 ```
 
 From a fresh checkout:
