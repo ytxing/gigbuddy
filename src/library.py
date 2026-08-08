@@ -1639,7 +1639,10 @@ def bootstrap_starter_presets(*, quiet: bool = False,
     grouped: dict[int, list[int]] = {}
     unresolved: list[int] = []
     for _name, _note, model_ids in SEED_CHAINS:
-        for model_id in model_ids:
+        for entry in model_ids:
+            # SEED_CHAINS 存 (model_id, is_ir) 元组；is_ir 标记仅用于 preset
+            # 槽位类型，下载按 model id 归组即可。
+            model_id = entry[0] if isinstance(entry, tuple) else entry
             tone_id = STARTER_MODEL_TONES.get(model_id)
             if tone_id is None:
                 unresolved.append(model_id)

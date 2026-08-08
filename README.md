@@ -70,8 +70,7 @@ v0.2 turns the original tone-chain console into a complete tone workbench:
 
 ## Start playing
 
-One line from the terminal — downloads, installs, and initializes everything
-(animated GigBuddy banner included):
+One line from the terminal — downloads, installs, and initializes everything:
 
 ```
 curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.0/scripts/install.sh | bash
