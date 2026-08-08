@@ -52,18 +52,17 @@ v0.2 turns the original tone-chain console into a complete tone workbench:
 
 - **Flexible chains:** the old fixed AMP/CAB view is now an ordered chain of up
   to six Slots. A Slot can hold any supported NAM model or `.wav` IR, so the
-  signal path follows the way you actually build a rig. Slots can also start
-  **bypassed** (`path: null` with a recovery candidate): the engine skips them
-  until you activate, and the bypass survives restarts instead of degrading to
-  an empty slot.
+  signal path follows the way you actually build a rig. Any Slot can be turned
+  off on its own and switched back on whenever you like — the rest of the
+  chain keeps playing, and your setup is exactly where you left it next time
+  you open the app.
 - **A library that remembers your work:** imported tones, model metadata, local
   files, download state, and presets are kept together in one searchable local
   library.
 - **A clearer way to compare:** LOCAL, TONE3000, and TOP CREATORS views share
   live search, sorting, type filters, creator profiles, and pack-level install
-  flows. Downloads, browsing, and display filter out the deprecated **A1
-  (WaveNet) architecture** everywhere, so your library only ever presents A2
-  and IR files.
+  flows. The deprecated **A1** architecture is filtered out of downloads,
+  browsing, and display, so your library only ever presents A2 and IR files.
 - **Presets that behave like real rigs:** the starter catalog ships with 20
   curated guitar and bass chains — brand + model + cabinet naming (Fender,
   Vox, Marshall, Ampeg, Gallien-Krueger, Hartke, Darkglass), chosen from
@@ -72,14 +71,13 @@ v0.2 turns the original tone-chain console into a complete tone workbench:
   TS808, JHS Morning Glory, Boss BD-2 / DS-1 / TB-2w) and fuzz chains
   (Big Muff → Marshall Major, Fuzz Face → Plexi, ToneBender → Plexi) ride in
   the preset slots with their classic knob settings; optional tonal-shaping
-  IRs ship bypassed by default.
+  IRs are preloaded but off until you want them.
 - **A better practice loop:** the INPUT row can play, pause, stop, and loop dry
   guitar or bass recordings — via the keyboard (`space`/`s`/`l`) or the
   STOP / LOOP / PLAY buttons on the row itself — while AUDIO keeps level,
   mute, device, buffer, sample-rate, and latency controls visible.
-- **Click-free hot-swaps:** the engine crossfades old and new chains with an
-  equal-power curve, so bypassing, restoring, or switching models never clicks
-  or dips the signal on sustained notes.
+- **Smooth sound changes:** switching presets, swapping models, or turning a
+  Slot on and off never clicks or dips the signal, even on a sustained note.
 - **A workspace that stays understandable:** focus, selection, installation,
   preset editing, and destructive actions remain in the pane where they belong.
 
@@ -205,13 +203,12 @@ The chain is deliberately simple to reason about:
 INPUT → gain → Slot 1 → Slot 2 → … → Slot 6 → master → OUTPUT
 ```
 
-Empty Slots are harmless signal-through positions. A Slot can also start
-**bypassed** — `path: null` with a recovery candidate — so the engine skips it
-until you activate the model, while the UI keeps showing what would load.
-Slot order is the signal order, and the same model may be used more than once
-when you want to stack a stage. Gain, master, and NAM quality are chain-level
-controls you can adjust live; mute is a live output control and does not erase
-the saved master setting.
+Empty Slots are harmless signal-through positions. Any Slot can be turned off
+on its own and switched back on at any time, without touching the rest of the
+chain. Slot order is the signal order, and the same model may be used more
+than once when you want to stack a stage. Gain, master, and NAM quality are
+chain-level controls you can adjust live; mute is a live output control and
+does not erase the saved master setting.
 
 Presets let you capture a whole rig — chain, model references, parameters, and
 notes — and bring it back with one action, either overwriting the current
