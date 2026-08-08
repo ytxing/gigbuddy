@@ -1,19 +1,35 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
+[![macOS](https://img.shields.io/badge/platform-macOS%20only-000000.svg)](https://github.com/ytxing/gigbuddy)
+[![NAM A2](https://img.shields.io/badge/NAM-A2%20architecture-e59a3c.svg)](https://www.tone3000.com/blog/introducing-neural-amp-modeler-nam-architecture-2-a2)
+[![Release](https://img.shields.io/github/v/release/ytxing/gigbuddy)](https://github.com/ytxing/gigbuddy/releases)
+[![License](https://img.shields.io/github/license/ytxing/gigbuddy)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg)](https://www.python.org)
+[![Stars](https://img.shields.io/github/stars/ytxing/gigbuddy)](https://github.com/ytxing/gigbuddy)
+
 *Find a sound. Shape it. Play it now.*
 
 *v1.0.2 · 2026-08-08*
 
-GigBuddy is a realtime NAM tone workspace for guitarists and bassists — a
-tone-library browser, a realtime NAM engine, and an SQLite tone library that
-external AI agents can drive through a stable CLI. Tones come from TONE3000
-(public API); rendering is NeuralAudio (MIT).
+One line from the terminal — downloads, installs, and initializes everything:
 
-It is made for the moment when a tone is almost right: search the TONE3000
-catalog, audition a sound with a dry recording or your own guitar, swap the
-capture, move the cabinet, bypass one stage, compare a preset, and keep the
-version that works. Your downloaded sounds stay in a local library, while the
-live engine keeps the playing experience immediate.
+```
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
+```
+
+![GigBuddy install](docs/screenshots/gigbuddy.gif)
+
+GigBuddy is a realtime [NAM (Neural Amp Modeler)](https://www.tone3000.com/guides/nam-a2-the-complete-guide)
+tone workspace with full **A2 architecture** support — the most faithful
+amp-capture technology, which outplayed Neural DSP, ToneX, and Line 6 Proxy in
+TONE3000's 1,000-participant [blind listening
+test](https://www.tone3000.com/guides/nam-a2-the-complete-guide#amp-modeler-blind-listening-test).
+It pairs a tone-library browser and a realtime NAM engine with an SQLite
+library that AI agents can drive through a stable CLI.
+
+Find a tone, audition it with a dry recording or your own guitar, shape the
+chain, and keep the version that works — your sounds stay local while the live
+engine keeps playing.
 
 **Open-source stance**: pure-API data source (zero local tone-library
 dependency), fully MIT core stack.
@@ -87,13 +103,8 @@ GigBuddy turns the original tone-chain console into a complete tone workbench:
 
 ## Start playing
 
-One line from the terminal — downloads, installs, and initializes everything:
-
-```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
-```
-
-It installs into `~/.local/share/gigbuddy` and links the `gigbuddy` command
+The one-line install above places GigBuddy in `~/.local/share/gigbuddy` and
+links the `gigbuddy` command
 into `~/.local/bin`. Run `gigbuddy` with no arguments to open the TUI; add a
 subcommand (`tone`, `chain`, `preset`) for the CLI. Run interactively and you can choose another location —
 `"."` for the current directory or any path (useful when you want the bundled
@@ -246,12 +257,8 @@ search results.
 
 ## Good to know
 
-- The first search, creator view, or download needs network access. Once a tone
-  is imported, its files and metadata are available locally.
 - `--no-engine` is a browse-and-edit mode; live audio and level telemetry need
   the native engine and an available audio device.
-- The public TONE3000 API does not expose follower/following counts, so creator
-  profiles show the official public statistics that are available.
 - Core code is MIT. The runtime uses NeuralAudio, NAM Core, RTNeural, Eigen,
   PortAudio, and Textual under their respective licenses.
 
@@ -289,21 +296,20 @@ if missing — manages Python 3.12 and the venv).
 
 ## Known limitations
 
-- **TOP CREATORS** reads TONE3000's official `user_public_counts` leaderboard,
-  the same source used by `tone3000.com/top-creators`. Tones, Downloads,
-  Favorites, and Models are stable server-side aggregates.
-- **Creator followers/following** are not shown: the public users API exposes
-  no follower fields and the website is behind Cloudflare.
-- **Remote data loads are network-bound** — the first TOP CREATORS visit waits
-  for one leaderboard request; displayed statistics are not rewritten later.
-- Notifications and a few table refreshes are timing-sensitive under heavy
-  load; rare test flakes have been observed in CI-style runs.
+- **Creator followers/following are not shown.** TONE3000's public API exposes
+  no follower counts, so profiles show the official statistics that are
+  available.
+- **First search, creator view, or download needs network access.** Once a
+  tone is imported, its files and metadata are available locally.
+- **TOP CREATORS stats are server-side aggregates.** Tones, downloads,
+  favorites, and models come from TONE3000's official leaderboard and are not
+  refreshed later.
 
 ## License
 
-MIT (to be finalized). Dependencies: NeuralAudio (MIT), NAM Core (MIT),
-RTNeural (BSD-3), Eigen (MPL-2), math_approx (MIT), PortAudio (MIT-like),
-Textual (MIT). Full list with pinned versions in [Dependencies](#dependencies).
+MIT. Dependencies: NeuralAudio (MIT), NAM Core (MIT), RTNeural (BSD-3),
+Eigen (MPL-2), math_approx (MIT), PortAudio (MIT-like), Textual (MIT). Pinned
+versions in [Dependencies](#dependencies).
 
 ## Further reading
 
