@@ -292,7 +292,7 @@ printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
   printf 'HAD_THIRDPARTY=%s\n' "$([[ -d "$INSTALL_ROOT/third_party" ]] && printf 1 || printf 0)"
 } >> "$ROLLBACK_FILE"
 
-step "Installing GigBuddy (venv, library, starter presets, dry inputs, engine)"
+step "Installing GigBuddy (venv, library, starter presets, dry inputs, engine — downloading models and compiling can take a while; please be patient)"
 run_quiet "$INSTALL_ROOT/install.sh"
 
 step "Linking commands"
