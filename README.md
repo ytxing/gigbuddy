@@ -257,6 +257,11 @@ search results.
 
 ## Good to know
 
+- **For the best visual experience, use a truecolor terminal** — iTerm2,
+  Windows Terminal, Kitty, WezTerm, or Alacritty all render the guitar-amp
+  themes correctly. On 16-color terminals GigBuddy automatically switches to
+  a compatible theme; to force the full theme anyway, run
+  `TEXTUAL_COLOR_SYSTEM=truecolor gigbuddy`.
 - `--no-engine` is a browse-and-edit mode; live audio and level telemetry need
   the native engine and an available audio device.
 - Core code is MIT. The runtime uses NeuralAudio, NAM Core, RTNeural, Eigen,
