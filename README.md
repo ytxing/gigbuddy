@@ -1,20 +1,22 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.1.0 — 2026-08-05*
-
-### Find a sound. Shape it. Play it now.
+*Find a sound. Shape it. Play it now.*
 
 *v1.0.2 · 2026-08-08*
 
-GigBuddy is a realtime NAM tone workspace for guitarists and bassists. Search
-the public TONE3000 catalog, audition a sound with a dry recording, build a
-signal chain, and hear the result through your interface without leaving the
-same workspace.
+GigBuddy is a realtime NAM tone workspace for guitarists and bassists — a
+tone-library browser, a realtime NAM engine, and an SQLite tone library that
+external AI agents can drive through a stable CLI. Tones come from TONE3000
+(public API); rendering is NeuralAudio (MIT).
 
-It is made for the moment when a tone is almost right: swap the capture, move
-the cabinet, bypass one stage, compare a preset, and keep the version that
-works. Your downloaded sounds stay in a local library, while the live engine
-keeps the playing experience immediate.
+It is made for the moment when a tone is almost right: search the TONE3000
+catalog, audition a sound with a dry recording or your own guitar, swap the
+capture, move the cabinet, bypass one stage, compare a preset, and keep the
+version that works. Your downloaded sounds stay in a local library, while the
+live engine keeps the playing experience immediate.
+
+**Open-source stance**: pure-API data source (zero local tone-library
+dependency), fully MIT core stack.
 
 ## Why GigBuddy
 
@@ -48,9 +50,9 @@ keeps the playing experience immediate.
 
 ![Browsing TONE3000 — live search with trending results, sort and type filters](docs/screenshots/tone3000-browse.png)
 
-## What is new in v0.2
+## What's new
 
-v0.2 turns the original tone-chain console into a complete tone workbench:
+GigBuddy turns the original tone-chain console into a complete tone workbench:
 
 - **Flexible chains:** the old fixed AMP/CAB view is now an ordered chain of up
   to six Slots. A Slot can hold any supported NAM model or `.wav` IR, so the
@@ -218,7 +220,7 @@ notes — and bring it back with one action, either overwriting the current
 preset or saving under a new name. They are shared by the TUI and CLI, store
 stable model references, and resolve the current local file path when loaded,
 so reorganizing your library does not silently break a saved rig. Older flat
-`model`/`ir` presets remain readable and are normalized to the v0.2 Slot format
+`model`/`ir` presets remain readable and are normalized to the Slot format
 when used.
 
 ## Optional automation
@@ -283,7 +285,7 @@ in `install.sh` together when bumping.
 
 **Toolchain**: Python 3.11+, clang++ (C++20), CMake, Homebrew, git.
 
-## Known limitations (v0.1)
+## Known limitations
 
 - **TOP CREATORS** reads TONE3000's official `user_public_counts` leaderboard,
   the same source used by `tone3000.com/top-creators`. Tones, Downloads,
@@ -297,10 +299,12 @@ in `install.sh` together when bumping.
 
 ## License
 
-MIT (to be finalized). See the dependency licenses in the source tree.
+MIT (to be finalized). Dependencies: NeuralAudio (MIT), NAM Core (MIT),
+RTNeural (BSD-3), Eigen (MPL-2), math_approx (MIT), PortAudio (MIT-like),
+Textual (MIT). Full list with pinned versions in [Dependencies](#dependencies).
 
 ## Further reading
 
-- [v0.2 interaction guide](docs/ui-interaction-spec-v0.2.md)
+- [Interaction guide](docs/ui-interaction-spec-v0.2.md)
 - [Tone-chain protocol](docs/adr/0001-slots-chain-protocol.md)
 - [Library schema](docs/library-schema.md)
