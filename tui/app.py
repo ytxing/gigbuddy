@@ -1096,6 +1096,22 @@ class GigBuddyApp(App):
                             "view anchor restore failed for %r: %s", page, exc)
         self._mutation_anchors = {}
 
+    def _apply_compatible_theme(self) -> None:
+        """Terminal color-depth fallback: 16-color/no-color terminals render
+        the truecolor guitar-amp themes badly (some show as red). Detect the
+        terminal's color system via the Rich console and switch to the
+        built-in 16-color-safe ``textual-dark`` theme when truecolor is not
+        available. 256-color terminals keep the guitar-amp themes (Textual
+        approximates them acceptably)."""
+        try:
+            color_system = str(self.console.color_system or "").casefold()
+        except Exception:
+            color_system = ""
+        if color_system != "truecolor" and self.theme != "textual-dark":
+            self.theme = "textual-dark"
+            self.notify(
+                "Terminal color support is limited — using the compatible theme")
+
     def action_next_theme(self) -> None:
         themes = list(GUITAR_AMP_THEME_NAMES)
         # A caller may intentionally start with a built-in Textual theme via
@@ -1106,6 +1122,7 @@ class GigBuddyApp(App):
         self.notify(f"Theme: {self.theme}")
 
     def on_mount(self) -> None:
+        self._apply_compatible_theme()
         # REQ-017: 链配置撤销/重做栈（preset 应用快照），启动清空。
         self._undo_stack: list[dict] = []
         self._redo_stack: list[dict] = []
