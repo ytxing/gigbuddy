@@ -1,6 +1,6 @@
 # GigBuddy 🎸 — Your one-stop NAM tone manager
 
-*v0.2.14 — 2026-08-06*
+*v0.2.15 — 2026-08-08*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive

@@ -3,6 +3,7 @@ bin/*
 !bin/
 !bin/gigbuddy
 data/
+data.bak*/
 __pycache__/
 *.pyc
 
