@@ -1184,7 +1184,7 @@ class ChainSaveModal(GigBuddyModal):
                 yield _ChainSaveRow(
                     "as", self, id="chain-save-as", classes="chain-save-row")
                 yield _ChainSaveNameInput(
-                    self, placeholder="new preset name",
+                    self, placeholder="new-preset-name",
                     id="chain-save-name",
                 )
             yield Static("", id="chain-save-status")
