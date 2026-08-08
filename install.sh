@@ -114,6 +114,7 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
         PA_TARBALL="pa_stable_v190700_20210406.tgz"
         curl -L -o /tmp/"$PA_TARBALL" \
             "https://codeload.github.com/PortAudio/portaudio/tar.gz/refs/tags/v19.7.0"
+        rm -rf /tmp/portaudio-19.7.0
         tar xzf /tmp/"$PA_TARBALL" -C /tmp
         (cd /tmp/portaudio-19.7.0 && \
          ./configure CFLAGS="-Wno-implicit-const-int-float-conversion" \

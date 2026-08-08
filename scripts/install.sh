@@ -335,7 +335,8 @@ if [[ -d "$INSTALL_ROOT/cpp" ]]; then
   if [[ ! -f "$PA_DIR/lib/libportaudio.2.dylib" ]]; then
     step "Building PortAudio 19.7.0 from source"
     PA_TARBALL="pa_stable_v190700_20210406.tgz"
-    run_quiet bash -c "curl -L -o /tmp/$PA_TARBALL https://codeload.github.com/PortAudio/portaudio/tar.gz/refs/tags/v19.7.0 && tar xzf /tmp/$PA_TARBALL -C /tmp"
+    run_quiet bash -c "curl -L -o /tmp/$PA_TARBALL https://codeload.github.com/PortAudio/portaudio/tar.gz/refs/tags/v19.7.0 && rm -rf /tmp/portaudio-19.7.0
+    tar xzf /tmp/$PA_TARBALL -C /tmp"
     run_quiet bash -c "cd /tmp/portaudio-19.7.0 && ./configure CFLAGS='-Wno-implicit-const-int-float-conversion' --prefix='$PA_DIR' --disable-mac-universal --disable-silent-rules && make -j\$(sysctl -n hw.ncpu 2>/dev/null || echo 4) && make install"
     rm -f /tmp/"$PA_TARBALL"
   fi
