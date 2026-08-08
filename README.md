@@ -2,7 +2,7 @@
 
 ### Find a sound. Shape it. Play it now.
 
-*v1.0.1 · 2026-08-08*
+*v1.0.2 · 2026-08-08*
 
 GigBuddy is a realtime NAM tone workspace for guitarists and bassists. Search
 the public TONE3000 catalog, audition a sound with a dry recording, build a
@@ -73,7 +73,7 @@ v0.2 turns the original tone-chain console into a complete tone workbench:
 One line from the terminal — downloads, installs, and initializes everything:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.1/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
 ```
 
 It installs into `~/.local/share/gigbuddy` and links `gigbuddy` / `gigbuddy-tui`
@@ -83,7 +83,7 @@ agent skill available inside your own project folder); set `GIGBUDDY_HOME` to
 skip the prompt. Remove everything with `~/.local/bin/gigbuddy`'s sibling:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.1/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/uninstall.sh | bash
 ```
 
 From a fresh checkout:
