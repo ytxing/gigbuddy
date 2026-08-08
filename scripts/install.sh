@@ -224,6 +224,25 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python 3.11+ is required: $PYTH
 [[ -n "$USER_HOME" ]] || die "HOME is not set"
 [[ "$(uname -s)" == "Darwin" ]] || die "the full installer currently supports macOS only"
 
+# 交互安装时询问安装位置（Agent 场景：装到自己的项目文件夹，让 .claude/skills
+# 在项目内可用）。已显式设置 GIGBUDDY_HOME 或非交互（curl | bash）时跳过。
+if [[ -t 0 && -z "${GIGBUDDY_HOME:-}" ]]; then
+  printf 'Install location [Enter = %s]\n' "$INSTALL_ROOT"
+  printf '  "." = current directory, or type any path: '
+  read -r -p '' install_answer || true
+  case "${install_answer:-}" in
+    ""|"") ;;
+    ".") INSTALL_ROOT="$(pwd)" ;;
+    *) INSTALL_ROOT="$install_answer" ;;
+  esac
+  # 展开 ~ 与相对路径
+  case "$INSTALL_ROOT" in
+    "~"/*) INSTALL_ROOT="${HOME}${INSTALL_ROOT#\~}" ;;
+    /*) ;;
+    *) INSTALL_ROOT="$(cd "$(dirname "$INSTALL_ROOT")" 2>/dev/null && pwd)/$(basename "$INSTALL_ROOT")" ;;
+  esac
+fi
+
 "$PYTHON_BIN" - <<'PY'
 import sys
 

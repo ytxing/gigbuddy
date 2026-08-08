@@ -77,7 +77,10 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.1/scripts/insta
 ```
 
 It installs into `~/.local/share/gigbuddy` and links `gigbuddy` / `gigbuddy-tui`
-into `~/.local/bin`. Remove everything with `~/.local/bin/gigbuddy`'s sibling:
+into `~/.local/bin`. Run interactively and you can choose another location —
+`"."` for the current directory or any path (useful when you want the bundled
+agent skill available inside your own project folder); set `GIGBUDDY_HOME` to
+skip the prompt. Remove everything with `~/.local/bin/gigbuddy`'s sibling:
 
 ```
 curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.1/scripts/uninstall.sh | bash
