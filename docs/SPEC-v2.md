@@ -42,10 +42,11 @@ v1 embedded the agent (Claude Agent SDK) inside the Textual TUI. User decision: 
 | id (PK) | id |
 | title, description | title, description |
 | tags (JSON array) | tags |
-| gear, makes (JSON), platform | gear, makes, platform |
+| gear, makes (JSON), format | gear, makes, format (`platform` is a deprecated input alias) |
 | downloads_count, favorites_count | downloads_count, favorites_count |
 | a1/a2/custom_models_count | a1_models_count, a2_models_count, custom_models_count |
-| username, avatar_url, user_id | username, avatar_url, user_id |
+| username, avatar_url, user_id, user, user_url | embedded user plus flattened compatibility fields |
+| is_public, url | visibility and canonical tone URL |
 | images (JSON array) | images |
 | model_name | model_name |
 | created_at, updated_at, published_at | created_at, updated_at, published_at |
@@ -57,8 +58,11 @@ v1 embedded the agent (Claude Agent SDK) inside the Textual TUI. User decision: 
 |---|---|
 | id (PK) | models.id |
 | tone_id (FK) | models.tone_id |
+| created_at, updated_at, user_id | source model metadata |
 | model_url | models.model_url |
-| architecture | model_json.architecture |
+| architecture_version | `1` / `2` / `custom` (NULL for non-NAM formats) |
+| name, size | semantic download name and TONE3000 Size |
+| architecture | legacy display alias only |
 | local_path (local, nullable) | downloaded file |
 
 Indexes: tones(title), tones(gear), tones(downloads_count).
@@ -66,7 +70,7 @@ Indexes: tones(title), tones(gear), tones(downloads_count).
 ## 4. CLI — Agent-facing interface (src/library.py CLI / gigbuddy)
 
 ```
-gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N]
+gigbuddy tone list [--gear amp|amp-cab|pedal|outboard|cab|space|experimental] [--limit N]
 gigbuddy tone search <query>          # TONE3000, then import prompt
 gigbuddy tone show <id>               # full metadata
 gigbuddy tone import <id>             # download models + persist metadata
@@ -104,5 +108,7 @@ Layout: left = library browser 60% | right = chain + metadata 40%; bottom = mete
 ## 8. Open questions
 
 - Import UX: auto-import on download (in download()) vs explicit `tone import`? → default: both paths write DB.
-- IR tones (gear=cab, non-A2): models stored with architecture="IR" and local .wav paths.
+- IR tones use `format=ir`; legacy rows may infer IR from `gear=cab` or `gear=space`.
+  Their models have `architecture_version=NULL` and local `.wav` paths. `IR` is
+  not an architecture value.
 - Agent querying SQLite directly vs only CLI: allow both (document schema in docs/library-schema.md).

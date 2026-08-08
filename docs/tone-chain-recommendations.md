@@ -1,7 +1,8 @@
 # 音色链推荐（GigBuddy 本地库版）
 
-日期：2026-08-02 ｜ 依据：TONE3000 音色链精选推荐（全站 9281 个 A2 音色筛选，handoff）
-本地库：`data/gigbuddy.db`（32 个音色 / 810 个模型，metadata 1:1 取自 TONE3000 API）
+数据快照日期：2026-08-02 ｜ 依据：TONE3000 音色链精选推荐（全站 9281 个 A2 音色筛选，handoff）
+> 注意：此为快照数据，本地库可能已更新（以 `gigbuddy tone list` 实际内容为准）
+本地库：`data/gigbuddy.db`（33 个音色 / 811 个模型，metadata 1:1 取自 TONE3000 API）
 
 ## 命名与路径约定
 
@@ -85,23 +86,29 @@ bin/gigbuddy chain set '{"model": "data/tones/<id>-<slug>/<模型名>.nam", "ir"
 
 ## 推荐组合（直接成套使用）
 
-以下 5 条链已做成内置 preset，一键初始化并加载：
+Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or Bass:
 
 ```bash
-bin/gigbuddy preset seed              # 初始化 5 条推荐链（模型从库内解析）
-bin/gigbuddy preset list              # 查看
-bin/gigbuddy preset load mayer-clean  # 加载（引擎热切换）
+bin/gigbuddy preset seed --replace    # delete existing presets and rebuild the catalog
+bin/gigbuddy preset list              # list presets
+bin/gigbuddy preset load band-guitar-rhcp  # load with engine hot-swap
 ```
 
-| preset | amp | IR | 说明 |
+| preset | amp model | IR model | description |
 |---|---|---|---|
-| mayer-clean | 4658（Two-Rock SSS） | 27465（Fender DR Mix Ready） | Mayer 清音链 |
-| classic-rock | 1071（JCM800 2203） | 51086（Marshall 1960BV） | 经典摇滚链 |
-| british | 31267（VOX AC30 CH） | 45023（V30 Mesa 4x12） | 英式链 |
-| slash | 6379（SIR #36） | 51086（Marshall 1960BV） | Slash 链 |
-| rhcp-greenday | 51310（Major 200，自带箱体免 IR） | — | RHCP / GreenDay 链 |
+| band-guitar-rhcp | 383442 | — | Frusciante / Marshall Major 200 full rig |
+| band-guitar-green-day | 684630 | — | Billie Joe / Marshall 1959BJA full rig |
+| band-bass-rhcp | 419198 | — | Flea style / GK RB800 direct |
+| band-bass-green-day | 382795 | — | Green Day style / approximate Ampeg SVT-CL pairing, direct |
+| classic-guitar-beano | 677999 | — | Bluesbreaker + G12 Alnico full rig |
+| classic-guitar-vox-ef86 | 383682 | — | Vox AC30/4 EF86 + 2x12 Alnico full rig |
+| classic-guitar-jtm45 | 494341 | 239163 | JTM45 + Marshall 1960TV Greenback |
+| classic-guitar-fender-super | 379720 | — | Fender Super Reverb full rig |
+| classic-bass-gk-rb800 | 419198 | — | GK RB800 direct |
+| classic-bass-ampeg-svt | 382790 | — | Ampeg SVT-CL clean direct |
 
-> 注：gear=amp-cab 的音色模型自带箱体（零 IR）；gear=amp 纯头与 pedal 需配 IR。
+> 注：gear=amp-cab 的音色模型自带箱体（零 IR）。本地没有贝斯箱体 IR，
+> 两条经典贝斯 preset 和两条乐队贝斯 preset 都明确采用直出，不混用吉他箱体 IR。
 > 模型文件按旋钮/麦位命名（如 `JCM800 2203 - P5 B5 M5 T5 MV6 G5 - AZG - 700.nam`），
 > 选哪个由 `gigbuddy tone show <id>` 按需查看。preset 存逻辑引用（模型 id），
 > 库内文件改名/迁移后 `preset load` 依然能解析到当前路径。

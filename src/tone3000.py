@@ -5,16 +5,20 @@
 数据源: TONE3000 (原 ToneHunt)，90k+ NAM 模型。
 
 CLI:
-    tone3000.py search <query>              # 关键词搜索（A2 架构）
+    tone3000.py search <query>              # 关键词搜索（官方默认 A1 + Custom）
     tone3000.py top [limit]                 # 全站下载排行
-    tone3000.py models <tone_id>            # 列出 tone 的 A2 模型
-    tone3000.py download <tone_id> <dest>   # 下载全部 A2 .nam 到目录
+    tone3000.py models <tone_id>            # 列出 tone 的可用模型
+    tone3000.py download <tone_id> <dest>   # 下载指定 tone 的模型
     tone3000.py dry <dest> [name...]        # 下载试听干音素材（MIT，mayer/brit/rollin 等）
 """
 import json
+import http.client
 import re
+import ssl
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -30,14 +34,367 @@ KEY = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
        "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6eWJpdW9weGtkeGJ5dG5vamRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgwODIxNjUsImV4cCI6MjA1MzY1ODE2NX0."
        "Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU")
 
+# Canonical values from the public TONE3000 API. The REST mirror used by
+# GigBuddy predates the v1 API and still returns ``platform`` and
+# ``model_json.architecture`` in some responses, so the helpers below keep
+# those aliases at the network boundary instead of making the UI understand
+# two incompatible schemas.
+GEAR_VALUES = ("amp", "amp-cab", "pedal", "outboard", "cab", "space",
+               "experimental")
+FORMAT_VALUES = ("nam", "ir", "aida-x", "aa-snapshot", "proteus")
+ARCHITECTURE_VALUES = ("1", "2", "custom")
+ENGINE_FORMATS = frozenset(("nam", "ir"))
+
+
+def normalize_gear(value: str | None) -> str | None:
+    """Return a canonical API gear value, accepting deprecated aliases."""
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if not value:
+        return None
+    # The v1 API normalizes full-rig to amp-cab and treats gear=ir as a
+    # deprecated alias. A CAB label is the useful local representation for
+    # old rows that only carried that alias.
+    return {"full-rig": "amp-cab", "ir": "cab"}.get(value, value)
+
+
+def normalize_format(value: str | None) -> str | None:
+    """Normalize a Tone format token without guessing from architecture."""
+    if value is None:
+        return None
+    value = str(value).strip().lower().replace("_", "-")
+    return value or None
+
+
+def tone_format(tone: dict | None) -> str | None:
+    """Read canonical ``format`` with ``platform``/legacy IR compatibility.
+
+    Explicit ``format`` always wins. Only rows without either field use the
+    old cab/space convention to infer IR; this prevents ``space + format=nam``
+    from being misclassified while keeping pre-v1 local data usable.
+    """
+    tone = tone or {}
+    if tone.get("format") not in (None, ""):
+        return normalize_format(tone.get("format"))
+    if tone.get("platform") not in (None, ""):
+        return normalize_format(tone.get("platform"))
+    raw_gear = str(tone.get("gear") or "").strip().lower()
+    if raw_gear == "ir" or raw_gear in {"cab", "space"}:
+        return "ir"
+    return None
+
+
+def is_ir_tone(tone: dict | None) -> bool:
+    """Whether a Tone should be handled as an impulse-response pack."""
+    tone = tone or {}
+    fmt = tone_format(tone)
+    if fmt is not None:
+        return fmt == "ir"
+    return str(tone.get("gear") or "").strip().lower() in {"cab", "space", "ir"}
+
+
+def tone_uses_a2_filter(tone: dict | None) -> bool:
+    """Whether a Tone should use the legacy NAM-A2 model filter.
+
+    The old Supabase RPC is an A2 search path. Official non-NAM formats have
+    ``architecture_version = null`` and therefore must request all models.
+    Rows with no format retain the historical A2 default for compatibility.
+    """
+    fmt = tone_format(tone)
+    return fmt in (None, "nam") and not is_ir_tone(tone)
+
+
+def normalize_architecture(value: str | None) -> str | None:
+    """Map legacy architecture labels to API Architecture enum values."""
+    if value is None:
+        return None
+    raw = str(value).strip().lower().replace("_", "").replace("-", "")
+    return {
+        "1": "1", "a1": "1", "wavenet": "1",
+        "2": "2", "a2": "2", "slimmablecontainer": "2",
+        "custom": "custom",
+    }.get(raw)
+
+
+def _legacy_architecture(value: str | None) -> str | None:
+    """Preserve the old UI's labels while exposing architecture_version."""
+    return {"1": "WaveNet", "2": "SlimmableContainer", "custom": "Custom"}.get(value)
+
+
+def normalize_model(model: dict | None) -> dict:
+    """Return a model row with canonical ``architecture_version``.
+
+    ``architecture`` remains as a compatibility alias for the existing local
+    database and tests; new code should branch on ``architecture_version``.
+    """
+    row = dict(model or {})
+    nested = row.get("model_json") if isinstance(row.get("model_json"), dict) else {}
+    # The legacy REST projection returns both ``architecture_version: null``
+    # and the old ``architecture`` label.  A non-empty canonical value wins;
+    # otherwise retain the legacy label as the compatibility fallback.  A
+    # genuine v1 non-NAM row has no legacy label and therefore stays NULL.
+    raw_version = row.get("architecture_version")
+    if raw_version in (None, ""):
+        raw_version = row.get("architecture")
+    if raw_version in (None, ""):
+        raw_version = nested.get("architecture_version") or nested.get("architecture")
+    version = normalize_architecture(raw_version)
+    row["architecture_version"] = version
+    if row.get("architecture") in (None, "") and version is not None:
+        row["architecture"] = _legacy_architecture(version)
+    return row
+
+
+def model_architecture_version(model: dict | None) -> str | None:
+    """Read Model architecture, with a legacy label fallback for old rows."""
+    row = model or {}
+    nested = row.get("model_json") if isinstance(row.get("model_json"), dict) else {}
+    raw = row.get("architecture_version")
+    if raw in (None, ""):
+        raw = row.get("architecture")
+    if raw in (None, ""):
+        raw = nested.get("architecture_version") or nested.get("architecture")
+    return normalize_architecture(raw)
+
+
+def is_ir_model(model: dict | None, tone: dict | None = None) -> bool:
+    """Whether a Model row is a non-NAM IR for a given parent Tone."""
+    model = model or {}
+    # ``architecture_version`` is the canonical field.  A legacy ``IR``
+    # marker may still be present beside it, but must not override an
+    # explicit architecture value from the API.
+    version = model_architecture_version(model)
+    if version is not None:
+        return False
+    parent_format = tone_format(tone) if tone is not None else None
+    nested = model.get("model_json") if isinstance(model.get("model_json"), dict) else {}
+    raw_arch = str(
+        model.get("architecture") or nested.get("architecture") or ""
+    ).strip().lower()
+    if parent_format not in (None, "nam", "ir"):
+        # An explicit non-NAM Tone format wins over a stale legacy marker.
+        return False
+    if raw_arch == "ir":
+        return True
+    path = str(model.get("local_path") or model.get("name") or "").lower()
+    if path.endswith(".wav"):
+        return True
+    # Official Model.architecture_version is null for non-NAM formats. The
+    # parent format is the tie-breaker when a legacy response omitted the old
+    # architecture label.
+    if model.get("architecture_version") in (None, "") and tone is not None:
+        return is_ir_tone(tone)
+    return False
+
+
+def is_engine_compatible_model(model: dict | None,
+                               tone: dict | None = None) -> bool:
+    """Whether a model can be loaded by GigBuddy's current audio engine.
+
+    The engine currently accepts NAM files and WAV impulse responses only.
+    Keep the other official TONE3000 formats visible as metadata, but do not
+    let them reach a ``model``/``ir`` chain slot.  Rows from the legacy REST
+    mirror may omit ``format``; their architecture marker or filename keeps
+    that older data usable.
+    """
+    model = model or {}
+    local_path = str(model.get("local_path") or "").lower()
+
+    def local_suffix_matches(expected: str) -> bool:
+        # Remote rows have no local path yet, so format metadata is enough to
+        # decide whether they may be downloaded.  Once a path exists, the
+        # engine-facing slot must agree with the actual file type as well.
+        return not local_path or Path(local_path).suffix == expected
+
+    # Model-level IR markers and local WAV paths can coexist with a legacy
+    # parent Tone that is labeled NAM (amp-cab packs may contain both).
+    if is_ir_model(model, tone):
+        return local_suffix_matches(".wav")
+    fmt = tone_format(tone) if tone is not None else tone_format(model)
+    if fmt == "nam":
+        return local_suffix_matches(".nam")
+    if fmt == "ir":
+        return local_suffix_matches(".wav")
+    if fmt is not None:
+        return False
+    if model_architecture_version(model) is not None:
+        return local_suffix_matches(".nam")
+    # The legacy Supabase projection can omit both ``name`` and the old
+    # architecture marker.  If the parent Tone also has no canonical format,
+    # retain the historical amp path instead of hiding a loadable NAM row.
+    # Explicit non-NAM formats have already returned False above.
+    if tone is not None and tone_format(tone) is None:
+        expected = ".wav" if is_ir_tone(tone) else ".nam"
+        return local_suffix_matches(expected)
+    path = local_path or str(model.get("name") or "").lower()
+    return path.endswith((".nam", ".wav"))
+
+
+def normalize_tone(tone: dict | None) -> dict:
+    """Return a Tone row using v1 names while retaining old aliases."""
+    row = dict(tone or {})
+    raw_gear = row.get("gear")
+    row["gear"] = normalize_gear(raw_gear)
+    if row.get("format") in (None, ""):
+        legacy = normalize_format(row.get("platform"))
+        if legacy is not None:
+            row["format"] = legacy
+    else:
+        row["format"] = normalize_format(row.get("format"))
+    # v1 returns taxonomy values as objects ({id, name}), while the public
+    # Supabase projection returns plain names.  The local schema intentionally
+    # stores the stable names, so accept both shapes at the boundary.
+    for field in ("tags", "makes"):
+        values = row.get(field)
+        if isinstance(values, list):
+            row[field] = [
+                item.get("name") if isinstance(item, dict) else item
+                for item in values
+            ]
+
+    user = row.get("user")
+    if isinstance(user, dict):
+        # Keep the official embedded user object for callers that need it,
+        # while filling the flat legacy columns used by the TUI.
+        if row.get("username") in (None, ""):
+            row["username"] = user.get("username")
+        if row.get("avatar_url") in (None, ""):
+            row["avatar_url"] = user.get("avatar_url")
+        if row.get("user_id") in (None, ""):
+            row["user_id"] = user.get("id")
+        if row.get("user_url") in (None, ""):
+            row["user_url"] = user.get("url")
+    elif row.get("username") is not None:
+        # Legacy search rows expose flattened user fields only.  Materialize
+        # the same small EmbeddedUser shape so local imports remain coherent.
+        row["user"] = {
+            "id": row.get("user_id"),
+            "username": row.get("username"),
+            "avatar_url": row.get("avatar_url"),
+            "url": row.get("user_url"),
+        }
+    sizes = row.get("sizes")
+    if isinstance(sizes, list):
+        row["sizes"] = [
+            item.get("name") if isinstance(item, dict) else item
+            for item in sizes
+        ]
+    # Keep a supplied platform value readable for old callers, but do not
+    # synthesize the deprecated alias on canonical v1 responses.
+    # Deprecated gear=ir implies format=ir only when no explicit format was
+    # supplied. The canonical gear remains cab for local routing.
+    if str(raw_gear or "").strip().lower() == "ir" and row.get("format") is None:
+        row["format"] = row["platform"] = "ir"
+    return row
+
+
+ROOT = Path(__file__).resolve().parent.parent
+VERIFIED_FILE = ROOT / "data" / "verified_users.json"
+_verified_cache: set[str] | None = None
+_verified_write_lock = threading.Lock()
+
+# tone3000.com sits behind Cloudflare: the default urllib UA gets the
+# __next_error__ page, but a full browser UA passes through.
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/126.0 Safari/537.36")
+
+
+def verified_users() -> set[str]:
+    """Usernames carrying TONE3000's "Verified Profiles" badge.
+
+    The badge is rendered from server-side data the public REST API does not
+    expose (users table has no flag), so the list is mirrored from the website
+    author pages into data/verified_users.json; verify_username() adds entries
+    on demand and scripts/fetch_verified_users.py refreshes the whole set.
+    Falls back to empty on missing/corrupt file so callers never break.
+    """
+    global _verified_cache
+    if _verified_cache is None:
+        try:
+            with VERIFIED_FILE.open() as fh:
+                _verified_cache = set(json.load(fh).get("users") or [])
+        except (OSError, ValueError, TypeError, KeyError):
+            _verified_cache = set()
+    return _verified_cache
+
+
+def is_verified(username: str | None) -> bool:
+    """Return whether a username is present in the persisted positive cache."""
+    name = str(username or "").lower()
+    return bool(name) and name in verified_users()
+
+
+def verify_username(username: str, *, timeout: float = 8.0) -> bool | None:
+    """Check the "Verified Profiles" badge for one author, live.
+
+    The badge is server-rendered and the REST API exposes no flag, so the
+    author page is fetched (full browser UA passes Cloudflare) and scanned for
+    the badge's "Verified Profiles" tooltip string. Returns True/False on
+    success (True is persisted into verified_users.json so later lookups are
+    free); None on network/parse failure — callers then keep showing no badge
+    and may retry on the next detail view.
+    """
+    name = str(username or "").lower()
+    if not name:
+        return False
+    if name in verified_users():
+        return True
+    req = urllib.request.Request(
+        f"https://www.tone3000.com/{name}?_data",
+        headers={"User-Agent": BROWSER_UA,
+                 "Accept": "text/html,application/xhtml+xml"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            html = response.read(2 * 1024 * 1024)  # marker sits early in page
+    except Exception:
+        return None
+    ok = b"Verified Profiles" in html
+    if ok:
+        _remember_verified(name)
+    return ok
+
+
+def _remember_verified(name: str) -> None:
+    """Persist a freshly confirmed verification (atomic file replace)."""
+    global _verified_cache
+    with _verified_write_lock:
+        if _verified_cache is None:
+            verified_users()
+        _verified_cache.add(name)
+        try:
+            data = json.loads(VERIFIED_FILE.read_text())
+        except (OSError, ValueError, TypeError):
+            data = {"note": "TONE3000 'Verified Profiles' usernames."}
+        users = set(data.get("users") or []) | {name}
+        data["users"] = sorted(users)
+        data["verified_at"] = time.strftime("%Y-%m-%d")
+        tmp = VERIFIED_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.replace(VERIFIED_FILE)
+
+
+def _open_json(req):
+    """Read a TONE3000 API response with bounded retry for dropped TLS links."""
+    transient = (urllib.error.URLError, ssl.SSLError, TimeoutError,
+                 ConnectionResetError, http.client.IncompleteRead)
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read())
+        except transient:
+            if attempt == 2:
+                raise
+            time.sleep(0.5 * (2 ** attempt))
+
 
 def _get(url, **params):
     if params:
         url += "?" + "&".join(f"{k}={urllib.parse.quote(str(v), safe=',.')}" for k, v in params.items())
     req = urllib.request.Request(url, headers={
         "apikey": KEY, "Authorization": f"Bearer {KEY}", "content-profile": "public"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+    return _open_json(req)
 
 
 def _post(url, body):
@@ -45,58 +402,210 @@ def _post(url, body):
                                  headers={"apikey": KEY, "Authorization": f"Bearer {KEY}",
                                           "content-profile": "public", "Content-Type": "application/json"},
                                  method="POST")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+    return _open_json(req)
 
 
 def search(query="", page_size=50, order_by="trending", gear_filters=None,
-           usernames=None, tag_names=None):
-    """search_tones_a2 RPC：关键词 + A2 架构 + 排序（trending / newest / best-match /
-    downloads-all-time，对齐 tone3000.com 官网排序；空查询即 trending 流）
+           usernames=None, tag_names=None, make_names=None, page_number=1,
+           architecture_filter=None):
+    """Search tones through the public legacy RPC.
+
+    ``architecture_filter`` follows the official API enum: ``"1"`` (A1),
+    ``"2"`` (A2), or ``"custom"``.  ``None`` deliberately forwards an omitted
+    filter, whose documented legacy default is A1 + Custom and which also
+    keeps non-NAM tones such as IR in the result set.  The old RPC is retained
+    because the desktop app has no OAuth token for the v1 REST endpoint.
+
+    Sorting uses the official values (trending / newest / best-match /
+    downloads-all-time; empty query is the trending stream).
 
     gear_filters: None 或合法值列表 — ["amp"] / ["cab"] / ["amp-cab"]（TONE3000 值域，无 "ir"）
-    usernames: 作者名列表（精确），tag_names: 标签名列表（精确）—— 与 query 叠加过滤
+    usernames: 作者名列表（精确），tag_names: 标签名列表（精确），
+    make_names: 设备/Make 名列表（精确）—— 与 query 叠加过滤
     """
-    return _post(f"{API}/rpc/search_tones_a2", {
-        "query_term": query, "page_number": 1, "page_size": page_size,
-        "order_by": order_by, "tag_names": tag_names, "make_names": None,
+    if architecture_filter is not None:
+        architecture_filter = normalize_architecture(architecture_filter)
+        if architecture_filter is None:
+            raise ValueError("architecture_filter must be 1, 2, or custom")
+    body = {
+        "query_term": query, "page_number": page_number, "page_size": page_size,
+        "order_by": order_by, "tag_names": tag_names, "make_names": make_names,
         "gear_filters": gear_filters, "is_calibrated": False, "size_filters": None,
-        "usernames": usernames, "architecture_filter": "2"})
+        "usernames": usernames}
+    # An omitted query parameter is semantically different from an explicit
+    # architecture value in the official API (omitted => A1 + Custom).
+    if architecture_filter is not None:
+        body["architecture_filter"] = architecture_filter
+    rows = _post(f"{API}/rpc/search_tones_a2", body)
+    return [normalize_tone(row) for row in rows]
+
+
+_RANKING_TONE_FIELDS = (
+    "id,title,gear,format,platform,downloads_count,favorites_count,"
+    "a1_models_count,a2_models_count,custom_models_count,irs_count,"
+    "models_count,created_at,user_id"
+)
+
+
+def _ranked_tones(order: str, limit: int) -> list[dict]:
+    """Read ranking rows with a narrow fallback for the legacy view.
+
+    The current public tones_counts view predates the official format column.
+    It still exposes platform and all model counters, so only drop format
+    after a schema-level 400; do not hide unrelated network errors.
+    """
+    try:
+        rows = _get(f"{API}/tones_counts", select=_RANKING_TONE_FIELDS,
+                    order=order, limit=limit)
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (400, 404):
+            raise
+        legacy_fields = _RANKING_TONE_FIELDS.replace("format,", "")
+        rows = _get(f"{API}/tones_counts", select=legacy_fields,
+                    order=order, limit=limit)
+    _attach_usernames(rows)
+    return [normalize_tone(row) for row in rows]
 
 
 def top(limit=50):
     """tones_counts 排行（下载/收藏）"""
-    return _get(f"{API}/tones_counts",
-                select="id,title,gear,downloads_count,favorites_count,a2_models_count,platform",
-                order="downloads_count.desc", limit=limit)
+    return _ranked_tones("downloads_count.desc", limit)
 
 
 def top_favorites(limit=50):
     """收藏排行：search_tones_a2 RPC 无收藏排序（400），走 tones_counts 聚合表。
-    行形状与 search 结果兼容（缺 username/tags，表格显示 @?）。"""
-    return _get(f"{API}/tones_counts",
-                select="id,title,gear,downloads_count,favorites_count,"
-                       "a2_models_count,irs_count,models_count,created_at",
-                order="favorites_count.desc", limit=limit)
+
+    行形状与 search 结果兼容。REQ-023：行缺 username/avatar_url（此前表格
+    显示 @?）——按 user_id 批量联查 users 补上（一次 in 过滤请求）。
+    """
+    return _ranked_tones("favorites_count.desc", limit)
 
 
-def models(tone_id, a2_only=True):
-    """tone 的全部模型；a2_only=True 时过滤 A2 (SlimmableContainer)。IR 等非 A2 音色传 False
+def top_creators(sort_by="tones", page_size=100, page_number=1):
+    """Official TONE3000 creator leaderboard.
+
+    The website's ``/top-creators`` page reads ``user_public_counts`` directly;
+    use the same stable aggregate fields instead of rebuilding creator totals
+    from arbitrary pages of tone search results.
+    """
+    column = {
+        "tones": "public_tones_count",
+        "downloads": "downloads_count",
+        "favorites": "favorites_count",
+        "models": "public_models_count",
+    }.get(sort_by, "public_tones_count")
+    page_size = max(1, int(page_size))
+    page_number = max(1, int(page_number))
+    return _get(
+        f"{API}/user_public_counts",
+        select="*",
+        order=f"{column}.desc,username.asc",
+        limit=page_size,
+        offset=(page_number - 1) * page_size,
+        **{column: "gt.0"},
+    )
+
+
+def _attach_usernames(rows: list[dict]) -> None:
+    """按 user_id 批量联查 users，就地补 username/avatar_url（REQ-023）。"""
+    user_ids = sorted({r.get("user_id") for r in rows if r.get("user_id")},
+                      key=str)
+    if not user_ids:
+        return
+    users = _get(f"{API}/users", id=f"in.({','.join(str(i) for i in user_ids)})",
+                 select="id,username,avatar_url", limit=len(user_ids))
+    by_id = {str(u["id"]): u for u in users}
+    for row in rows:
+        u = by_id.get(str(row.get("user_id")))
+        if u:
+            row["username"] = u.get("username")
+            row["avatar_url"] = u.get("avatar_url")
+
+
+def user(username: str) -> dict | None:
+    """用户资料（bio/display_name/avatar/verified 依据等）；查不到返回 None。
+
+    TOP CREATORS 聚焦作者行时展示作者信息用（REQ-012）；verified 徽章仍走
+    verify_username 的独立判定。
+    """
+    rows = _get(f"{API}/users", username=f"eq.{username}", limit=1)
+    return rows[0] if rows else None
+
+
+def user_stats(username: str) -> dict | None:
+    """作者资料 + 四项统计（作者页多行介绍用，REQ-020）。
+
+    stats: tones = 远程真实数（search usernames 的 total_count）；
+    downloads/favorites/models = tones_counts 按 user 的前 200 条求和
+    （PostgREST 聚合端点 400 被禁，这是可用的近似真实值）。
+    """
+    info = user(username)
+    if not info:
+        return None
+    stats = {"tones": None, "downloads": 0, "favorites": 0, "models": 0}
+    uid = info.get("id")
+    try:
+        hits = _get(f"{API}/tones_counts", user_id=f"eq.{uid}",
+                    select="downloads_count,favorites_count,models_count",
+                    limit=200)
+        stats["downloads"] = sum(h.get("downloads_count") or 0 for h in hits)
+        stats["favorites"] = sum(h.get("favorites_count") or 0 for h in hits)
+        stats["models"] = sum(h.get("models_count") or 0 for h in hits)
+    except Exception:
+        pass
+    try:
+        hits = search("", page_size=1, usernames=[username])
+        stats["tones"] = next((h.get("total_count") for h in hits
+                               if h.get("total_count") is not None), None)
+    except Exception:
+        pass
+    return {**info, "stats": stats}
+
+
+def models(tone_id, a2_only=None):
+    """List a tone's models with official architecture semantics.
+
+    ``a2_only`` is a compatibility switch used by the pre-v1 caller.  ``True``
+    selects A2 only, ``False`` returns every model, and ``None`` (the official
+    default when the architecture query is omitted) selects A1 + Custom plus
+    non-NAM models.  IR and other non-NAM models have a null
+    ``architecture_version``.
 
     name 取 models 表顶层字段（TONE3000 网页/zip 下载的文件名即此 name 原样）。
-    用 JSONB 投影只取 architecture，不拉全量 model_json（多模型 tone 的全量
-    响应可达 19MB+、耗时 60s+，见 scripts/import_handoff.py 踩坑记录）。
+    The canonical v1 field is selected directly; the JSONB projection remains
+    as a fallback for old REST rows that only expose ``model_json.architecture``.
     """
-    ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
-              select="id,model_url,name,architecture:model_json->>architecture", limit=300)
-    if not a2_only:
+    try:
+        ms = _get(
+            f"{API}/models", tone_id=f"eq.{tone_id}",
+            select=("id,created_at,updated_at,user_id,model_url,name,size,"
+                    "tone_id,architecture_version"), limit=300)
+    except urllib.error.HTTPError as exc:
+        # Older deployments did not expose the top-level field. Keep the
+        # fallback narrow so a real network failure is not hidden by a second
+        # request.
+        if exc.code not in (400, 404):
+            raise
+        ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
+                  select=("id,created_at,updated_at,user_id,model_url,name,size,"
+                          "tone_id,"
+                          "architecture_version:model_json->>architecture_version,"
+                          "architecture:model_json->>architecture"), limit=300)
+    ms = [normalize_model(m) for m in ms]
+    if a2_only is False:
         return ms
-    return [m for m in ms if m.get("architecture") == "SlimmableContainer"]
+    if a2_only is True:
+        return [m for m in ms if model_architecture_version(m) == "2"]
+    return [m for m in ms if model_architecture_version(m) != "2"]
 
 
-def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
+def download(tone_id, dest_dir, tag=None, a2_only=None, ext=None,
              return_paths=False, progress=None, quiet=False, model_ids=None):
-    """下载 tone 的模型到 dest_dir；a2_only=False 下载全部（含 IR wav）；ext 强制扩展名
+    """Download models to ``dest_dir`` with the official architecture default.
+
+    ``a2_only=None`` follows the API default (A1 + Custom plus non-NAM),
+    ``False`` downloads every architecture/model, and ``True`` is retained for
+    legacy A2-only callers. ``ext`` can force an IR suffix.
 
     文件名优先采用 models.name；旧响应没有 name 时采用 model_url 的 basename。
     不添加序号、不改写语义名称。model_ids 限制只下载指定模型（部分安装）。
@@ -124,14 +633,25 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
             url_path = urllib.parse.urlparse(m.get("model_url") or "").path
             fname = Path(urllib.parse.unquote(url_path)).name
         fname = fname or f"model-{m['id']}"
-        # ext is used for IR downloads. Preserve an existing .nam/.wav suffix
-        # instead of producing names such as cab.wav.wav.
+        # Use the requested pack suffix when supplied; otherwise derive the
+        # engine suffix from each Model. This keeps mixed legacy amp-cab packs
+        # correct even when their parent Tone is labeled NAM.
+        version = model_architecture_version(m)
         if ext:
-            suffix = f".{ext.lstrip('.')}".lower()
-            if not fname.lower().endswith((".nam", ".wav")):
-                fname = f"{fname}{suffix}"
-        elif not fname.lower().endswith((".nam", ".wav")):
-            fname = f"{fname}.nam"
+            desired_suffix = f".{ext.lstrip('.')}".lower()
+        elif is_ir_model(m):
+            desired_suffix = ".wav"
+        elif version is not None:
+            desired_suffix = ".nam"
+        else:
+            desired_suffix = None
+        if desired_suffix:
+            current_suffix = Path(fname).suffix.lower()
+            if current_suffix in (".nam", ".wav"):
+                if current_suffix != desired_suffix:
+                    fname = f"{fname[:-len(current_suffix)]}{desired_suffix}"
+            else:
+                fname = f"{fname}{desired_suffix}"
         out = dest / fname
         if progress:
             progress(i - 1, len(ms), fname)
@@ -155,11 +675,20 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
         if progress:
             progress(i, len(ms), fname)
         if return_paths:
-            records.append({"id": m["id"], "tone_id": tone_id, "model_url": m["model_url"],
-                            "name": m.get("name"),
-                            "model_json": {"architecture": m.get("architecture")}
-                                          if m.get("architecture") else None,
-                            "local_path": str(out)})
+            records.append({
+                "id": m["id"],
+                "created_at": m.get("created_at"),
+                "updated_at": m.get("updated_at"),
+                "user_id": m.get("user_id"),
+                "tone_id": m.get("tone_id", tone_id),
+                "model_url": m["model_url"],
+                "name": m.get("name"),
+                "size": m.get("size"),
+                "architecture_version": m.get("architecture_version"),
+                "model_json": {"architecture": m.get("architecture")}
+                              if m.get("architecture") else None,
+                "local_path": str(out),
+            })
     if not quiet:
         print(f"[{tone_id}] 下载 {got}/{len(ms)} -> {dest}")
     return records if return_paths else got
@@ -177,13 +706,28 @@ def tone_by_id(tone_id, with_models=False):
     rows = _get(f"{API}/tones_counts", id=f"eq.{tone_id}", limit=1)
     if not rows:
         return None
-    t = dict(rows[0])
+    t = normalize_tone(rows[0])
     if t.get("is_deleted"):
         return None
     # username / avatar_url live on the users table
-    u = _get(f"{API}/users", id=f"eq.{t['user_id']}", select="username,avatar_url", limit=1)
-    t["username"] = (u[0].get("username") if u else None)
-    t["avatar_url"] = (u[0].get("avatar_url") if u else None)
+    try:
+        u = _get(f"{API}/users", id=f"eq.{t['user_id']}",
+                 select="id,username,avatar_url,url", limit=1)
+    except urllib.error.HTTPError as exc:
+        # The legacy users view has no EmbeddedUser.url column.  Keep the
+        # fallback narrow and synthesize the public profile route below.
+        if exc.code not in (400, 404):
+            raise
+        u = _get(f"{API}/users", id=f"eq.{t['user_id']}",
+                 select="id,username,avatar_url", limit=1)
+    if u:
+        t["username"] = u[0].get("username")
+        t["avatar_url"] = u[0].get("avatar_url")
+        t["user"] = dict(u[0])
+        t["user_url"] = u[0].get("url") or (
+            f"https://www.tone3000.com/{u[0]['username']}"
+            if u[0].get("username") else None)
+        t["user"]["url"] = t["user_url"]
     # tags: tone_tags join -> names
     ids = [r["tag_id"] for r in _get(f"{API}/tone_tags", tone_id=f"eq.{tone_id}", select="tag_id", limit=300)]
     if ids:
@@ -199,19 +743,57 @@ def tone_by_id(tone_id, with_models=False):
     else:
         t["makes"] = []
     # model_name: first model's metadata name (NAM A2 metadata carries it)
-    ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
-              select="id,name:model_json->metadata->>name", limit=50)
+    ms = _get(
+        f"{API}/models", tone_id=f"eq.{tone_id}",
+        select="id,name,model_json->metadata->>name", limit=50)
     t["model_name"] = None
     for m in ms:
-        if m.get("name"):
-            t["model_name"] = m["name"]
+        name = m.get("name") or m.get("metadata_name")
+        if name:
+            t["model_name"] = name
             break
-    return t
+    if not t.get("url"):
+        t["url"] = (f"https://www.tone3000.com/tones/"
+                     f"{slugify(t.get('title'))}-{tone_id}")
+    return normalize_tone(t)
+
+
+def tones_for_model_ids(model_ids):
+    """Resolve exact TONE3000 model IDs to their parent tone search rows.
+
+    ``search_tones_a2`` has no model-id predicate, so this takes the model
+    lookup path instead of pretending a numeric ID is a title keyword. Each
+    returned tone carries ``matched_model_ids`` for the TUI result label.
+    """
+    ids = list(dict.fromkeys(int(model_id) for model_id in model_ids))
+    if not ids:
+        return []
+    chunks = ",".join(str(model_id) for model_id in ids)
+    models_by_id = {
+        int(row["id"]): row for row in _get(
+            f"{API}/models", id=f"in.({chunks})", select="id,tone_id", limit=len(ids))
+        if row.get("id") is not None and row.get("tone_id") is not None
+    }
+    matches: dict[int, list[int]] = {}
+    for model_id in ids:
+        row = models_by_id.get(model_id)
+        if row:
+            matches.setdefault(int(row["tone_id"]), []).append(model_id)
+    tones = []
+    for tone_id, matched_ids in matches.items():
+        tone = tone_by_id(tone_id)
+        if tone:
+            tone["matched_model_ids"] = matched_ids
+            tones.append(tone)
+    return tones
 
 
 def fmt(t):
+    gear = normalize_gear(t.get("gear")) or "?"
+    format_ = tone_format(t) or "?"
     return (f"{t['id']:>7} | dl={t.get('downloads_count', 0):>6} fav={t.get('favorites_count', 0):>5} "
-            f"a2={t.get('a2_models_count', 0):>3} | {t.get('gear', '?'):<8} | {t.get('title', '')[:58]} | @{t.get('username', '')}")
+            f"a2={t.get('a2_models_count', 0):>3} | {gear:<8} | {format_:<11} | "
+            f"{t.get('title', '')[:58]} | @{t.get('username', '')}")
 
 
 # ---- 试听干音素材（TONE3000 网页播放器内置，托管于其 MIT 开源仓库） ----
@@ -241,25 +823,47 @@ DRY_INPUTS = {
 }
 
 
-def fetch_dry_inputs(dest_dir, names=None):
-    """下载 TONE3000 试听干音（MIT）到 dest_dir。names 为 DRY_INPUTS 的 key 列表，缺省全下"""
+def fetch_dry_inputs(dest_dir, names=None, progress=None):
+    """下载 TONE3000 试听干音（MIT）到 dest_dir。names 为 DRY_INPUTS 的 key 列表，缺省全下。
+    progress(done, total, fname) 可选回调（每文件一次，done=已下载数）"""
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     keys = names or list(DRY_INPUTS)
+    total = len(keys)
+    done = 0
     got = 0
     for k in keys:
         fname = DRY_INPUTS[k]
         out = dest / fname
         if out.exists() and out.stat().st_size > 0:
+            done += 1
             got += 1
             continue
         url = f"{DRY_INPUTS_BASE}/{urllib.parse.quote(fname)}"
         with urllib.request.urlopen(url, timeout=60) as r:
             out.write_bytes(r.read())
+        done += 1
         got += 1
+        if progress:
+            progress(done, total, fname)
         time.sleep(0.1)
-    print(f"干音素材 {got}/{len(keys)} -> {dest}")
+    if progress:
+        progress(done, total, None)
+    print(f"干音素材 {got}/{total} -> {dest}")
     return got
+
+
+def fetch_dry_inputs_missing(dest_dir, names=None):
+    """返回 dest_dir 中缺失（不存在或为空）的干声素材 key 列表。
+    names 为 DRY_INPUTS 的 key 列表，缺省全部"""
+    dest = Path(dest_dir)
+    keys = names or list(DRY_INPUTS)
+    missing = []
+    for k in keys:
+        out = dest / DRY_INPUTS[k]
+        if not out.exists() or out.stat().st_size == 0:
+            missing.append(k)
+    return missing
 
 
 def main():

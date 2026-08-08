@@ -1,4 +1,6 @@
-# GigBuddy 🎸
+# GigBuddy 🎸 — Your one-stop NAM tone manager
+
+*v0.1.0 — 2026-08-05*
 
 Guitar tone-chain tool with a **decoupled architecture**: a tone-library browser UI,
 a realtime NAM engine, and an SQLite tone library that external AI agents drive
@@ -62,27 +64,51 @@ is already running in another terminal.
 
 ```bash
 # optional terminal 1: realtime engine (hot-swap + level telemetry)
-./bin/realtime_cli --in "Scarlett" --out "Scarlett" --ch 1 \
-    --live data/live_chain.json --level-file data/level.json
+# 省略 --in/--out 使用系统默认音频设备；设备列表与选择见 TUI AUDIO SETTINGS 面板
+./bin/realtime_cli --live data/live_chain.json --level-file data/level.json
 
 # terminal 2: TUI (Textual; omit --no-engine if terminal 1 is not running)
 .venv/bin/python -m tui --no-engine
 ```
 
-TUI features (v2 — pure control surface, no embedded agent):
-- **Library browser** (left): imported tones (title/gear/downloads/author); select a
-  row → full metadata in the detail pane; type in the box to search TONE3000, pick a
-  result to import it (download + DB row, appears in the table immediately).
-- **Tone-chain panel** (right): read-only view of the live AMP/IR chain. Select a
-  Library tone on the left, press `Enter` (or double-click) to open its file
-  picker, then pick a specific downloaded file to load it into the chain.
-  `amp-cab` tones automatically bypass the separate IR node.
-  `g/G` gain ±0.1, `m/M` master ±0.05.
-- **Keyboard flow**: the library table is focused on startup; `↑/↓` browse, `Enter`
-  opens a tone, `/` focuses search, `Esc` clears search/returns to the list, and
-  `Tab` moves between controls. The picker uses `←/→` to collapse/expand tone
-  folders and `Enter` to choose the highlighted file.
+TUI features (v0.1):
+- **Library browser** (left): three tabs — LOCAL (imported tones), TONE3000
+  (live search + trending + sortable results with per-tab SORT/TYPE filters) and
+  TOP CREATORS (6-column leaderboard: Rank/Creator/Tones/Downloads/Fav/Models,
+  Most Tones by default with its own SORT bar; enter/double-click a creator row
+  jumps to a TONE3000 `@author` search of that creator's tones). Search syntax:
+  `@author`, `#tag`, `author:name`, `tag:name`, `make:"full device name"`.
+- **Tone-chain panel** (right): INPUT / AMP / CAB nodes with state lamps
+  (green active / red BYPASS / grey empty). `↑/↓` on AMP or CAB steps through
+  the same tone folder's models; the CAB row has its own ▲/▼ arrow buttons.
+  Double-click toggles BYPASS (engine pass-through, content kept). Parameters
+  are fully editable: `g·G / m·M / q·Q` click to step, hold for fast long-press
+  stepping, click the dot to zero, and click the value to type it directly
+  (gain/master 0–10, quality 0–1). `d` unloads a slot.
+- **Detail pane** (right, under the chain): dual-mode — Description
+  (metadata) ↔ Selection (pack file list, hot-swap with enter) switched by
+  `←/→` or the corner hint. Focusing an AMP/CAB node opens its pack; focusing a
+  TOP CREATORS row shows that author's profile (bio + verified badge); a
+  successful author verification is cached locally and the badge is reused in
+  every author display; remote tones show a downloadable file list whose rows
+  open the pack install screen.
+- **AUDIO**: the compact bar keeps live levels + MUTE; AUDIO SETTINGS has
+  input/output devices (System Default first), buffer, sample rate and latency.
+- **Dry input playback**: the INPUT row can play a dry guitar file
+  (space play/pause, s stop, l loop) — pick the source with enter.
+- **Presets**: `p` opens the preset picker, `ctrl+s` saves, `ctrl+shift+s`
+  saves as new; `ctrl+z` undoes the last preset application.
 - **Level meter** (bottom): 0.3s refresh from the engine.
+
+Search examples:
+
+```text
+super reverb @tone3000
+author:tone3000 tag:clean super reverb
+two rock clean @coretonecaptures
+make:"Two Rock Traditional Clean" @coretonecaptures
+tag:"edge of breakup" marshall
+```
 
 Engine hot-swap (`--live`): watches `data/live_chain.json` (model/ir/gain/master),
 swaps model/IR atomically within 0.3s; `--level-file` feeds levels back as JSON.
@@ -90,30 +116,48 @@ swaps model/IR atomically within 0.3s; `--level-file` feeds levels back as JSON.
 ## gigbuddy CLI (agent-facing interface)
 
 ```
-gigbuddy tone list [--gear amp|cab|amp-cab] [--limit N] [--query Q] [--json]
+gigbuddy tone list [--gear amp|amp-cab|pedal|outboard|cab|space|experimental] [--limit N] [--query Q] [--json]
 gigbuddy tone search <query> [--gear ...] [--limit N] [--json]   # TONE3000 live
 gigbuddy tone show <id> [--json]                                 # full metadata
 gigbuddy tone import <id>                                        # download + persist
 gigbuddy chain get                                               # cat live_chain.json
 gigbuddy chain set '<json>'                                      # write it (hot-swap)
-gigbuddy preset seed                                             # built-in recommendation chains
+gigbuddy preset seed                                             # add/update built-in catalog
+gigbuddy preset seed --replace                                   # delete all presets, rebuild catalog
 gigbuddy preset list                                             # named chain snapshots
 gigbuddy preset save <name> [--note "..."]                       # snapshot current chain
 gigbuddy preset load <name>                                      # apply (engine hot-swap)
+gigbuddy preset current                                          # active name; * means dirty
+gigbuddy preset rename <old> <new>                               # rename, preserving active
+gigbuddy preset note <name> [note]                               # set / clear description
 gigbuddy preset show <name> / delete <name>                      # inspect / remove
 ```
 
 Presets store model **logic references** (`model_id`), resolved to current paths
-at load time — library renames never break a preset. TUI: `p` loads a preset,
-`ctrl+s` saves the current chain under a name.
+at load time — library renames never break a preset. The active preset is shared
+by the CLI and TUI. TUI: `p` loads, `ctrl+s` twice confirms an active-preset
+overwrite, and `ctrl+shift+s` saves as a new name. In the PRESETS pane, use
+`space` / `a` / `d` / `esc` for select, select all, bulk delete, and clear;
+`n` / `r` / `e` create, rename, or edit the focused preset.
+
+LOCAL uses the same `space` / `a` / `d` / `esc` selection model. Uninstalling
+moves managed files to `data/.trash`, clears `models.local_path`, and retains
+tone/model metadata. Active-chain files are blocked; preset dependencies require
+an extra confirmation. The compact main AUDIO bar keeps live levels and MUTE
+visible; AUDIO SETTINGS opens input/output, buffer, sample rate, and latency.
 
 Notes:
-- `gear` domain is `amp` / `cab` / `amp-cab` (no `ir`); IR tones are `gear=cab`, `platform=ir`.
+- `gear` follows TONE3000's enum: `amp`, `amp-cab`, `pedal`, `outboard`, `cab`,
+  `space`, and `experimental`. `format` is the canonical model format
+  (`nam`, `ir`, `aida-x`, `aa-snapshot`, `proteus`); `platform` is a deprecated
+  compatibility alias. IR routing is format-first, with legacy `cab`/`space`
+  inference only when no format is present.
 - Import is idempotent (files skip when present, rows upsert). Files are grouped
   under `data/tones/<tone-id>-<title-slug>/` and keep TONE3000's **semantic model
   name** (`models.name`, same as the site's zip download — spaces preserved);
-  use `tone show` for the real path. IR tones record architecture `"IR"` and
-  download `.wav` files.
+  use `tone show` for the real path. NAM models expose
+  `architecture_version` (`1`/`2`/`custom`); IR models have a null architecture
+  version and download as `.wav` files.
 - The gigbuddy skill (`.claude/skills/gigbuddy`) drives this CLI end to end; its
   anti-invention rules (tone ids only from real search output) apply to any agent use.
 
@@ -136,8 +180,20 @@ docs/           SPEC-v2.md (decoupled architecture) / chain-schema.md (chain DSL
 
 Current live chain (`data/live_chain.json`) keys: `model` (.nam path), `ir` (.wav IR
 path, optional), `gain`, `master`, `quality` (A2 model sub-model size, 0–1,
-1.0 = full precision; TUI `u`/`U`). Full DSL and node semantics:
+1.0 = full precision; TUI `q`/`Q`). Full DSL and node semantics:
 docs/chain-schema.md.
+
+## Known limitations (v0.1)
+
+- **TOP CREATORS** reads TONE3000's official `user_public_counts` leaderboard,
+  the same source used by `tone3000.com/top-creators`. Tones, Downloads,
+  Favorites, and Models are stable server-side aggregates.
+- **Creator followers/following** are not shown: the public users API exposes
+  no follower fields and the website is behind Cloudflare.
+- **Remote data loads are network-bound** — the first TOP CREATORS visit waits
+  for one leaderboard request; displayed statistics are not rewritten later.
+- Notifications and a few table refreshes are timing-sensitive under heavy
+  load; rare test flakes have been observed in CI-style runs.
 
 ## License
 
@@ -148,7 +204,7 @@ Eigen (MPL-2), math_approx (MIT), PortAudio (MIT-like), Textual (MIT).
 
 - [x] MVP: render core (NeuralAudio) + amp/IR pipeline + TONE3000 retrieval layer
 - [x] Blueprint DSL v0.1 (docs/chain-schema.md) + GigBuddy skill (NL → chain → render)
-- [x] Realtime engine: hot-swap (--live), level telemetry, Scarlett Solo verified
+- [x] Realtime engine: hot-swap (--live), level telemetry, USB interface verified
 - [x] v2 decoupling: SQLite tone library (full metadata) + gigbuddy CLI + TUI browser
       (agent removed from TUI; DB open to external agents)
 - [ ] Local VST3 effects (pedalboard, subprocess-isolated; activate placeholder nodes)

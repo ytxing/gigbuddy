@@ -6,36 +6,63 @@ TONE3000 hits are tagged with their local download state (✓ all / ◐ partial 
 ○ none) by comparing model ids against the local library.
 """
 import asyncio
+from functools import partial
 import sys
 from pathlib import Path
+from typing import Callable
 
+from rich.cells import cell_len
+from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.events import Leave, MouseEvent, MouseMove
 from textual.message import Message
 from textual.widgets import (DataTable, Input, ProgressBar, Select, Static,
                              TabbedContent, TabPane)
+from textual.widgets._tabbed_content import ContentTabs  # noqa: E402
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import library  # noqa: E402
+import tone3000  # noqa: E402
 
 from .install_screen import PackInstallScreen  # noqa: E402
-from .marquee import MarqueeBar  # noqa: E402
-from .modals import ClickSelectTable  # noqa: E402
+from .marquee import MarqueeBar, ellipsis_window, marquee_window  # noqa: E402
+from .modals import (ClickSelectTable, border_hint_action_token,
+                     border_hint_hit, hint_span, set_border_hint_hover,
+                     refresh_border_hint_layout,
+                     set_border_hint_layout)  # noqa: E402
+from .search_query import SearchSpec, SearchSyntaxError, parse_search  # noqa: E402
+from .selection import NonSelectableStatic  # noqa: E402
+from .uninstall_screen import LocalUninstallScreen  # noqa: E402
 
 
 def _arch(t: dict) -> str:
-    """Architecture tag: A2 / A1 / IR / —"""
+    """Model architecture tag; IR belongs to the separate Format column."""
+    labels = []
     if t.get("a2_models_count"):
-        return "A2"
-    if t.get("a1_models_count"):
-        return "A1"
-    if t.get("irs_count"):
-        return "IR"
-    return "—"
+        labels.append("A2")
+    if t.get("custom_models_count"):
+        labels.append("CUSTOM")
+    return "+".join(labels) if labels else "—"
+
+
+def _format(t: dict) -> str:
+    """Display the canonical Tone format, with legacy IR inference."""
+    value = tone3000.tone_format(t)
+    return {"nam": "NAM", "ir": "IR", "aida-x": "AIDA-X",
+            "aa-snapshot": "AA-SNAPSHOT", "proteus": "PROTEUS"}.get(
+                value, (value or "—").upper())
+
+
+def _gear_label(t: dict) -> str:
+    """Display the canonical native gear token without translating it."""
+    value = tone3000.normalize_gear(t.get("gear"))
+    return value.upper() if value else "?"
 
 
 def _uploaded(t: dict) -> str:
@@ -44,22 +71,25 @@ def _uploaded(t: dict) -> str:
 
 
 def _clip(text: str, n: int = 40) -> str:
-    """Truncate with an ellipsis so the table shows 缩写 for overflow, and the
-    focused row's full title scrolls in the detail-pane marquee instead."""
-    return text if len(text) <= n else text[:n - 1] + "…"
+    """Keep unfocused table titles bounded; focus replaces this with marquee."""
+    return ellipsis_window(text, n)
+
+
+# Which TabPane id each library table belongs to. Async loads finish after
+# the user may have left the pane; Textual's TabbedContent treats any focus
+# inside a pane as a tab switch (TabPane.Focused → active = pane id), so a
+# stale focus would yank the UI back to the tab the load was started on.
+_TABLE_PANE = {
+    "lib-table-local": "pane-local",
+    "lib-table-tone": "pane-tone",
+    "lib-table-creators": "pane-creators",
+}
 
 
 def _parse_query(q: str) -> tuple[str, list[str], list[str]]:
-    """Split a search box query: @author → usernames, #tag → tag_names, rest → words."""
-    users, tags, words = [], [], []
-    for tok in q.split():
-        if tok.startswith("@"):
-            users.append(tok[1:])
-        elif tok.startswith("#"):
-            tags.append(tok[1:])
-        else:
-            words.append(tok)
-    return " ".join(words), users, tags
+    """Compatibility view of the shared parser for older callers/tests."""
+    spec = parse_search(q)
+    return spec.text, list(spec.authors), list(spec.tags)
 
 
 class ToneSelected(Message):
@@ -76,6 +106,23 @@ class ToneHighlighted(Message):
     def __init__(self, tone: dict | None) -> None:
         super().__init__()
         self.tone = tone
+
+
+class VerifiedAuthor(Message):
+    """A live author verification landed; refresh visible author cells."""
+
+    def __init__(self, username: str) -> None:
+        super().__init__()
+        self.username = username
+
+
+class CreatorFocused(Message):
+    """TOP CREATORS 行聚焦 → detail 显示作者信息 + 该作者 top 音色列表
+    （REQ-012：取代"聚合首 tone"的随机单音色映射）。"""
+
+    def __init__(self, username: str) -> None:
+        super().__init__()
+        self.username = username
 
 
 class LibrarySearchInput(Input):
@@ -99,6 +146,130 @@ class LibrarySearchInput(Input):
 class LibraryTable(ClickSelectTable):
     """Row table whose horizontal keys move between the two main columns."""
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # The columns below already include their visual spacing.  Removing
+        # DataTable's default two-cell padding keeps the full schema inside a
+        # normal library pane instead of requiring horizontal scrolling.
+        self.cell_padding = 0
+        self._marquee_row_key: str | None = None
+        self._marquee_tone: dict | None = None
+        self._marquee_original_cell = None
+        self._marquee_offset = 0
+        self._marquee_timer = None
+
+    def clear(self, columns: bool = False):
+        self._clear_title_marquee()
+        return super().clear(columns)
+
+    def on_blur(self, event) -> None:
+        self._clear_title_marquee()
+
+    def _stop_title_timer(self) -> None:
+        if self._marquee_timer is not None:
+            self._marquee_timer.stop()
+            self._marquee_timer = None
+
+    def _restore_title_cell(self) -> None:
+        if self._marquee_row_key is None or self._marquee_original_cell is None:
+            return
+        try:
+            self.update_cell(
+                self._marquee_row_key, "title", self._marquee_original_cell,
+                update_width=False)
+        except Exception:
+            # A refresh may have removed the old row before the blur event.
+            pass
+
+    def _clear_title_marquee(self) -> None:
+        self._stop_title_timer()
+        self._restore_title_cell()
+        self._marquee_row_key = None
+        self._marquee_tone = None
+        self._marquee_original_cell = None
+        self._marquee_offset = 0
+
+    def _title_content_width(self) -> int:
+        column = next(
+            (column for column in self.ordered_columns
+             if column.key.value == "title"),
+            None,
+        )
+        if column is None:
+            return TITLE_CELL_LIMIT
+        return min(column.width if not column.auto_width else column.content_width,
+                   TITLE_CELL_LIMIT)
+
+    @staticmethod
+    def _title_scroll_parts(tone: dict) -> tuple[str, str | None, str]:
+        detail = str(tone.get("title") or "")
+        matched_model_ids = tone.get("matched_model_ids") or ()
+        if matched_model_ids:
+            marker = "model " + ", ".join(
+                f"#{model_id}" for model_id in matched_model_ids)
+            detail = f"{marker} · {detail}"
+        marker = {
+            "all": ("✓ ", "bold $success"),
+            "partial": ("◐ ", "bold $warning"),
+            "none": ("○ ", "dim"),
+        }.get(tone.get("download_state"), ("", None))
+        return detail, marker[1], marker[0]
+
+    def _focused_title_cell(self) -> Text | None:
+        if self._marquee_tone is None:
+            return None
+        detail, marker_style, marker = self._title_scroll_parts(self._marquee_tone)
+        available = max(
+            self._title_content_width() - cell_len(marker), 1)
+        window = marquee_window(detail, available, self._marquee_offset)
+        if marker_style:
+            cell = Text.from_markup(
+                f"[{marker_style}]{escape(marker)}[/]{escape(window)}",
+                end="",
+            )
+        else:
+            cell = Text(escape(window), no_wrap=True, end="")
+        cell.no_wrap = True
+        return cell
+
+    def _refresh_title_cell(self) -> None:
+        if self._marquee_row_key is None:
+            return
+        cell = self._focused_title_cell()
+        if cell is None:
+            return
+        try:
+            self.update_cell(
+                self._marquee_row_key, "title", cell, update_width=False)
+        except Exception:
+            self._clear_title_marquee()
+
+    def _advance_title_marquee(self) -> None:
+        self._marquee_offset += 1
+        self._refresh_title_cell()
+
+    def set_focused_tone(self, row_key: str | None, tone: dict | None) -> None:
+        """Scroll only the focused title cell; restore the old row on change."""
+        if row_key == self._marquee_row_key:
+            return
+        self._clear_title_marquee()
+        if not row_key or not tone or not tone.get("title"):
+            return
+        try:
+            original = self.get_cell(row_key, "title")
+        except Exception:
+            return
+        self._marquee_row_key = row_key
+        self._marquee_tone = tone
+        self._marquee_original_cell = original
+        self._marquee_offset = 0
+        self._refresh_title_cell()
+        detail, _, marker = self._title_scroll_parts(tone)
+        available = max(self._title_content_width() - cell_len(marker), 1)
+        if cell_len(detail) > available:
+            self._marquee_timer = self.set_interval(
+                0.12, self._advance_title_marquee)
+
     BINDINGS = [
         Binding("enter", "select_cursor", "select", show=False),
         Binding("up", "cursor_up", "up", show=False),
@@ -110,14 +281,67 @@ class LibraryTable(ClickSelectTable):
         Binding("home", "scroll_home", "first", show=False),
         Binding("end", "scroll_end", "last", show=False),
         Binding("escape", "reset_library", "back", show=False),
+        Binding("r", "retry_search", "retry", show=False),
+        Binding("space", "toggle_selected", "select", show=False),
+        Binding("a", "toggle_all", "all/none", show=False),
+        Binding("d", "delete_selected", "uninstall", show=False),
     ]
+
+    def on_focus(self, event) -> None:
+        panel = self.query_ancestor(LibraryPanel)
+        if panel is not None:
+            panel._publish_highlight(self)
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Let mouse-wheel/scrollbar navigation request the next remote page."""
+        super().watch_scroll_y(old_value, new_value)
+        if getattr(self, "_suppress_load_more_scroll", False):
+            return
+        panel = self.query_ancestor(LibraryPanel)
+        if panel is not None:
+            panel._maybe_load_more_from_viewport(self)
+
+    def scroll_end(self, *args, **kwargs):
+        """Treat an explicit End/scroll-end action as viewport intent.
+
+        A page that exactly fills the viewport has no scroll offset, so
+        ``watch_scroll_y`` cannot observe the user reaching its bottom.
+        """
+        result = super().scroll_end(*args, **kwargs)
+        panel = self.query_ancestor(LibraryPanel)
+        if panel is not None and self.has_focus:
+            panel._maybe_load_more_from_viewport(self, force=True)
+        return result
 
     def on_click(self, event) -> None:
         """Single click focuses (cursor move, handled by DataTable); double
         click acts like Enter (open picker / pack install screen)."""
+        meta = event.style.meta
+        if (self.id == "lib-table-local" and meta.get("column") == 0
+                and isinstance(meta.get("row"), int) and meta["row"] >= 0):
+            rows = self.ordered_rows
+            if meta["row"] < len(rows):
+                key = rows[meta["row"]].key.value
+                if isinstance(key, str) and key.startswith("local:"):
+                    self.screen.query_one(LibraryPanel).toggle_local_id(
+                        int(key.partition(":")[2]))
+                    event.stop()
+                    return
         if getattr(event, "chain", 1) >= 2:
             self.action_select_cursor()
             event.stop()
+
+    def action_select_cursor(self) -> None:
+        """Enter/双击：提示行（加载中/失败）→ 重试当前视图；正常行 → 选择。
+
+        REQ-011：提示行用 cursor_type=none，基类 action_select_cursor 对
+        "none" 直接 return——Enter/双击在加载/失败窗口彻底失效（用户
+        "操作了一下"后进不了二级菜单的窗口）。提示行上改为触发重试。
+        """
+        if self.row_count and self.ordered_rows[0].key.value == "__status__":
+            self.screen.query_one(LibraryPanel).retry_active()
+            return
+        super().action_select_cursor()
 
     def action_focus_search(self) -> None:
         panel = self.screen.query_one(LibraryPanel)
@@ -131,15 +355,57 @@ class LibraryTable(ClickSelectTable):
             super().action_cursor_up()
 
     def action_reset_library(self) -> None:
-        self.screen.query_one(LibraryPanel).action_reset()
+        self.screen.query_one(LibraryPanel).action_escape()
+
+    def action_retry_search(self) -> None:
+        self.screen.query_one(LibraryPanel).retry_active()
+
+    def action_toggle_selected(self) -> None:
+        self.screen.query_one(LibraryPanel).toggle_local_selection()
+
+    def action_toggle_all(self) -> None:
+        self.screen.query_one(LibraryPanel).toggle_all_local()
+
+    def action_delete_selected(self) -> None:
+        self.screen.query_one(LibraryPanel).uninstall_local_selection()
 
 
-TYPE_CHOICES = [("All types", "all"), ("Amp", "amp"), ("Cab", "cab"),
-                ("Amp + Cab", "amp-cab")]
+_TYPE_LABELS = {
+    "amp": "Amp",
+    "amp-cab": "Amp + Cab",
+    "pedal": "Pedal",
+    "outboard": "Outboard",
+    "cab": "Cab",
+    "space": "Space",
+    "experimental": "Experimental",
+}
+# Seed the menu from the complete API enum before any network worker starts.
+# The first frame must never depend on which types happen to be in page one;
+# unknown server-side gear values are appended when rows arrive.
+TYPE_CHOICES = [("All types", "all"), *[
+    (_TYPE_LABELS.get(value, value.upper()), value)
+    for value in tone3000.GEAR_VALUES
+]]
 # mirror tone3000.com's sort options; favorites comes from tones_counts
 # (the search RPC rejects favorites ordering)
-SORT_CHOICES = [("Trending", "trending"), ("Most downloaded", "downloads"),
+SORT_CHOICES = [("Trending", "trending"), ("Best match", "best-match"),
+                ("Most downloaded", "downloads"),
                 ("Most favorited", "favorites"), ("Newest", "newest")]
+# TOP CREATORS 排行榜排序（REQ-029，参考 tone3000.com/top-creators 的
+# sort 下拉：Most Tones 默认 + 数字列可排序）。
+CREATOR_SORT_CHOICES = [("Most Tones", "tones"), ("Most Downloads", "downloads"),
+                        ("Most Favorites", "favorites"), ("Most Models", "models")]
+REMOTE_PAGE_SIZE = 40
+LOCAL_PAGE_SIZE = 200
+CREATOR_PAGE_SIZE = 100
+LOAD_AHEAD_ROWS = 5
+TITLE_CELL_LIMIT = 40
+# TONE3000 结果按 (query, TYPE, SORT, author) 组合缓存（REQ-010）：
+# 切换筛选命中缓存直接显示，不发网络请求；超限按最早写入淘汰。
+_TONE_CACHE_MAX = 20
+# The tab labels occupy roughly 47 columns. Keep the filter bar in a separate
+# flow row until the library is wide enough for both groups to coexist.
+FILTER_BAR_COMPACT_WIDTH = 118
 
 
 class LibraryPanel(Vertical):
@@ -148,51 +414,92 @@ class LibraryPanel(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self.border_title = "LIBRARY"
-        self.border_subtitle = "LOCAL · TONE3000 — ↑↓ browse · Enter open"
 
     @staticmethod
-    def _make_table(table_id: str) -> LibraryTable:
+    def _make_table(table_id: str, *, rank: bool = False,
+                    selectable: bool = False) -> LibraryTable:
         table = LibraryTable(id=table_id, cursor_type="row")
-        table.add_column("Title", key="title")
-        table.add_column("Type", key="type")
-        table.add_column("DL", key="downloads")
-        table.add_column("Fav", key="favorites")
-        table.add_column("Arch", key="arch")
-        table.add_column("Files", key="files")
-        table.add_column("Up", key="uploaded")
-        table.add_column("Author", key="author")
+        if selectable:
+            table.add_column("Sel", key="pick", width=4)
+        if rank:
+            table.add_column("Rank", key="rank", width=5)
+        # Keep the complete schema visible in a predictable order.  Explicit
+        # widths stop a long remote title/author from creating a horizontal
+        # scroll surface; cells are single-line and clipped by the table.
+        table.add_column("Title", key="title", width=20)
+        table.add_column("Type", key="type", width=8)
+        table.add_column("Author", key="author", width=11)
+        table.add_column("DL", key="downloads", width=6)
+        table.add_column("Fav", key="favorites", width=5)
+        table.add_column("Up", key="uploaded", width=9)
+        table.add_column("Format", key="format", width=9)
+        table.add_column("Arch", key="arch", width=8)
+        table.add_column("Files", key="files", width=6)
+        table.configure_fixed_columns(
+            {column.key.value: column.width for column in table.ordered_columns},
+            minimums={
+                "pick": 2, "rank": 3, "title": 12, "type": 2,
+                "author": 4, "downloads": 2, "favorites": 2,
+                "uploaded": 4, "format": 3, "arch": 3, "files": 2,
+            })
+        return table
+
+    @staticmethod
+    def _make_creators_table() -> LibraryTable:
+        """Creators are aggregates, not tones: give them their own schema.
+
+        排行榜 6 列对齐 tone3000.com/top-creators（REQ-012 权威参考）：
+        Rank / Creator / Tones / Downloads / Favorites / Models，Most Tones 降序。
+        """
+        table = LibraryTable(id="lib-table-creators", cursor_type="row")
+        table.add_column("Rank", key="rank", width=6)
+        table.add_column("Creator", key="creator", width=18)
+        table.add_column("Tones", key="tones", width=8)
+        table.add_column("Downloads", key="downloads", width=11)
+        table.add_column("Fav", key="favorites", width=7)
+        table.add_column("Models", key="models", width=7)
+        table.configure_fixed_columns(
+            {column.key.value: column.width for column in table.ordered_columns},
+            minimums={"rank": 3, "creator": 6, "tones": 3,
+                      "downloads": 5, "favorites": 3, "models": 3})
         return table
 
     def compose(self) -> ComposeResult:
+        # TONE3000 与 LOCAL 的 TYPE/SORT 筛选都挂在各自 tab 条的右上角
+        # （参考 tone3000.com 网站）：宽终端 dock 悬浮于 tab 行右侧，窄终端
+        # 回退为普通 flow。
+        with Horizontal(id="tone-filter-row"):
+            yield NonSelectableStatic("TYPE", classes="filter-label")
+            yield Select(TYPE_CHOICES, value="all", allow_blank=False,
+                         compact=True, id="type-filter-tone")
+            yield NonSelectableStatic("SORT", classes="filter-label")
+            yield Select(SORT_CHOICES, value="trending",
+                         allow_blank=False, compact=True,
+                         id="sort-filter")
+        with Horizontal(id="local-type-filter-row"):
+            yield NonSelectableStatic("TYPE", classes="filter-label")
+            yield Select(TYPE_CHOICES, value="all", allow_blank=False,
+                         compact=True, id="type-filter-local")
+        with Horizontal(id="creator-filter-row"):
+            yield NonSelectableStatic("SORT", classes="filter-label")
+            yield Select(CREATOR_SORT_CHOICES, value="tones",
+                         allow_blank=False, compact=True,
+                         id="sort-filter-creators")
         with TabbedContent(initial="pane-local"):
             with TabPane("LOCAL", id="pane-local"):
                 yield LibrarySearchInput(
-                    placeholder="Filter title, author, description (local library)",
+                    placeholder="Search terms · model:ID · @author · #tag",
                     id="local-search")
-                with Horizontal(id="type-filter-row"):
-                    yield Static("TYPE", classes="filter-label")
-                    yield Select(TYPE_CHOICES, value="all", allow_blank=False,
-                                 compact=True, id="type-filter-local")
-                yield MarqueeBar(id="lib-marquee")
-                yield self._make_table("lib-table-local")
+                yield self._make_table("lib-table-local", selectable=True)
             with TabPane("TONE3000", id="pane-tone"):
                 yield LibrarySearchInput(
-                    placeholder="Search TONE3000 (title, author, description)",
+                    placeholder="Search terms · model:ID · @author · #tag",
                     id="tone-search")
-                with Horizontal(id="type-filter-row"):
-                    yield Static("TYPE", classes="filter-label")
-                    yield Select(TYPE_CHOICES, value="all", allow_blank=False,
-                                 compact=True, id="type-filter-tone")
-                    yield Static("SORT", classes="filter-label")
-                    yield Select(SORT_CHOICES, value="trending",
-                                 allow_blank=False, compact=True,
-                                 id="sort-filter")
                 yield self._make_table("lib-table-tone")
-                yield Static("", id="tone-status")
+                yield MarqueeBar(id="tone-status")
                 yield ProgressBar(total=1, show_eta=False, id="import-progress")
             with TabPane("TOP CREATORS", id="pane-creators"):
-                yield Static("", id="creators-status")
-                yield self._make_table("lib-table-creators")
+                yield self._make_creators_table()
 
     def on_mount(self) -> None:
         self._mode = "local"
@@ -202,13 +509,182 @@ class LibraryPanel(Vertical):
         self._type_filter = "all"
         self._author_filter: str | None = None
         self._query = ""
+        self._search_spec = SearchSpec()
         self._users: list[str] = []
         self._tags: list[str] = []
+        self._makes: list[str] = []
         self._fingerprint: tuple | None = None
         self._remote_tones: dict[int, dict] = {}
         self._highlighted_key: str | None = None
+        self._tone_page = 0
+        self._tone_total: int | None = None
+        self._tone_has_more = False
+        self._tone_loading = False
+        self._tone_request_id = 0
+        self._tone_error = False
+        self._local_page = 0
+        self._local_has_more = False
+        self._local_loading = False
+        self._local_request_id = 0
+        self._creator_page = 0
+        self._creator_has_more = False
+        self._creator_loading = False
+        self._creator_total: int | None = None
+        self._creator_tones: dict[str, list[dict]] = {}
+        self._creator_request_id = 0
+        self._creator_error = False
+        self._local_selected: set[int] = set()
+        self._screen_generation = 1
+        self._import_request_id = 0
+        # REQ-010: 搜索缓存 —— TONE3000 按 (query, TYPE, SORT, author) 组合
+        # 缓存（值含 tones/total/page/has_more），TOP CREATORS 单一视图缓存。
+        self._tone_cache: dict[tuple, dict] = {}
+        self._tone_cache_key: tuple | None = None
+        self._creator_cache: dict | None = None
+        # 排行榜排序键（REQ-029）：tones / downloads / favorites / models。
+        self._creator_sort = "tones"
+        self._extra_type_choices: list[tuple[str, str]] = []
+        self._install_type_choices()
         self.query_one("#import-progress", ProgressBar).display = False
+        # 点击 tab 后焦点落在 tab 条上，Textual 默认 left/right 会切换
+        # LOCAL/TONE3000/TOP CREATORS —— 禁掉这个键位，左右只能在表格/
+        # 搜索框里操作，防止误操作跳到别的视图。
+        self._disable_tab_arrow_keys()
+        self._sync_tone_filter_bar()
         self.refresh_rows()
+        # REQ-010: 启动即预取默认 TONE3000（trending）与 TOP CREATORS。
+        # silent 只填缓存与隐藏表格、不碰状态栏/副标题，用户首次进入对应
+        # tab 时缓存命中立即显示；之后按需 load more / 手动 r refresh /
+        # 搜索新词才发起新请求。
+        # 不用 exclusive：Textual 的 exclusive 取消同 group（default）的
+        # 全部 worker，两个预取会互相取消。用户进入 tab 时 check_active_tab
+        # 的 reload worker 自带 exclusive，会取消仍在跑的预取。
+        self.run_worker(partial(self._reload_tone_table, silent=True),
+                        name="search")
+        self.run_worker(partial(self._show_top_creators, silent=True),
+                        name="creators")
+
+    def _install_type_choices(self) -> None:
+        """Install the complete Type menu before any async result arrives."""
+        choices = [*TYPE_CHOICES, *self._extra_type_choices]
+        values = {value for _label, value in choices}
+        for select_id in ("#type-filter-local", "#type-filter-tone"):
+            select = self.query_one(select_id, Select)
+            # A future caller may have supplied a partial list while composing;
+            # restore the canonical complete set at mount time.
+            if tuple(getattr(select, "_options", ())) != tuple(choices):
+                select.set_options(choices)
+            if select.value not in values:
+                select.value = "all"
+
+    def _observe_type_values(self, tones: list[dict]) -> None:
+        """Append new non-empty API gear values without delaying the seed menu."""
+        known = {value for _label, value in TYPE_CHOICES}
+        known.update(value for _label, value in self._extra_type_choices)
+        changed = False
+        for tone in tones:
+            value = tone3000.normalize_gear(tone.get("gear"))
+            if value and value not in known:
+                self._extra_type_choices.append((value.upper(), value))
+                known.add(value)
+                changed = True
+        if changed:
+            self._install_type_choices()
+
+    def on_unmount(self) -> None:
+        """Invalidate every worker before Textual releases this panel."""
+        self._screen_generation += 1
+        self._tone_request_id += 1
+        self._local_request_id += 1
+        self._creator_request_id += 1
+        self._import_request_id += 1
+
+    def _screen_alive(self, generation: int) -> bool:
+        return (bool(getattr(self, "is_mounted", False))
+                and generation == self._screen_generation)
+
+    def _tone_alive(self, generation: int, request_id: int) -> bool:
+        return self._screen_alive(generation) and request_id == self._tone_request_id
+
+    def _creator_alive(self, generation: int, request_id: int) -> bool:
+        return (self._screen_alive(generation)
+                and request_id == self._creator_request_id)
+
+    def _local_alive(self, generation: int, request_id: int) -> bool:
+        return (self._screen_alive(generation)
+                and request_id == self._local_request_id)
+
+    def _import_alive(self, generation: int, request_id: int) -> bool:
+        return (self._screen_alive(generation)
+                and request_id == self._import_request_id)
+
+    def _disable_tab_arrow_keys(self) -> None:
+        """Make the tab strip's left/right dead (priority bindings win over
+        Tabs' built-in previous_tab/next_tab)."""
+        tabs = self.query_one(ContentTabs)
+        tabs.action_noop_tab = lambda: None
+        for key in ("left", "right"):
+            tabs._bindings.bind(key, "noop_tab", show=False, priority=True)
+
+    def on_resize(self, event) -> None:
+        """布局尺寸确定后立即同步筛选条。
+
+        on_mount 时 content_region 尚未计算（宽度为 0），compact 判断会误判，
+        导致 dock 悬浮/flow 的首帧布局与 0.1s tick 修正后不一致——用户在首帧
+        点击 tab 时坐标会落空。resize 在首次布局时触发，让首帧布局直接稳定。
+        """
+        if hasattr(self, "_active_pane"):
+            self._sync_tone_filter_bar()
+            # REQ-040：副标题的宽度自适应 token（space/Esc/d 的宽窄写法）
+            # 在 mount 时按宽度 0 算过——resize 落定后必须重算，否则提示词
+            # 与实际可点 token 脱节（点 "space" 找不到 "space select"）。
+            if self._active_pane == "pane-local":
+                self._update_local_selection_status()
+            elif self._active_pane == "pane-tone":
+                self._update_tone_subtitle(
+                    loading=self._tone_loading, error=self._tone_error)
+            elif self._active_pane == "pane-creators":
+                self._update_creator_subtitle(
+                    loading=self._creator_loading, error=self._creator_error)
+            else:
+                refresh_border_hint_layout(self)
+
+    def _sync_tone_filter_bar(self) -> None:
+        """Show and place the TYPE/SORT controls for the current viewport.
+
+        Each tab's filter bar docks over the right of its own tab strip,
+        hugging the tab labels with a fixed 2-column gap (tone3000.com 网站
+        风格——筛选紧跟内容，不贴面板右缘，避免大片空白);
+        narrow terminals fall back to normal flow with a small margin.
+        """
+        for bar_id, pane_id in (("#tone-filter-row", "pane-tone"),
+                                ("#local-type-filter-row", "pane-local"),
+                                ("#creator-filter-row", "pane-creators")):
+            try:
+                bar = self.query_one(bar_id, Horizontal)
+            except Exception:
+                continue
+            bar.display = self._active_pane == pane_id
+            # on_mount 时布局未完成 content_region.width=0。首帧布局必须与
+            # tick 修正后一致，否则初始的 tab 点击坐标会因布局切换落空；
+            # 用可推导的面板内容宽预测（终端宽 ×3/5 ≈ left-col 3fr 内容宽）。
+            compact = ((self.content_region.width
+                        or self.app.size.width * 3 // 5)
+                       < FILTER_BAR_COMPACT_WIDTH)
+            bar.set_class(compact, "filter-row--compact")
+            # A docked auto-width row starts at the panel's left edge. Offset it
+            # right of the last tab label so the controls never intercept tab
+            # clicks and keep a readable gap from the tab names.
+            if compact:
+                bar.styles.offset = (0, 0)
+            elif bar.size.width:
+                # ContentTabs 的直接 children 含非标签容器，须按 Tab 类型取
+                tab_right = max(
+                    (t.region.right for t in
+                     self.query_one("ContentTabs").query("Tab")),
+                    default=0)
+                bar.styles.offset = (
+                    max(0, tab_right - self.content_region.x + 2), 0)
 
     # ---- tab / table routing ---------------------------------------------
 
@@ -219,6 +695,24 @@ class LibraryPanel(Vertical):
         return self.query_one("#lib-table-local" if active == "pane-local"
                               else "#lib-table-tone", DataTable)
 
+    def _focus_if_pane_active(self, table: DataTable) -> None:
+        """Focus a table only when its pane is still the active one.
+
+        Load workers complete after the user may have switched tabs, and
+        TabbedContent reads any focus inside a pane as a tab switch request
+        (TabPane.Focused → active = pane id). Focusing a stale table would
+        therefore force the UI back to the tab that started the load. This
+        guard is the only safe way to focus from a worker completion.
+        """
+        pane = _TABLE_PANE.get(table.id or "")
+        if pane is None:
+            return
+        try:
+            if self.query_one(TabbedContent).active == pane:
+                table.focus()
+        except Exception:
+            pass
+
     def table_for(self, input_id: str | None) -> DataTable:
         return self.query_one("#lib-table-local" if input_id == "local-search"
                               else "#lib-table-tone", DataTable)
@@ -226,6 +720,191 @@ class LibraryPanel(Vertical):
     def search_for(self, table_id: str | None) -> Input:
         return self.query_one("#local-search" if table_id == "lib-table-local"
                               else "#tone-search", Input)
+
+    def _search_creator(self, name: str) -> None:
+        """REQ-033：作者行 Enter/双击 → 跳 TONE3000 tab，搜索栏填
+        @author 并触发真实搜索（显示该作者全部音色结果）。"""
+        # 用户路径切 tab（post Clicked 不会被 Textual 的 tab 回滚吞掉）
+        tab = self.query_one("#--content-tab-pane-tone")
+        tab.post_message(tab.Clicked(tab))
+        query = f"@{name}"
+        self.query_one("#tone-search", Input).value = query
+        # _query 同步设置：tab 切换后 check_active_tab 的加载（exclusive）
+        # 会取消本 worker 并用 _query 重新加载——同一 query，结果一致。
+        self._query = query
+        self.run_worker(partial(self._show_search, query), name="search",
+                        exclusive=True)
+
+    def _set_search_spec(self, query: str, spec: SearchSpec) -> None:
+        """Keep the raw input and its normalized form together."""
+        self._query = query
+        self._search_spec = spec
+        self._users = list(spec.authors)
+        self._tags = list(spec.tags)
+        self._makes = list(spec.makes)
+
+    def _parse_or_notify(self, query: str) -> SearchSpec | None:
+        try:
+            return parse_search(query)
+        except SearchSyntaxError as exc:
+            self.notify(f"Search syntax: {exc}", severity="error")
+            return None
+
+    def _effective_authors(self, spec: SearchSpec) -> list[str]:
+        if spec.authors:
+            return list(spec.authors)
+        return [self._author_filter] if self._author_filter else []
+
+    def _selected_order(self) -> str:
+        return {
+            "trending": "trending",
+            "best-match": "best-match",
+            "downloads": "downloads-all-time",
+            "newest": "newest",
+        }.get(self._sort, "trending")
+
+    @staticmethod
+    def _status_row(table: DataTable, message: str) -> None:
+        """Put transient network state inside the list, without a fake cursor."""
+        table.cursor_type = "none"
+        # Never put the banner in a fixed-width column: fixed columns crop
+        # their cells at column width without an ellipsis, so "Loading top
+        # creators…" rendered as "Loadin" on a narrow pane (TOP CREATORS
+        # puts its message in the Rank column otherwise). The first
+        # auto-width column grows to fit the message and stays on the left
+        # side of the viewport crop.
+        cols = list(table.ordered_columns)
+        target = next((i for i, col in enumerate(cols) if col.auto_width), 0)
+        cells = [""] * len(cols)
+        cells[target] = f"[dim]{message}[/dim]"
+        table.add_row(*cells, key="__status__")
+
+    @staticmethod
+    def _has_real_rows(table: DataTable) -> bool:
+        return any(row.key.value != "__status__" for row in table.ordered_rows)
+
+    def _show_status_if_empty(self, table: DataTable, message: str) -> None:
+        """Show a loading/error row only when no valid rows can be retained."""
+        if self._has_real_rows(table):
+            return
+        table.clear()
+        self._status_row(table, message)
+
+    @staticmethod
+    def _network_error(action: str, error: Exception) -> str:
+        """Keep volatile transport diagnostics out of the main list surface."""
+        text = str(error).lower()
+        if "ssl" in text or "tls" in text:
+            return f"{action} unavailable — secure connection closed. Press r to retry."
+        if "timeout" in text or "timed out" in text:
+            return f"{action} timed out. Press r to retry."
+        return f"{action} unavailable. Check your connection, then press r to retry."
+
+    def retry_active(self) -> None:
+        """Refresh the active remote view (r key): drop its cache entry and
+        re-fetch. Doubles as the retry path after a failed load — the error
+        banners say "Press r to retry", which this satisfies."""
+        active = getattr(self, "_active_pane", "pane-local")
+        if active == "pane-tone":
+            if self._tone_cache_key is not None:
+                self._tone_cache.pop(self._tone_cache_key, None)
+            self.run_worker(partial(self._reload_tone_table, refresh=True),
+                            name="search", exclusive=True)
+        elif active == "pane-creators":
+            self._creator_cache = None
+            self.run_worker(partial(self._show_top_creators, refresh=True),
+                            name="creators", exclusive=True)
+
+    def _update_tone_subtitle(self, *, loading: bool = False,
+                              error: bool = False) -> None:
+        if loading:
+            # The banner is its own short complete line: a narrow pane can
+            # only truncate it to an ellipsis-suffixed "Loa…", never to a
+            # bare partial word like the "loadin" that cropping the old
+            # "N · loading… · Enter install" string produced.
+            self._tone_error = False
+            set_border_hint_layout(
+                self, "loading…",
+                [token for token, _action in self._border_hint_actions()])
+            return
+        loaded = len(self._remote_tones)
+        count = f"{loaded}/{self._tone_total}" if self._tone_total else str(loaded)
+        if error:
+            self._tone_error = True
+            state = f"{count} · load failed"
+        elif self._tone_has_more:
+            self._tone_error = False
+            state = count
+        else:
+            self._tone_error = False
+            state = f"{count} · all loaded"
+        # REQ-038：Enter 打开二级菜单详情页（不是直连 install）
+        set_border_hint_layout(
+            self, state,
+            [token for token, _action in self._border_hint_actions()])
+
+    def _load_more_from_hint(self) -> None:
+        """Load the active table's next page from its clickable hint token."""
+        self._maybe_load_more_from_viewport(self._table(), force=True)
+
+    @staticmethod
+    def _was_at_scroll_bottom(table: DataTable) -> bool:
+        """Capture explicit bottom-of-viewport intent before an async append."""
+        return (table.max_scroll_y > 0
+                and table.scroll_y >= table.max_scroll_y - 1)
+
+    @staticmethod
+    def _restore_scroll_bottom(table: DataTable, was_at_bottom: bool) -> None:
+        """Re-pin a table after its virtual height grows.
+
+        ``DataTable.add_row`` updates the virtual size during refresh.  The
+        immediate scroll can therefore see the old maximum; repeat it after
+        the refresh so a wheel-driven load-more stays at the new bottom.
+        """
+        if not was_at_bottom:
+            return
+
+        def pin() -> None:
+            table._suppress_load_more_scroll = True
+            try:
+                table.scroll_to(y=table.max_scroll_y, animate=False,
+                                immediate=True)
+            except Exception:
+                pass
+            finally:
+                table._suppress_load_more_scroll = False
+
+        pin()
+        table.call_after_refresh(pin)
+
+    def _maybe_load_more_from_viewport(self, table: LibraryTable, *, force: bool = False) -> None:
+        """Load another page when the cursor or viewport reaches the tail."""
+        if table.id == "lib-table-tone":
+            has_more, loading = self._tone_has_more, self._tone_loading
+        elif table.id == "lib-table-local":
+            has_more, loading = self._local_has_more, self._local_loading
+        elif table.id == "lib-table-creators":
+            has_more, loading = self._creator_has_more, self._creator_loading
+        else:
+            return
+        if not has_more or loading:
+            return
+        near_cursor = table.cursor_row >= max(
+            0, table.row_count - LOAD_AHEAD_ROWS)
+        at_bottom = force or (
+            table.max_scroll_y > 0 and table.scroll_y >= table.max_scroll_y - 1)
+        if not (near_cursor or at_bottom):
+            return
+        if table.id == "lib-table-tone":
+            worker, name = self._load_more_tones, "search-more"
+        elif table.id == "lib-table-local":
+            worker, name = self._load_more_local, "local-more"
+        else:
+            self.run_worker(
+                partial(self._load_more_creators),
+                name="creators-more", exclusive=True)
+            return
+        self.run_worker(partial(worker), name=name, exclusive=True)
 
     def check_active_tab(self) -> None:
         """Tick-driven tab detection (0.1s): the reactive `active` value is
@@ -235,19 +914,30 @@ class LibraryPanel(Vertical):
             active = self.query_one(TabbedContent).active
         except Exception:
             return
+        self._sync_tone_filter_bar()
         if active == getattr(self, "_last_active", None):
             return
+        self.clear_local_selection()
         self._last_active = active
         self._active_pane = active
+        self._sync_tone_filter_bar()
         self._mode = "local" if active == "pane-local" else "tone"
         self._highlighted_key = None
-        if active == "pane-tone" and not self.query_one("#lib-table-tone", DataTable).row_count:
-            self.run_worker(self._reload_tone_table(), name="search", exclusive=True)
+        if active == "pane-tone":
+            if not self.query_one("#lib-table-tone", DataTable).row_count:
+                self.run_worker(partial(self._reload_tone_table),
+                                name="search", exclusive=True)
+            else:
+                # 启动预取/缓存已填好行：直接刷新副标题——否则残留 LOCAL 的
+                # 提示词（a all/space select…）挂在 TONE3000 tab 上，既误导
+                # 又让提示与可点 token 脱节（REQ-040 点击等效审计发现）。
+                self._update_tone_subtitle()
         elif active == "pane-creators":
             # always reload the default 5-creator view: MORE expansion (limit=0)
             # must not persist across tab switches
-            self.run_worker(self._show_top_creators(), name="creators", exclusive=True)
+            self.run_worker(partial(self._show_top_creators), name="creators", exclusive=True)
         elif active == "pane-local":
+            self._update_local_selection_status()
             self._fingerprint = None
             self.refresh_rows()
         table = self._table()
@@ -261,6 +951,10 @@ class LibraryPanel(Vertical):
         """Escape: clear the active tab's input and stay on LOCAL."""
         search = self.search_for(self._table().id)
         search.value = ""
+        self.query_one("#local-search", Input).value = ""
+        self.query_one("#tone-search", Input).value = ""
+        self._author_filter = None
+        self._set_search_spec("", SearchSpec())
         if self._mode != "local":
             # Programmatic `tabs.active = ...` rolls back in Textual (the Tabs
             # watcher re-posts a stale TabActivated), so activate the tab the
@@ -269,16 +963,22 @@ class LibraryPanel(Vertical):
             tab.post_message(tab.Clicked(tab))
             self._mode = "local"
             self._fingerprint = None
-            self.query_one("#tone-status", Static).update("")
+            self.query_one("#tone-status", MarqueeBar).content = ""
             self.refresh_rows()
         self._table().focus()
+
+    def action_escape(self) -> None:
+        if self._active_pane == "pane-local" and self._local_selected:
+            self.clear_local_selection()
+            return
+        self.action_reset()
 
     # ---- local tab --------------------------------------------------------
 
     def refresh_rows(self) -> None:
         """Reload local rows from the DB (called on tick so external imports appear).
 
-        Skips repaint unless the DB actually changed (row count / max id), so the
+        Skips repaint unless the DB or local install state changed, so the
         user's browsing position and the TONE3000 tab are not clobbered.
         """
         # _mode can lag behind inside tab-activation handlers; _active_pane is
@@ -287,147 +987,708 @@ class LibraryPanel(Vertical):
             return
         with library.connect() as conn:
             fp = tuple(conn.execute(
-                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM tones").fetchone())
+                "SELECT COUNT(*), COALESCE(MAX(id), 0), "
+                "COALESCE(SUM(local_dir IS NOT NULL), 0), "
+                "(SELECT COUNT(*) FROM models WHERE local_path IS NOT NULL), "
+                "(SELECT COALESCE(GROUP_CONCAT(id || ':' || local_path, '|'), '') "
+                "FROM models WHERE local_path IS NOT NULL) FROM tones").fetchone())
         if fp == self._fingerprint:
             return
         self._fingerprint = fp
-        self._remote_tones = {}
+        # 注意：此处不能清 _remote_tones——TONE3000 表的行还在，Enter 依赖
+        # 这张查找表（remote:<id> → tone）；本地 DB 变化与远程表无关。
+        self._local_page = 0
+        self._local_has_more = False
+        self._local_loading = False
+        self._local_request_id += 1
         table = self.query_one("#lib-table-local", DataTable)
         table.clear()
+        spec = getattr(self, "_search_spec", SearchSpec())
         tones = library.list_tones(
             gear=None if self._type_filter == "all" else self._type_filter,
-            limit=200,
-            author=self._author_filter,
-            tag=self._tags[0] if self._tags else None,
-            query=self._query or None,
-            has_files=True)
+            limit=LOCAL_PAGE_SIZE,
+            authors=self._effective_authors(spec) or None,
+            tags=spec.tags or None,
+            makes=spec.makes or None,
+            model_ids=spec.model_ids or None,
+            query=spec.text or None,
+            has_files=True,
+            offset=0)
+        self._observe_type_values(tones)
+        self._local_has_more = len(tones) == LOCAL_PAGE_SIZE
+        local_ids = {t["id"] for t in tones}
+        self._local_selected.intersection_update(local_ids)
+        self._update_local_selection_status()
         for t in tones:
-            table.add_row(*self._row_cells(t), key=f"local:{t['id']}")
+            checked = "\\[x]" if t["id"] in self._local_selected else "\\[ ]"
+            table.add_row(checked, *self._row_cells(t), key=f"local:{t['id']}")
         if not tones:
-            table.add_row("(empty library — switch to TONE3000 to search and import)",
-                          "", "", "", "", "", "", "", key=None)
+            self._status_row(
+                table,
+                "[bold $state-idle]○[/] no local tones — switch to TONE3000 "
+                "to search and import")
+        self._update_local_selection_status()
         self._publish_highlight(table)
 
-    def _show_local_filter(self, query: str) -> None:
-        self._query = query
+    async def _load_more_local(self) -> None:
+        """Append the next local SQLite page without resetting the cursor."""
+        if not self._local_has_more or self._local_loading:
+            return
+        table = self.query_one("#lib-table-local", DataTable)
+        was_at_bottom = self._was_at_scroll_bottom(table)
+        self._local_request_id += 1
+        request_id = self._local_request_id
+        generation = self._screen_generation
+        self._local_loading = True
+        page = self._local_page + 1
+        spec = self._search_spec
+        try:
+            tones = await asyncio.to_thread(
+                library.list_tones,
+                gear=None if self._type_filter == "all" else self._type_filter,
+                limit=LOCAL_PAGE_SIZE,
+                offset=page * LOCAL_PAGE_SIZE,
+                authors=self._effective_authors(spec) or None,
+                tags=spec.tags or None,
+                makes=spec.makes or None,
+                model_ids=spec.model_ids or None,
+                query=spec.text or None,
+                has_files=True)
+        except Exception as exc:
+            if self._local_alive(generation, request_id):
+                self.notify(f"More local tones unavailable: {exc}", severity="warning")
+            return
+        finally:
+            if self._local_alive(generation, request_id):
+                self._local_loading = False
+        if not self._local_alive(generation, request_id):
+            return
+        for tone in tones:
+            checked = "\\[x]" if tone["id"] in self._local_selected else "\\[ ]"
+            table.add_row(checked, *self._row_cells(tone), key=f"local:{tone['id']}")
+        self._local_page = page
+        self._local_has_more = len(tones) == LOCAL_PAGE_SIZE
+        self._update_local_selection_status()
+        self._restore_scroll_bottom(table, was_at_bottom)
+
+    def _local_cursor_id(self) -> int | None:
+        if self._active_pane != "pane-local":
+            return None
+        table = self.query_one("#lib-table-local", DataTable)
+        rows = table.ordered_rows
+        if not 0 <= table.cursor_row < len(rows):
+            return None
+        key = rows[table.cursor_row].key.value
+        if not isinstance(key, str) or not key.startswith("local:"):
+            return None
+        return int(key.partition(":")[2])
+
+    def _update_local_selection_status(self) -> None:
+        count = len(self._local_selected)
+        state = f"{count} sel"
+        set_border_hint_layout(
+            self, state,
+            [label for label, _action in self._border_hint_actions()])
+
+    def _visible_local_ids(self) -> set[int]:
+        try:
+            table = self.query_one("#lib-table-local", DataTable)
+        except Exception:
+            return set()
+        return {
+            int(row.key.value.partition(":")[2])
+            for row in table.ordered_rows
+            if isinstance(row.key.value, str) and row.key.value.startswith("local:")
+        }
+
+    def toggle_local_selection(self) -> None:
+        tone_id = self._local_cursor_id()
+        if tone_id is None:
+            return
+        self.toggle_local_id(tone_id)
+
+    def toggle_local_id(self, tone_id: int) -> None:
+        if tone_id in self._local_selected:
+            self._local_selected.remove(tone_id)
+        else:
+            self._local_selected.add(tone_id)
+        self.query_one("#lib-table-local", DataTable).update_cell(
+            f"local:{tone_id}", "pick", "\\[x]" if tone_id in self._local_selected else "\\[ ]")
+        self._update_local_selection_status()
+
+    def toggle_all_local(self) -> None:
+        if self._active_pane != "pane-local":
+            return
+        table = self.query_one("#lib-table-local", DataTable)
+        visible = self._visible_local_ids()
+        self._local_selected = set() if visible and visible <= self._local_selected else visible
+        for tone_id in visible:
+            table.update_cell(f"local:{tone_id}", "pick",
+                              "\\[x]" if tone_id in self._local_selected else "\\[ ]")
+        self._update_local_selection_status()
+
+    def clear_local_selection(self) -> None:
+        selected = getattr(self, "_local_selected", set())
+        self._local_selected = set()
+        try:
+            table = self.query_one("#lib-table-local", DataTable)
+            for tone_id in selected:
+                try:
+                    table.update_cell(f"local:{tone_id}", "pick", "\\[ ]")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if hasattr(self, "_active_pane") and self._active_pane == "pane-local":
+            self._update_local_selection_status()
+
+    def uninstall_local_selection(self) -> None:
+        tone_ids = sorted(self._local_selected)
+        if not tone_ids:
+            cursor_id = self._local_cursor_id()
+            tone_ids = [cursor_id] if cursor_id is not None else []
+        if tone_ids:
+            self.app.push_screen(LocalUninstallScreen(tone_ids))
+
+    def _show_local_filter(self, query: str, spec: SearchSpec | None = None) -> None:
+        spec = spec or self._parse_or_notify(query)
+        if spec is None:
+            return
+        self.clear_local_selection()
+        self._set_search_spec(query, spec)
         self._fingerprint = None
         self.refresh_rows()
         self.query_one("#lib-table-local", DataTable).focus()
 
     # ---- TONE3000 tab -----------------------------------------------------
 
-    async def _show_search(self, query: str, order_by: str | None = None) -> None:
-        self._query = query
-        words, users, tags = _parse_query(query)
-        self._users, self._tags = users, tags
-        table = self.query_one("#lib-table-tone", DataTable)
-        status = self.query_one("#tone-status", Static)
-        table.clear()
-        self._remote_tones = {}
-        status.update("Searching TONE3000…")
-        try:
-            hits = await asyncio.to_thread(
-                library.tone3000.search,
-                words, page_size=50, order_by=order_by or "trending",
-                gear_filters=None if self._type_filter == "all" else [self._type_filter],
-                usernames=(users or ([self._author_filter] if self._author_filter else None)),
-                tag_names=tags or None)
-        except Exception as e:
-            status.update(f"Search failed: {e}")
-            self._highlighted_key = None
-            self.post_message(ToneHighlighted(None))  # explicit clear
-            return
-        # 按 model id 对比本地库：标记 ✓ 全部下载 / ◐ 部分 / ○ 未下载
-        hits = await asyncio.to_thread(library.mark_download_state, hits)
-        for t in hits:
-            self._remote_tones[int(t["id"])] = t
-            table.add_row(*self._row_cells(t), key=f"remote:{t['id']}")
+    def _tone_status_hint(self, spec: SearchSpec) -> str:
+        """The hint shown in the #tone-status line for the current view."""
         extra = []
-        if self._author_filter:
+        if self._author_filter and not spec.authors:
             extra.append(f"author {self._author_filter}")
-        if users:
-            extra.append("@" + ", @".join(users))
-        if tags:
-            extra.append("#" + ", #".join(tags))
-        hint = f" ({' '.join(extra)})" if extra else ""
-        head = "TRENDING — " if not words and order_by in (None, "trending") else ""
-        status.update(f"({head}TONE3000{hint} — ✓ 已下载全部 ◐ 部分 ○ 未下载 · Enter 安装)")
+        if spec.authors:
+            extra.append("@" + ", @".join(spec.authors))
+        if spec.tags:
+            extra.append("#" + ", #".join(spec.tags))
+        if spec.makes:
+            extra.append("make:" + ", ".join(spec.makes))
+        if spec.model_ids:
+            extra.append("model:" + ", ".join(str(model_id) for model_id in spec.model_ids))
+        return " ".join(extra) or "TONE3000"
+
+    def _save_tone_cache(self, key: tuple) -> None:
+        """Snapshot the current TONE3000 page set under `key` (FIFO bound)."""
+        if len(self._tone_cache) >= _TONE_CACHE_MAX and key not in self._tone_cache:
+            self._tone_cache.pop(next(iter(self._tone_cache)))
+        self._tone_cache[key] = {
+            "tones": dict(self._remote_tones),
+            "total": self._tone_total,
+            "page": self._tone_page,
+            "has_more": self._tone_has_more,
+        }
+
+    def _restore_tone_entry(self, key: tuple) -> None:
+        """Render a cached page set without touching the network."""
+        entry = self._tone_cache[key]
+        self._remote_tones = dict(entry["tones"])
+        self._tone_page = entry["page"]
+        self._tone_total = entry["total"]
+        self._tone_has_more = entry["has_more"]
+        table = self.query_one("#lib-table-tone", DataTable)
+        table.clear()
+        table.cursor_type = "row"
+        for tone_id, t in self._remote_tones.items():
+            table.add_row(*self._row_cells(t), key=f"remote:{tone_id}")
+        status = self.query_one("#tone-status", MarqueeBar)
+        if key[2] == "favorites":
+            status.content = "(most favorited · enter detail)"
+        else:
+            status.content = (
+                f"({self._tone_status_hint(self._search_spec)}"
+                " · ✓ downloaded · ◐ partial · ○ new)")
+        self._update_tone_subtitle()
         self._publish_highlight(table)
-        table.focus()
+        self._focus_if_pane_active(table)
+
+    async def _show_search(self, query: str, order_by: str | None = None,
+                           *, append: bool = False, spec: SearchSpec | None = None,
+                           refresh: bool = False, silent: bool = False) -> None:
+        """Load one 40-row TONE3000 page, preserving prior rows on append.
+
+        Results are cached per (query, TYPE filter, SORT, author filter); a
+        cache hit renders the page set without a network request. `refresh`
+        bypasses the cache (manual reload); `silent` (startup prefetch) only
+        fills the cache and the hidden table without touching status chrome.
+        """
+        spec = spec or self._parse_or_notify(query)
+        if spec is None:
+            return
+        generation = self._screen_generation
+        if append:
+            request_id = self._tone_request_id
+            key = self._tone_cache_key
+        else:
+            self._tone_request_id += 1
+            request_id = self._tone_request_id
+            key = (query, self._type_filter, self._sort, self._author_filter)
+            self._tone_cache_key = key
+            self._tone_error = False
+        self._set_search_spec(query, spec)
+        table = self.query_one("#lib-table-tone", DataTable)
+        status = self.query_one("#tone-status", MarqueeBar)
+        # A page request owns this flag for its complete lifetime.  Cursor
+        # events only ask the worker to start a request; they do not mutate
+        # loading state themselves.
+        if append and (not self._tone_has_more or self._tone_loading):
+            return
+        was_at_bottom = self._was_at_scroll_bottom(table) if append else False
+        if not append:
+            if not refresh and key in self._tone_cache:
+                # Cache hit: render the cached page set, no network request.
+                if self._tone_alive(generation, request_id):
+                    self._restore_tone_entry(key)
+                return
+            self._tone_page = 0
+            self._tone_total = None
+            self._tone_has_more = False
+            if not silent:
+                self._show_status_if_empty(table, "loading…")
+                status.content = "loading…"
+                # 不在此清 detail：搜索/换排序/刷新期间保留上一条选中内容，
+                # 落定后由 _publish_highlight 替换（REQ-011：搜索瞬间空态
+                # 一闪、失败后永久空态）。空结果在收尾处显式清空。
+        self._tone_loading = True
+        if not silent:
+            self._update_tone_subtitle(loading=True)
+        page = self._tone_page + 1
+        try:
+            if spec.model_ids:
+                hits = await asyncio.to_thread(
+                    library.tone3000.tones_for_model_ids, spec.model_ids)
+            else:
+                hits = await asyncio.to_thread(
+                    library.tone3000.search,
+                    spec.text, page_size=REMOTE_PAGE_SIZE, page_number=page,
+                    order_by=order_by or self._selected_order(),
+                    gear_filters=None if self._type_filter == "all" else [self._type_filter],
+                    usernames=self._effective_authors(spec) or None,
+                    tag_names=list(spec.tags) or None,
+                    make_names=list(spec.makes) or None)
+        except Exception as e:
+            if not self._tone_alive(generation, request_id):
+                return
+            self._tone_loading = False
+            if silent:
+                return  # startup prefetch failed; the tab visit reloads normally
+            if append and self._remote_tones:
+                self._update_tone_subtitle(error=True)
+                self.notify(self._network_error("More results", e), severity="warning")
+            else:
+                self._update_tone_subtitle(error=True)
+                self._show_status_if_empty(
+                    table, self._network_error("TONE3000 search", e))
+            return
+        if not self._tone_alive(generation, request_id):
+            return
+        # Exact model lookups already identify the requested files. Resolve
+        # their local state from SQLite directly instead of issuing another
+        # remote model-list request before rendering the result.
+        try:
+            if spec.model_ids:
+                local_by_tone = await asyncio.to_thread(
+                    library.downloaded_model_ids_by_tone)
+                for hit in hits:
+                    matched = set(hit.get("matched_model_ids") or spec.model_ids)
+                    downloaded = matched & local_by_tone.get(int(hit["id"]), set())
+                    hit["downloaded"] = len(downloaded)
+                    hit["download_state"] = (
+                        "all" if matched and downloaded >= matched else
+                        "partial" if downloaded else "none")
+            else:
+                hits = await asyncio.to_thread(library.mark_download_state, hits)
+        except Exception as e:
+            if not self._tone_alive(generation, request_id):
+                return
+            self._tone_loading = False
+            if not silent:
+                self._update_tone_subtitle(error=True)
+                self._show_status_if_empty(
+                    table, self._network_error("TONE3000 search", e))
+            return
+        if not self._tone_alive(generation, request_id):
+            return
+        self._observe_type_values(hits)
+        self._tone_loading = False
+        self._tone_page = page
+        total = next((hit.get("total_count") for hit in hits
+                      if hit.get("total_count") is not None), None)
+        try:
+            self._tone_total = int(total) if total is not None else self._tone_total
+        except (TypeError, ValueError):
+            pass
+        if not append:
+            self._remote_tones = {}
+            table.clear()
+        table.cursor_type = "row"
+        for t in hits:
+            tone_id = int(t["id"])
+            if tone_id not in self._remote_tones:
+                self._remote_tones[tone_id] = t
+                table.add_row(*self._row_cells(t), key=f"remote:{tone_id}")
+        self._tone_has_more = not spec.model_ids and (
+            len(self._remote_tones) < self._tone_total
+            if self._tone_total is not None else len(hits) == REMOTE_PAGE_SIZE)
+        if key is not None:
+            self._save_tone_cache(key)
+        if silent:
+            return  # prefetch done: cache filled, UI chrome untouched
+        status.content = (
+            f"({self._tone_status_hint(spec)} · ✓ downloaded · ◐ partial · ○ new)")
+        self._update_tone_subtitle()
+        if not append and not table.row_count:
+            # 空结果：没有可显示的 tone，此时才清 detail（不再是搜索瞬间）
+            self._highlighted_key = None
+            self.post_message(ToneHighlighted(None))
+            self._focus_if_pane_active(table)
+            return
+        self._publish_highlight(table)
+        if append:
+            self._restore_scroll_bottom(table, was_at_bottom)
+        if not append:
+            self._focus_if_pane_active(table)
+
+    async def _load_more_tones(self) -> None:
+        """Fetch the next remote page without moving the cursor or clearing rows."""
+        await self._show_search(self._query, order_by=self._selected_order(), append=True)
 
     # ---- recommended views (TONE3000 tab) ---------------------------------
 
-    async def _reload_tone_table(self) -> None:
+    async def _reload_tone_table(self, *, refresh: bool = False,
+                                 silent: bool = False) -> None:
         """Reload the TONE3000 tab per the SORT picker: trending / most
         downloaded / most favorited / newest (mirrors tone3000.com's sort
         options; favorites reads the tones_counts table since the search RPC
         has no favorites ordering)."""
         sort = self._sort
+        generation = self._screen_generation
         table = self.query_one("#lib-table-tone", DataTable)
-        status = self.query_one("#tone-status", Static)
+        status = self.query_one("#tone-status", MarqueeBar)
         if sort == "favorites":
-            table.clear()
-            self._remote_tones = {}
-            status.update("Loading most favorited…")
+            self._tone_request_id += 1
+            request_id = self._tone_request_id
+            key = (self._query, self._type_filter, "favorites",
+                   self._author_filter)
+            self._tone_cache_key = key
+            if not refresh and key in self._tone_cache:
+                if self._tone_alive(generation, request_id):
+                    self._tone_loading = False
+                    self._restore_tone_entry(key)
+                return
+            self._tone_loading = True
+            if not silent:
+                self._show_status_if_empty(table, "loading…")
+                status.content = "loading…"
+                self._update_tone_subtitle(loading=True)
+                # 同 _show_search：加载期间不清 detail（REQ-011）
             try:
                 hits = await asyncio.to_thread(library.tone3000.top_favorites, 50)
             except Exception as e:
-                status.update(f"Failed to load favorites: {e}")
+                if not self._tone_alive(generation, request_id) or silent:
+                    return
+                self._tone_loading = False
+                self._update_tone_subtitle(error=True)
+                self._show_status_if_empty(
+                    table, self._network_error("Favorites", e))
+                return
+            if not self._tone_alive(generation, request_id):
                 return
             hits = await asyncio.to_thread(library.mark_download_state, hits)
+            if not self._tone_alive(generation, request_id):
+                return
+            self._observe_type_values(hits)
+            self._tone_loading = False
+            self._remote_tones = {}
+            table.clear()
+            table.cursor_type = "row"
             for t in hits:
                 self._remote_tones[int(t["id"])] = t
                 table.add_row(*self._row_cells(t), key=f"remote:{t['id']}")
-            status.update("(MOST FAVORITED — TONE3000 收藏排行 · Enter 安装)")
+            self._tone_total = None
+            self._tone_page = 1
+            self._tone_has_more = False
+            self._save_tone_cache(key)
+            if silent:
+                return
+            status.content = "(most favorited · enter detail)"
+            if not table.row_count:
+                # 空结果才清 detail（REQ-011）
+                self._highlighted_key = None
+                self.post_message(ToneHighlighted(None))
+                self._focus_if_pane_active(table)
+                return
             self._publish_highlight(table)
-            table.focus()
+            self._focus_if_pane_active(table)
         else:
-            order = {"trending": "trending", "downloads": "downloads-all-time",
-                     "newest": "newest"}[sort]
-            await self._show_search(self._query or "", order_by=order)
+            order = self._selected_order()
+            await self._show_search(self._query or "", order_by=order,
+                                    refresh=refresh, silent=silent)
 
-    async def _show_top_creators(self, limit: int = 5) -> None:
-        """Aggregate a large page of hits by username → top creators; clicking a
-        creator row searches only that author's tones. Shows the first `limit`
-        rows (default 5) plus a MORE row; clicking MORE lists everyone."""
-        from collections import Counter
+    def _update_creator_subtitle(self, *, loading: bool = False,
+                                 error: bool = False) -> None:
+        if loading:
+            self._creator_error = False
+            set_border_hint_layout(
+                self, "loading…",
+                [token for token, _action in self._border_hint_actions()])
+            return
+        count = len(self._creator_tones)
+        if error:
+            self._creator_error = True
+            state = f"{count} · load failed"
+        else:
+            self._creator_error = False
+            state = str(count) if self._creator_has_more else f"{count} · all loaded"
+        set_border_hint_layout(
+            self, state,
+            [token for token, _action in self._border_hint_actions()])
 
-        status = self.query_one("#creators-status", Static)
-        table = self.query_one("#lib-table-creators", DataTable)
-        table.clear()
-        self._remote_tones = {}
-        status.update("Loading top creators…")
+    def _save_creator_cache(self) -> None:
+        """Snapshot the TOP CREATORS view (single-view cache)."""
+        self._creator_cache = {
+            "tones": dict(self._creator_tones),
+            "total": self._creator_total,
+            "page": self._creator_page,
+            "has_more": self._creator_has_more,
+        }
+
+    @staticmethod
+    def _creator_row_count(rows: list[dict]) -> int:
+        """Exact public tone count from TONE3000's leaderboard view."""
+        return int(rows[0].get("public_tones_count") or 0) if rows else 0
+
+    def _creator_sort_key(self, name: str, tones_: list[dict]) -> int:
+        """Exact leaderboard sort value from ``user_public_counts``."""
+        if not tones_:
+            return 0
+        column = {
+            "tones": "public_tones_count",
+            "downloads": "downloads_count",
+            "favorites": "favorites_count",
+            "models": "public_models_count",
+        }.get(self._creator_sort, "public_tones_count")
+        return int(tones_[0].get(column) or 0)
+
+    def _creator_table(self) -> DataTable | None:
+        """Return the creators table while it is still mounted.
+
+        Startup prefetch workers can finish during app shutdown, after the
+        TabPane has been detached but before the worker observes its generation
+        change. Treat that teardown window as a cancelled view instead of
+        raising ``NoMatches`` from a background task.
+        """
+        try:
+            return self.query_one("#lib-table-creators", DataTable)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _author_label(username: str | None) -> str:
+        """Render an author consistently from the shared positive cache."""
+        name = str(username or "?")
+        badge = " ✓" if library.tone3000.is_verified(name) else ""
+        return f"@{name}{badge}"
+
+    def mark_verified_author(self, username: str) -> None:
+        """Update loaded author cells after a verification cache write."""
+        name = str(username or "").lower()
+        if not name or not library.tone3000.is_verified(name):
+            return
+        for table_id in ("lib-table-local", "lib-table-tone"):
+            try:
+                table = self.query_one(f"#{table_id}", DataTable)
+            except Exception:
+                continue
+            for row in table.ordered_rows:
+                tone = self._tone_for_key(row.key.value)
+                if tone and str(tone.get("username") or "").lower() == name:
+                    table.update_cell(
+                        row.key, "author",
+                        self._author_label(tone.get("username")),
+                        update_width=False)
+        table = self._creator_table()
+        if table is not None:
+            for row in table.ordered_rows:
+                key = row.key.value
+                if (isinstance(key, str) and key.startswith("creator:")
+                        and key.partition(":")[2].lower() == name):
+                    creator_name = key.partition(":")[2]
+                    table.update_cell(
+                        row.key, "creator", self._author_label(creator_name),
+                        update_width=False)
+
+    def _restore_creator_entry(self) -> None:
+        """Render the cached TOP CREATORS view without a network request."""
+        entry = self._creator_cache
+        self._creator_tones = dict(entry["tones"])
+        self._creator_total = entry["total"]
+        self._creator_page = entry["page"]
+        self._creator_has_more = entry["has_more"]
+        # 不清 _remote_tones：TONE3000 表行仍显示，Enter 需要这张查找表
+        # （REQ-009 语义）。
+        table = self._creator_table()
+        if table is None:
+            return
+        ranked = sorted(self._creator_tones.items(),
+                        key=lambda kv: -self._creator_sort_key(kv[0], kv[1]))
+        if not self._render_creator_rows(ranked, table):
+            return
+        if not ranked:
+            self._status_row(table, "No creator data")
+        self._update_creator_subtitle()
+        self._publish_highlight(table)
+        self._focus_if_pane_active(table)
+
+    async def _show_top_creators(self, limit: int = 0, *, append: bool = False,
+                                 refresh: bool = False, silent: bool = False) -> None:
+        """Render TONE3000's official paged creator leaderboard.
+
+        Each row comes from ``user_public_counts`` with stable aggregate values;
+        no provisional tone-page aggregation or background count rewrite occurs.
+        The view is cached: a cache hit renders without a network request;
+        `refresh` bypasses the cache, and `silent` fills the startup cache.
+        """
+        generation = self._screen_generation
+        if append:
+            request_id = self._creator_request_id
+        else:
+            request_id = self._creator_request_id
+            if not refresh and self._creator_cache is not None:
+                if self._creator_alive(generation, request_id):
+                    self._creator_loading = False
+                    self._restore_creator_entry()
+                return
+            self._creator_request_id += 1
+            request_id = self._creator_request_id
+            self._creator_error = False
+        table = self._creator_table()
+        if table is None:
+            return
+        if append and (not self._creator_has_more or self._creator_loading):
+            return
+        was_at_bottom = self._was_at_scroll_bottom(table) if append else False
+        if not append:
+            # 不清 _remote_tones：TONE3000 表行仍显示，Enter 需要这张查找表
+            # （REQ-009 根因：此处的清空让 remote 行 Enter/双击静默无效）。
+            if not silent:
+                self._show_status_if_empty(table, "loading…")
+        self._creator_loading = True
+        if not silent:
+            self._update_creator_subtitle(loading=True)
+        page = self._creator_page + 1 if append else 1
         try:
             hits = await asyncio.to_thread(
-                library.tone3000.search, "", page_size=100)
+                library.tone3000.top_creators,
+                sort_by=self._creator_sort,
+                page_size=CREATOR_PAGE_SIZE,
+                page_number=page)
         except Exception as e:
-            status.update(f"Failed to load creators: {e}")
+            if not self._creator_alive(generation, request_id):
+                return
+            table = self._creator_table()
+            if table is None:
+                return
+            self._creator_loading = False
+            if silent:
+                return  # startup prefetch failed; the tab visit reloads normally
+            if append and self._creator_tones:
+                self.notify(self._network_error("More creators", e), severity="warning")
+                self._update_creator_subtitle(error=True)
+            else:
+                self._update_creator_subtitle(error=True)
+                self._show_status_if_empty(
+                    table, self._network_error("Top creators", e))
             return
-        by_user: dict[str, list[dict]] = {}
-        for t in hits:
-            u = t.get("username")
-            if u:
-                by_user.setdefault(u, []).append(t)
-        ranked = sorted(by_user.items(), key=lambda kv: -len(kv[1]))
-        shown = ranked if limit <= 0 else ranked[:limit]
-        for name, tones_ in shown:
-            total_dl = sum(t.get("downloads_count") or 0 for t in tones_)
-            table.add_row(name, "CREATOR", str(len(tones_)), str(total_dl),
-                          "—", "—", "—", f"@{name}", key=f"creator:{name}")
-        if limit > 0 and len(ranked) > limit:
-            table.add_row(f"＋ MORE ({len(ranked) - limit} more creators)",
-                          "", "", "", "", "", "", "", key="creators-more")
+        if not self._creator_alive(generation, request_id):
+            return
+        # The table may have been detached during app shutdown even if the
+        # worker generation has not been invalidated yet.
+        table = self._creator_table()
+        if table is None:
+            return
+        if not append:
+            self._creator_page = 0
+            self._creator_total = None
+            self._creator_has_more = False
+            self._creator_tones = {}
+            table.clear()
+        self._creator_loading = False
+        self._creator_page = page
+        new_creators: list[tuple[str, list[dict]]] = []
+        for creator in hits:
+            username = creator.get("username")
+            if username and username not in self._creator_tones:
+                self._creator_tones[username] = [creator]
+                new_creators.append((username, [creator]))
+        self._creator_has_more = len(hits) == CREATOR_PAGE_SIZE
+        if append:
+            start_rank = table.row_count + 1
+            for offset, (name, tones_) in enumerate(new_creators):
+                self._add_creator_row(table, start_rank + offset, name, tones_)
+            shown = list(self._creator_tones.items())
+        else:
+            shown = list(self._creator_tones.items())
+            if limit > 0:
+                shown = shown[:limit]
+            if not self._render_creator_rows(shown, table):
+                return
         if not shown:
-            table.add_row("(no creator data)", "", "", "", "", "", "", "", key=None)
-        status.update("(TOP CREATORS · 点击查看其音色 · MORE 展开全部)")
-        self._publish_highlight(table)
-        table.focus()
+            self._status_row(table, "No creator data")
+        self._save_creator_cache()
+        if not silent:
+            self._update_creator_subtitle()
+            self._publish_highlight(table)
+            self._focus_if_pane_active(table)
+            if append:
+                self._restore_scroll_bottom(table, was_at_bottom)
+
+    def _render_creator_rows(
+            self, ranked: list[tuple[str, list[dict]]],
+            table: DataTable | None = None) -> bool:
+        """排行榜行渲染（Most X 降序的 ranked 列表 → 6 列）。"""
+        table = table or self._creator_table()
+        if table is None:
+            return False
+        table.clear()
+        table.cursor_type = "row"
+        for rank, (name, tones_) in enumerate(ranked, 1):
+            self._add_creator_row(table, rank, name, tones_)
+        return True
+
+    def _add_creator_row(
+            self, table: DataTable, rank: int, name: str,
+            tones_: list[dict]) -> None:
+        creator = tones_[0] if tones_ else {}
+        table.add_row(str(rank), self._author_label(name),
+                      str(self._creator_row_count(tones_)),
+                      str(creator.get("downloads_count") or 0),
+                      str(creator.get("favorites_count") or 0),
+                      str(creator.get("public_models_count") or 0),
+                      key=f"creator:{name}")
+
+    async def _load_more_creators(self) -> None:
+        await self._show_top_creators(append=True)
 
     # ---- shared row rendering ---------------------------------------------
 
-    @staticmethod
-    def _row_cells(t: dict) -> list[str]:
-        title = _clip(t.get("title") or "")
+    def _row_cells(self, t: dict) -> list[str]:
+        title = _clip(t.get("title") or "", 20)
+        matched_model_ids = t.get("matched_model_ids") or ()
+        if matched_model_ids:
+            # Put an exact model match first so the identifier remains visible
+            # even when the responsive title column is at its minimum width.
+            model_marker = f"model #{', #'.join(str(i) for i in matched_model_ids)}"
+            title = f"[dim]{model_marker}[/] · {title}"
         state = t.get("download_state")
         if state == "all":
             title = f"[bold $success]✓[/] {title}"
@@ -435,24 +1696,35 @@ class LibraryPanel(Vertical):
             title = f"[bold $warning]◐[/] {title}"
         elif state == "none":
             title = f"[dim]○[/] {title}"
-        # A2 下载目标：amp 用 a2_models_count，cab 无 A2 用 models_count
-        total = t.get("a2_models_count") or t.get("models_count") or 0
+        # ``models_count`` is the official total across A1/A2/Custom/IR.  The
+        # older aggregate rows sometimes omit it, so retain the component
+        # count fallback for those responses.
+        total = t.get("models_count")
+        if total is None:
+            total = ((t.get("a1_models_count") or 0)
+                     + (t.get("a2_models_count") or 0)
+                     + (t.get("custom_models_count") or 0)
+                     + (t.get("irs_count") or 0))
         files = str(total)
         if t.get("downloaded") is not None and total:
             files = f"{t['downloaded']}/{total}"
         return [
-            title, t.get("gear") or "?",
+            title, _gear_label(t), self._author_label(t.get("username")),
             str(t.get("downloads_count") or 0), str(t.get("favorites_count") or 0),
-            _arch(t), files, _uploaded(t),
-            f"@{t.get('username') or '?'}",
+            _uploaded(t), _format(t), _arch(t), files,
         ]
 
     def _tone_for_key(self, key: str | None) -> dict | None:
         if not key:
             return None
-        kind, _, tone_id = key.partition(":")
+        kind, _, rest = key.partition(":")
+        if kind == "creator":
+            # A TOP CREATORS row is an aggregate; follow the cursor with the
+            # first tone of that creator so the detail pane never blanks.
+            tones = self._creator_tones.get(rest)
+            return tones[0] if tones else None
         try:
-            tone_num = int(tone_id)
+            tone_num = int(rest)
         except ValueError:
             return None
         if kind == "remote":
@@ -468,36 +1740,55 @@ class LibraryPanel(Vertical):
         if 0 <= table.cursor_row < len(rows):
             key_value = rows[table.cursor_row].key.value
         if key_value == "__clear__":
+            if isinstance(table, LibraryTable):
+                table.set_focused_tone(None, None)
             # explicit clear (search failed); reset so the next search can
             # publish again
             self._highlighted_key = None
             self.post_message(ToneHighlighted(None))
             return
+        if key_value == "__status__":
+            return  # 加载/失败提示行不驱动 detail（REQ-011）
+        if key_value and key_value.startswith("creator:"):
+            # REQ-012：creators 行 → 作者信息 + top 音色列表视图（取代
+            # "聚合首 tone"映射——用户实测 detail 显示无关单音色）。
+            if key_value == self._highlighted_key:
+                return
+            self._highlighted_key = key_value
+            self.post_message(CreatorFocused(key_value.partition(":")[2]))
+            return
+        tone = self._tone_for_key(key_value)
+        if isinstance(table, LibraryTable):
+            table.set_focused_tone(key_value, tone)
         if key_value == self._highlighted_key:
             return
         self._highlighted_key = key_value
 
-        tone = self._tone_for_key(key_value)
-        # Repaint races can resolve a key to no tone (e.g. _remote_tones cleared
-        # mid-flight) — never blank the detail pane for those.
-        if key_value and tone:
+        if key_value:
             self.post_message(ToneHighlighted(tone))
-            title = (tone or {}).get("title") or ""
-            self.query_one("#lib-marquee", MarqueeBar).content = title or None
 
     # ---- import (TONE3000 tab) ----------------------------------------------
 
     async def _import_and_select(self, tone_id: int) -> None:
         """Import a remote tone (metadata + models), then surface it in the UI."""
-        status = self.query_one("#tone-status", Static)
+        self._import_request_id += 1
+        request_id = self._import_request_id
+        generation = self._screen_generation
+        if not self._import_alive(generation, request_id):
+            return
+        status = self.query_one("#tone-status", MarqueeBar)
         bar = self.query_one("#import-progress", ProgressBar)
         bar.update(total=1, progress=0)
         bar.display = True
-        status.update(f"Importing tone {tone_id}…")
+        status.content = f"Importing tone {tone_id}…"
 
         def progress(done: int, total: int, filename: str) -> None:
-            self.app.call_from_thread(
-                self._show_import_progress, tone_id, done, total, filename)
+            try:
+                self.app.call_from_thread(
+                    self._show_import_progress, generation, request_id,
+                    tone_id, done, total, filename)
+            except Exception:
+                pass
 
         try:
             # Downloads and SQLite work are blocking; keep Textual's event loop
@@ -505,55 +1796,156 @@ class LibraryPanel(Vertical):
             t = await asyncio.to_thread(
                 library.import_tone, tone_id, progress, quiet=True)
         except Exception as e:
-            status.update(f"Import failed: {e}")
-            bar.display = False
+            if self._import_alive(generation, request_id):
+                status.content = f"import failed: {e}"
+                bar.display = False
+            return
+        if not self._import_alive(generation, request_id):
             return
         if not t:
-            status.update(f"TONE3000 has no tone {tone_id}")
+            status.content = f"tone3000 has no tone {tone_id}"
             bar.display = False
             return
         count = len(t.get("models") or [])
         bar.update(total=max(count, 1), progress=max(count, 1))
-        status.update(f"Imported tone {tone_id}: {count} file(s) — 在 LOCAL 标签页查看")
+        status.content = f"Imported tone {tone_id}: {count} file(s) — see LOCAL"
         self._fingerprint = None  # force repaint with the new row
         self.refresh_rows()
         self.post_message(ToneSelected(tone_id))
 
-    def _show_import_progress(self, tone_id: int, done: int, total: int,
+    def _show_import_progress(self, generation: int, request_id: int,
+                              tone_id: int, done: int, total: int,
                               filename: str) -> None:
+        if not self._import_alive(generation, request_id):
+            return
         self.query_one("#import-progress", ProgressBar).update(
             total=max(total, 1), progress=done)
-        self.query_one("#tone-status", Static).update(
-            f"Importing tone {tone_id}: {done}/{total}  {filename}")
+        self.query_one("#tone-status", MarqueeBar).content = (
+            f"importing tone {tone_id}: {done}/{total}  {filename}")
 
     # ---- widget events ------------------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
+        spec = self._parse_or_notify(query)
+        if spec is None:
+            return
         if event.input.id == "local-search":
+            self.clear_local_selection()
             if query:
-                self._show_local_filter(query)
+                self._show_local_filter(query, spec)
             else:
-                self._query = ""
+                self._set_search_spec("", SearchSpec())
                 self._fingerprint = None
                 self.refresh_rows()
         elif event.input.id == "tone-search":
+            self._set_search_spec(query, spec)
             if query:
-                self.run_worker(self._show_search(query), name="search", exclusive=True)
+                self.run_worker(
+                    partial(self._show_search, query,
+                            order_by=self._selected_order(), spec=spec),
+                    name="search", exclusive=True)
             else:
-                self.action_reset()
+                # An empty TONE3000 query is the public Trending feed; do not
+                # jump back to LOCAL merely because the input was cleared.
+                self.run_worker(partial(self._reload_tone_table), name="search", exclusive=True)
+
+    def _border_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
+        active = getattr(self, "_active_pane", "pane-local")
+        if active == "pane-local":
+            visible = self._visible_local_ids()
+            all_label = "a none" if visible and visible <= self._local_selected else "a all"
+            width = self.region.width or (self.size.width + 4)
+            short = width < 56
+            actions: list[tuple[str, Callable[[], None]]] = []
+            if self._local_has_more:
+                actions.append(("↓ more", self._load_more_from_hint))
+            actions.extend([
+                (all_label, self.toggle_all_local),
+                (("space" if short else "space select"),
+                 self.toggle_local_selection),
+                (("d del" if short else "d uninstall"),
+                 self.uninstall_local_selection),
+            ])
+            if self._local_selected:
+                actions.append((("esc" if short else "esc clear"),
+                                self.clear_local_selection))
+            else:
+                actions.append(("enter open",
+                                lambda: self._table().action_select_cursor()))
+            return actions
+        if active == "pane-tone":
+            actions: list[tuple[str, Callable[[], None]]] = []
+            if self._tone_error:
+                actions.append(("r retry", self.retry_active))
+            elif self._tone_has_more:
+                actions.append(("↓ more", self._load_more_from_hint))
+            actions.append(("enter detail", lambda: self._table().action_select_cursor()))
+            return actions
+        actions = []
+        if self._creator_error:
+            actions.append(("r retry", self.retry_active))
+        elif self._creator_has_more:
+            actions.append(("↓ more", self._load_more_from_hint))
+        actions.append(("enter search", lambda: self._table().action_select_cursor()))
+        return actions
+
+    def _click_border_hint(self, event: MouseEvent) -> bool:
+        hit = border_hint_hit(self, event.screen_x, event.screen_y)
+        if hit is None:
+            return False
+        label, offset = hit
+        for token, action in self._border_hint_actions():
+            span = hint_span(label, token)
+            if span is not None and span[0] <= offset < span[1]:
+                event.stop()
+                action()
+                return True
+        return False
+
+    def on_click(self, event: MouseEvent) -> None:
+        self._click_border_hint(event)
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        tokens = [token for token, _ in self._border_hint_actions()]
+        set_border_hint_hover(
+            self,
+            border_hint_action_token(self, event.screen_x, event.screen_y, tokens),
+        )
+
+    def on_leave(self, event: Leave) -> None:
+        set_border_hint_hover(self, None)
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        # Select emits its initial value while the panel is composing. Do not
+        # start a remote worker until on_mount has established the active tab.
+        if not hasattr(self, "_active_pane"):
+            return
         if event.select.id == "sort-filter":
             self._sort = str(event.value)
-            self.run_worker(self._reload_tone_table(), name="search", exclusive=True)
+            if self._active_pane == "pane-tone":
+                self.run_worker(partial(self._reload_tone_table), name="search",
+                                exclusive=True)
+            return
+        if event.select.id == "sort-filter-creators":
+            self._creator_sort = str(event.value)
+            if self._active_pane == "pane-creators":
+                # Each sort is a distinct official leaderboard query; the
+                # currently loaded page is not a complete local data set.
+                self._creator_cache = None
+                self.run_worker(partial(self._show_top_creators, refresh=True),
+                                name="creators", exclusive=True)
             return
         if event.select.id not in ("type-filter-local", "type-filter-tone"):
             return
+        if event.select.id == "type-filter-local":
+            self.clear_local_selection()
         self._type_filter = str(event.value)
         if event.select.id == "type-filter-tone":
             # re-apply the current sort (type + sort filters combine)
-            self.run_worker(self._reload_tone_table(), name="search", exclusive=True)
+            if self._active_pane == "pane-tone":
+                self.run_worker(partial(self._reload_tone_table), name="search",
+                                exclusive=True)
         else:
             self._fingerprint = None
             self.refresh_rows()
@@ -562,8 +1954,12 @@ class LibraryPanel(Vertical):
         col = event.column_key.value
         is_tone = event.control.id == "lib-table-tone"
         if col == "type":
-            values = ["all", "amp", "cab", "amp-cab"]
-            current = values.index(self._type_filter)
+            values = [value for _label, value in
+                      [*TYPE_CHOICES, *self._extra_type_choices]]
+            current = self._type_filter
+            if current not in values:
+                values.append(current)
+            current = values.index(current)
             self.query_one("#type-filter-tone" if is_tone else "#type-filter-local",
                            Select).value = values[(current + 1) % len(values)]
             return
@@ -580,8 +1976,9 @@ class LibraryPanel(Vertical):
                     if t and t.get("username"):
                         self._author_filter = t["username"]
             if is_tone:
-                if self._query:
-                    self._show_search(self._query)
+                self.run_worker(partial(self._show_search, self._query,
+                                        order_by=self._selected_order()),
+                                name="search", exclusive=True)
             else:
                 self._fingerprint = None
                 self.refresh_rows()
@@ -599,30 +1996,35 @@ class LibraryPanel(Vertical):
         # artifact, not a user action; ignore it so the detail pane isn't blanked
         # behind a freshly filled table (row_key can be None here).
         key = event.row_key.value if event.row_key else None
-        if not key or key == self._highlighted_key:
+        if not key or key == "__status__" or key == self._highlighted_key:
             return
-        self._highlighted_key = key
-        self.post_message(ToneHighlighted(self._tone_for_key(key)))
+        self._publish_highlight(event.data_table)
+        self._maybe_load_more_from_viewport(event.data_table)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         key = event.row_key.value
         if not key:
             return
-        if key == "creators-more":
-            # MORE row on the creators tab → list everyone
-            self.run_worker(self._show_top_creators(limit=0), name="creators",
-                            exclusive=True)
+        if key == "__status__":
+            # 加载/失败提示行：Enter/双击 = 重试当前视图（REQ-011：此前静默
+            # 吞掉，用户"操作了一下"后在加载/失败窗口 Enter 全部无效）。
+            self.retry_active()
             return
         kind, _, tid = key.partition(":")
         if kind == "local":
             self.post_message(ToneSelected(int(tid)))
         elif kind == "creator":
-            # top-creators row → jump to the TONE3000 tab searching that author
-            tab = self.query_one("#--content-tab-pane-tone")
-            tab.post_message(tab.Clicked(tab))
-            self.run_worker(self._show_search(f"@{tid}"), name="search", exclusive=True)
+            # REQ-033：作者行 Enter/双击 → 跳 TONE3000 搜索 @author——
+            # 搜索栏填上 @名并触发真实搜索（作者信息聚焦联动保留）。
+            self._search_creator(tid)
         else:
             # Enter on a remote hit → pack install screen (preview files, pick subset)
             tone = self._remote_tones.get(int(tid))
-            if tone:
-                self.app.push_screen(PackInstallScreen(tone))
+            if tone is None:
+                # 查找表与音色表失配（旧版本在 TOP CREATORS/本地刷新时清过
+                # 它）：行还在但数据没了——重载音色表而不是静默无响应。
+                self.notify("Tone list expired — reloading", severity="warning")
+                self.run_worker(partial(self._reload_tone_table),
+                                name="search", exclusive=True)
+                return
+            self.app.push_screen(PackInstallScreen(tone))
