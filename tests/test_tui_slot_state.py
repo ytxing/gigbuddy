@@ -13,6 +13,7 @@ from tui.chain_state import (
     SlotStatus,
     chain_fingerprint,
 )
+from tui.presets import PresetEditModal
 
 
 def _state(*paths: str | None) -> ChainState:
@@ -23,6 +24,21 @@ def _state(*paths: str | None) -> ChainState:
         "quality": 1.0,
         "revision": 3,
     })
+
+
+def test_preset_edit_modal_captures_optional_updated_at_cas_token():
+    current = PresetEditModal({
+        "name": "current",
+        "id": 7,
+        "updated_at": "2026-08-08T00:00:00+00:00",
+        "chain": {},
+    })
+    legacy = PresetEditModal({"name": "legacy", "chain": {}})
+
+    assert current._preset_updated_at == "2026-08-08T00:00:00+00:00"
+    assert current._preset_has_updated_at is True
+    assert legacy._preset_updated_at is None
+    assert legacy._preset_has_updated_at is False
 
 
 def test_bypass_restore_and_different_file_are_target_local():
@@ -114,6 +130,24 @@ def test_same_tui_fingerprint_and_revision_preserve_candidates():
     polled = state.to_chain()
     assert state.reconcile(polled, fingerprint="tui-write", revision=4) is False
     assert state.target_index == 0
+    assert state.slot(0).status is SlotStatus.BYPASS
+    assert state.slot(0).candidate == "a"
+
+
+def test_exact_managed_poll_rehydrates_a_persisted_candidate():
+    state = _state("a")
+    state.toggle_bypass(0)
+    state.mark_managed_write("old-write", 4)
+
+    state.reconcile(
+        {"slots": [{"path": None}], "revision": 4},
+        fingerprint="external-write", revision=4)
+    assert state.slot(0).status is SlotStatus.EMPTY
+
+    incoming = {"slots": [{"path": None, "candidate": "a"}], "revision": 5}
+    state.mark_managed_write("new-write", 5)
+    assert state.reconcile(
+        incoming, fingerprint="new-write", revision=5) is False
     assert state.slot(0).status is SlotStatus.BYPASS
     assert state.slot(0).candidate == "a"
 

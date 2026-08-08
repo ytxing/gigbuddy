@@ -571,6 +571,7 @@ class LibraryPanel(Vertical):
         self._tags: list[str] = []
         self._makes: list[str] = []
         self._fingerprint: tuple | None = None
+        self._db_token: tuple | None = None
         self._remote_tones: dict[int, dict] = {}
         self._highlighted_key: str | None = None
         self._tone_page = 0
@@ -1343,6 +1344,9 @@ class LibraryPanel(Vertical):
         if (not force
                 and getattr(self, "_active_pane", "pane-local") != "pane-local"):
             return
+        db_token = library.database_change_token()
+        if not force and self._fingerprint is not None and db_token == self._db_token:
+            return
         with library.connect() as conn:
             fp = tuple(conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(id), 0), "
@@ -1357,8 +1361,10 @@ class LibraryPanel(Vertical):
                     "WHERE local_path IS NOT NULL)").fetchall()
             }
         if not force and fp == self._fingerprint:
+            self._db_token = db_token
             return
         self._fingerprint = fp
+        self._db_token = db_token
         # 注意：此处不能清 _remote_tones——TONE3000 表的行还在，Enter 依赖
         # 这张查找表（remote:<id> → tone）；本地 DB 变化与远程表无关。
         loaded_page = max(int(self._local_page), 0) if preserve_pages else 0
@@ -1389,7 +1395,7 @@ class LibraryPanel(Vertical):
         self._update_local_selection_status()
         for t in tones:
             checked = "\\[x]" if t["id"] in self._local_selected else "\\[ ]"
-            table.add_row(checked, *self._row_cells(t), key=f"local:{t['id']}")
+            table.add_row(checked, *self._row_cells(t, table), key=f"local:{t['id']}")
         self._sync_type_search_options(table)
         if not tones:
             self._status_row(
@@ -1872,14 +1878,19 @@ class LibraryPanel(Vertical):
         self._tone_page = entry["page"]
         self._tone_total = entry["total"]
         self._tone_has_more = entry["has_more"]
-        table = self.query_one("#lib-table-tone", DataTable)
+        table = self._table_for_pane("pane-tone")
+        if table is None:
+            return
         table.clear()
         table.cursor_type = "row"
         for tone_id, t in self._remote_tones.items():
-            table.add_row(*self._row_cells(t), key=f"remote:{tone_id}")
+            table.add_row(*self._row_cells(t, table), key=f"remote:{tone_id}")
         self._sync_type_search_options(table)
         if not silent:
-            status = self.query_one("#tone-status", MarqueeBar)
+            try:
+                status = self.query_one("#tone-status", MarqueeBar)
+            except Exception:
+                return
             if key[2] == "favorites":
                 status.content = "most favorited · enter detail"
             else:
@@ -1923,8 +1934,15 @@ class LibraryPanel(Vertical):
         self._set_search_spec(query, spec)
         self._tone_request_view = (
             None if silent else self._view_identity("pane-tone"))
-        table = self.query_one("#lib-table-tone", DataTable)
-        status = self.query_one("#tone-status", MarqueeBar)
+        if not self._screen_alive(generation):
+            return
+        table = self._table_for_pane("pane-tone")
+        if table is None:
+            return
+        try:
+            status = self.query_one("#tone-status", MarqueeBar)
+        except Exception:
+            return
         # A page request owns this flag for its complete lifetime.  Cursor
         # events only ask the worker to start a request; they do not mutate
         # loading state themselves.
@@ -2021,7 +2039,7 @@ class LibraryPanel(Vertical):
             tone_id = int(t["id"])
             if tone_id not in self._remote_tones:
                 self._remote_tones[tone_id] = t
-                table.add_row(*self._row_cells(t), key=f"remote:{tone_id}")
+                table.add_row(*self._row_cells(t, table), key=f"remote:{tone_id}")
         self._sync_type_search_options(table)
         self._tone_has_more = not spec.model_ids and (
             len(self._remote_tones) < self._tone_total
@@ -2065,8 +2083,15 @@ class LibraryPanel(Vertical):
         generation = self._screen_generation
         if not silent:
             self._capture_view_state("pane-tone")
-        table = self.query_one("#lib-table-tone", DataTable)
-        status = self.query_one("#tone-status", MarqueeBar)
+        if not self._screen_alive(generation):
+            return
+        table = self._table_for_pane("pane-tone")
+        if table is None:
+            return
+        try:
+            status = self.query_one("#tone-status", MarqueeBar)
+        except Exception:
+            return
         if sort == "favorites":
             self._tone_request_id += 1
             request_id = self._tone_request_id
@@ -2128,7 +2153,7 @@ class LibraryPanel(Vertical):
             table.cursor_type = "row"
             for t in hits:
                 self._remote_tones[int(t["id"])] = t
-                table.add_row(*self._row_cells(t), key=f"remote:{t['id']}")
+                table.add_row(*self._row_cells(t, table), key=f"remote:{t['id']}")
             self._tone_total = None
             self._tone_page = 1
             self._tone_has_more = False

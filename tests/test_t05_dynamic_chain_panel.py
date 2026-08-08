@@ -241,7 +241,7 @@ def test_dynamic_panel_routes_focus_bypass_reorder_delete_and_add(
     monkeypatch.setattr("tui.app.live.last_chain_write_fingerprint",
                         lambda: None)
 
-    def write_chain(chain: dict):
+    def write_chain(chain: dict, **_kwargs):
         current["chain"] = dict(chain)
         current["chain"]["revision"] = int(chain.get("revision", 0)) + 1
 
@@ -355,7 +355,7 @@ def test_dynamic_panel_keyboard_groups_remain_disjoint(monkeypatch, tmp_path):
                         lambda tone_id: {"title": f"Tone {tone_id}",
                                          "gear": "amp"})
 
-    def write_chain(chain: dict):
+    def write_chain(chain: dict, **_kwargs):
         current["chain"] = dict(chain)
 
     monkeypatch.setattr("tui.app.live.write_chain", write_chain)

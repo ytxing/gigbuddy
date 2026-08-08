@@ -163,6 +163,88 @@ def test_download_prefers_semantic_name_without_duplicate_extension(monkeypatch,
     ]
 
 
+def test_download_sanitizes_remote_names_to_the_destination_directory(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [
+        {"id": 1, "model_url": "http://x/one.nam",
+         "name": "../../escape.nam", "model_json": {}},
+        {"id": 2, "model_url": "http://x/two.wav",
+         "name": r"nested\evil.wav", "model_json": {}},
+    ])
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"x"
+
+    monkeypatch.setattr(tone3000.urllib.request, "urlopen",
+                        lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(tone3000.time, "sleep", lambda _seconds: None)
+    tone3000.download(99, tmp_path, return_paths=True, quiet=True)
+
+    assert sorted(path.name for path in tmp_path.iterdir() if path.is_file()) == [
+        "escape.nam", "evil.wav"
+    ]
+    assert not (tmp_path.parent / "escape.nam").exists()
+
+
+def test_download_reuses_only_a_verified_existing_file(monkeypatch, tmp_path):
+    payload = b"verified cached model"
+    path = tmp_path / "cached.nam"
+    path.write_bytes(payload)
+    model = {"id": 1, "model_url": "http://x/cached.nam",
+             "name": "cached.nam", "model_json": {}}
+    monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [model])
+    calls = []
+
+    def fail_urlopen(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("verified cache should not download")
+
+    monkeypatch.setattr(tone3000.urllib.request, "urlopen", fail_urlopen)
+    records = tone3000.download(
+        99, tmp_path, return_paths=True, quiet=True,
+        existing_records=[{
+            "id": 1, "model_url": model["model_url"],
+            "name": model["name"], "local_path": str(path),
+            "local_size": len(payload),
+            "local_sha256": tone3000._sha256_file(path),
+        }],
+    )
+
+    assert calls == []
+    assert path.read_bytes() == payload
+    assert records[0]["local_size"] == len(payload)
+    assert records[0]["local_sha256"] == tone3000._sha256_file(path)
+
+
+def test_download_redownloads_when_cached_hash_is_stale(monkeypatch, tmp_path):
+    path = tmp_path / "cached.nam"
+    path.write_bytes(b"old")
+    model = {"id": 1, "model_url": "http://x/cached.nam",
+             "name": "cached.nam", "model_json": {}}
+    monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [model])
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"new"
+
+    monkeypatch.setattr(tone3000.urllib.request, "urlopen",
+                        lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(tone3000.time, "sleep", lambda _seconds: None)
+    tone3000.download(
+        99, tmp_path, return_paths=True, quiet=True,
+        existing_records=[{
+            "id": 1, "model_url": model["model_url"],
+            "name": model["name"], "local_path": str(path),
+            "local_size": 3, "local_sha256": "not-the-file",
+        }],
+    )
+
+    assert path.read_bytes() == b"new"
+
+
 def test_schema_created():
     with library.connect() as conn:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -199,6 +281,18 @@ def test_existing_schema_gets_semantic_name_column():
             "id": 1, "tone_id": 1, "model_url": "u",
             "architecture": "IR", "local_path": "x.wav",
         })
+
+
+def test_schema_reinitializes_after_the_database_is_recreated():
+    with library.connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='presets'").fetchone()
+    library.DB_FILE.unlink()
+
+    with library.connect() as conn:
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"tones", "models", "presets", "settings"} <= tables
 
 
 def test_connection_enables_integrity_pragmas():
@@ -542,6 +636,37 @@ def test_import_rolls_back_new_files_when_db_persistence_fails(monkeypatch):
     assert library.get_tone(19) is None
 
 
+def test_import_restores_replaced_file_when_db_persistence_fails(monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+    destination = library.TONES_DIR / "19-fender-super-reverb-1977"
+    destination.mkdir(parents=True)
+    target = destination / "existing.nam"
+    target.write_bytes(b"old model")
+
+    def fake_download(_tone_id, staging, **_kwargs):
+        staged = staging / target.name
+        staged.write_bytes(b"new model")
+        return [{
+            "id": 51, "tone_id": 19, "model_url": "u1",
+            "model_json": {"architecture": "SlimmableContainer"},
+            "local_path": str(staged),
+        }]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    real_upsert_model = library.upsert_model
+
+    def fail_after_db_write(conn, model, *, commit=True):
+        real_upsert_model(conn, model, commit=commit)
+        raise RuntimeError("simulated replacement persistence failure")
+
+    monkeypatch.setattr(library, "upsert_model", fail_after_db_write)
+    with pytest.raises(RuntimeError, match="replacement persistence"):
+        library.import_tone(19, quiet=True)
+
+    assert target.read_bytes() == b"old model"
+    assert library.get_tone(19) is None
+
+
 def test_import_failure_does_not_remove_another_task_file(monkeypatch):
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
 
@@ -590,6 +715,14 @@ def test_cli_roundtrip(capsys, monkeypatch):
     assert library.main(["chain", "set", "not json"]) == 1
     assert library.main(["chain", "set", "[1,2]"]) == 1
     assert library.main(["tone", "show", "99999"]) == 1
+
+
+def test_cli_reports_the_frozen_release_version(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        library.main(["--version"])
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == "gigbuddy 1.0.2"
 
 
 def test_cli_search_json(capsys, monkeypatch):
@@ -693,6 +826,24 @@ def test_preset_manage_keeps_active_pointer_consistent(tmp_path):
 
     with pytest.raises(ValueError, match="cannot be empty"):
         library.preset_save("   ")
+
+
+def test_preset_draft_rejects_a_stale_updated_at(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+    original = library.preset_save("draft")
+    replacement = {"slots": [], "gain": 0.5, "master": 1.0, "quality": 1.0}
+
+    updated = library.preset_update_draft_by_id(
+        original["id"], replacement,
+        expected_updated_at=original["updated_at"])
+    assert updated["chain"]["slots"] == []
+
+    with pytest.raises(library.PresetConflictError, match="changed externally"):
+        library.preset_update_draft_by_id(
+            original["id"], {"slots": [{"path": None}]},
+            expected_updated_at=original["updated_at"])
+    assert library.preset_get_by_id(original["id"])["chain"]["slots"] == []
 
 
 def test_preset_save_external_path_kept_verbatim(tmp_path):

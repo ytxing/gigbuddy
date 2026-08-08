@@ -60,7 +60,7 @@ def _patch_canonical_chain(monkeypatch, tmp_path):
                         lambda _path: [dict(model) for model in models])
     monkeypatch.setattr("tui.panels.library.get_tone", lambda _tone_id: tone)
 
-    def write_chain(chain):
+    def write_chain(chain, **_kwargs):
         saved = dict(chain)
         saved["revision"] = int(saved.get("revision", 0)) + 1
         current["chain"] = saved
@@ -99,6 +99,36 @@ def test_slot_focus_opens_slot_pack_and_tracks_three_states(monkeypatch, tmp_pat
             assert panel.state.slot(0).status is SlotStatus.ACTIVE
             assert panel.state.slot(0).path == first
             assert current["chain"]["slots"][0]["path"] == first
+
+    run(scenario())
+
+
+def test_managed_file_poll_promotes_own_write_before_reconcile(monkeypatch, tmp_path):
+    current, first, _second, _models, _tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+    monkeypatch.setattr("tui.panels.live.chain_file_fingerprint",
+                        lambda: "pending-write")
+    monkeypatch.setattr("tui.panels.live.last_chain_write_fingerprint",
+                        lambda: "pending-write")
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            panel.state.focus_slot(0)
+            panel.state.toggle_bypass(0)
+            panel.state.mark_managed_write("previous-write", 1)
+
+            incoming = dict(current["chain"])
+            incoming["slots"] = [{"path": None, "candidate": first}]
+            incoming["master"] = 1.35
+            incoming["revision"] = 2
+            current["chain"] = incoming
+
+            panel.watch_chain(incoming)
+            assert panel.state.slot(0).status is SlotStatus.BYPASS
+            assert panel.state.slot(0).candidate == first
 
     run(scenario())
 

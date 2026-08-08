@@ -18,6 +18,7 @@ CLI:
     gigbuddy chain set '<json>'                           # write data/live_chain.json (engine hot-swaps)
 """
 import argparse
+import filecmp
 import json
 import math
 import os
@@ -34,13 +35,18 @@ from uuid import uuid4
 import tone3000
 import chain_protocol
 
-__version__ = "0.1.0"
+__version__ = "1.0.2"
 
 ROOT = Path(__file__).resolve().parent.parent
 
 _IR_SUFFIXES = frozenset({".wav", ".wave", ".flac", ".aif", ".aiff"})
 _NAM_SUFFIXES = frozenset({".nam", ".aida-x", ".aa-snapshot", ".proteus"})
 _IR_GEAR_TOKENS = frozenset({"cab", "space", "ir"})
+_PRESET_UPDATED_UNSET = object()
+
+
+class PresetConflictError(ValueError):
+    """Raised when an edit is based on an older version of a Preset row."""
 
 
 def model_is_ir(model: dict | None, tone: dict | None = None) -> bool:
@@ -144,6 +150,9 @@ TONES_DIR = ROOT / "data" / "tones"             # same as tui/live.py
 
 _IMPORT_LOCKS: dict[str, threading.Lock] = {}
 _IMPORT_LOCKS_GUARD = threading.Lock()
+_SCHEMA_READY: set[Path] = set()
+_SCHEMA_READY_LOCK = threading.Lock()
+_SCHEMA_TABLES = frozenset({"tones", "models", "presets", "settings"})
 
 # All 23 TONE3000 search fields (minus search-level `total_count`) + 2 local columns.
 TONE_COLUMNS = [
@@ -192,7 +201,9 @@ CREATE TABLE IF NOT EXISTS models (
     name         TEXT,          -- TONE3000 models.name（网页/zip 下载文件名，语义命名）
     architecture TEXT,                -- legacy backend token
     architecture_version TEXT,        -- canonical TONE3000 architecture
-    local_path   TEXT
+    local_path   TEXT,
+    local_size   INTEGER,
+    local_sha256 TEXT
 );
 CREATE TABLE IF NOT EXISTS presets (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,33 +233,73 @@ def connect() -> sqlite3.Connection:
     every caller (the TUI, CLI, and external agents) gets the same integrity
     and lock-wait behavior.
     """
-    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, timeout=5.0)
+    db_path = Path(DB_FILE).resolve(strict=False)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
     # WAL is deliberately left as a deployment decision; keep rollback-journal
     # semantics until a real TUI/import workload demonstrates a need for it.
-    conn.executescript(SCHEMA)
-    # CREATE TABLE IF NOT EXISTS does not evolve an existing database. The
-    # semantic filename column was added after the first schema, so make that
-    # one additive upgrade safe for users with an older local library.
-    tone_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(tones)").fetchall()
-    }
-    if "format" not in tone_columns:
-        conn.execute("ALTER TABLE tones ADD COLUMN format TEXT")
-        conn.commit()
-    model_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(models)").fetchall()
-    }
-    if "name" not in model_columns:
-        conn.execute("ALTER TABLE models ADD COLUMN name TEXT")
-        conn.commit()
-    if "architecture_version" not in model_columns:
-        conn.execute("ALTER TABLE models ADD COLUMN architecture_version TEXT")
-        conn.commit()
+    with _SCHEMA_READY_LOCK:
+        schema_ready = db_path in _SCHEMA_READY
+        if schema_ready:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            # The database may have been removed and recreated at the same
+            # path while this process was alive. Keep the fast path, but do
+            # not let the process-local cache hide a fresh empty database.
+            schema_ready = _SCHEMA_TABLES <= tables
+        if not schema_ready:
+            conn.executescript(SCHEMA)
+            # CREATE TABLE IF NOT EXISTS does not evolve an existing database.
+            # Keep additive upgrades on the one-time initialization path.
+            tone_columns = {
+                row[1] for row in conn.execute(
+                    "PRAGMA table_info(tones)").fetchall()
+            }
+            if "format" not in tone_columns:
+                conn.execute("ALTER TABLE tones ADD COLUMN format TEXT")
+            model_columns = {
+                row[1] for row in conn.execute(
+                    "PRAGMA table_info(models)").fetchall()
+            }
+            migrations = {
+                "name": "ALTER TABLE models ADD COLUMN name TEXT",
+                "architecture_version": (
+                    "ALTER TABLE models ADD COLUMN architecture_version TEXT"),
+                "local_size": "ALTER TABLE models ADD COLUMN local_size INTEGER",
+                "local_sha256": "ALTER TABLE models ADD COLUMN local_sha256 TEXT",
+            }
+            for column, statement in migrations.items():
+                if column not in model_columns:
+                    conn.execute(statement)
+            conn.commit()
+            _SCHEMA_READY.add(db_path)
     return conn
+
+
+def database_change_token() -> tuple:
+    """Return cheap filesystem signals for UI refresh gating."""
+    def stat_token(path: Path) -> tuple:
+        try:
+            stat = path.stat()
+        except OSError:
+            return (0, 0, 0)
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    return stat_token(Path(DB_FILE)) + stat_token(Path(TONES_DIR))
+
+
+def chain_change_token() -> tuple:
+    """Return cheap filesystem signals for live-chain refresh gating."""
+    try:
+        stat = Path(CHAIN_FILE).stat()
+    except OSError:
+        return (0, 0, 0)
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -299,18 +350,21 @@ def upsert_model(conn: sqlite3.Connection, m: dict, *, commit: bool = True) -> N
     if m.get("local_path"):
         m["local_path"] = _to_rel_path(m["local_path"])
     sql = ("INSERT INTO models (id, tone_id, model_url, name, architecture, "
-           "architecture_version, local_path) "
+           "architecture_version, local_path, local_size, local_sha256) "
            "VALUES (:id, :tone_id, :model_url, :name, :architecture, "
-           ":architecture_version, :local_path) "
+           ":architecture_version, :local_path, :local_size, :local_sha256) "
            "ON CONFLICT(id) DO UPDATE SET tone_id=excluded.tone_id, "
            "model_url=excluded.model_url, name=excluded.name, "
            "architecture=excluded.architecture, "
            "architecture_version=excluded.architecture_version, "
-           "local_path=excluded.local_path")
+           "local_path=excluded.local_path, local_size=excluded.local_size, "
+           "local_sha256=excluded.local_sha256")
     # Keep direct/older callers source-compatible while the name column is
     # optional for records created before TONE3000 exposed semantic filenames.
     params = {**m, "name": m.get("name"),
-              "architecture_version": m.get("architecture_version")}
+              "architecture_version": m.get("architecture_version"),
+              "local_size": m.get("local_size"),
+              "local_sha256": m.get("local_sha256")}
     conn.execute(sql, params)
     if commit:
         conn.commit()
@@ -699,10 +753,21 @@ def _seed_import_directory(source: Path, staging: Path) -> None:
         shutil.copy2(path, target)
 
 
-def _publish_import_files(paths: list[dict], staging: Path,
-                          destination: Path) -> tuple[list[dict], list[Path]]:
+def _restore_replaced_files(replaced: list[tuple[Path, Path]]) -> None:
+    for target, backup in reversed(replaced):
+        try:
+            if backup.is_file():
+                os.replace(backup, target)
+        except OSError:
+            pass
+
+
+def _publish_import_files(
+        paths: list[dict], staging: Path,
+        destination: Path) -> tuple[list[dict], list[Path], list[tuple[Path, Path]]]:
     """Publish only this import's staged artifacts and return owned files."""
     published: list[Path] = []
+    replaced: list[tuple[Path, Path]] = []
     records: list[dict] = []
     try:
         for source_record in paths:
@@ -719,7 +784,13 @@ def _publish_import_files(paths: list[dict], staging: Path,
             target.parent.mkdir(parents=True, exist_ok=True)
             if staged.is_file():
                 if target.exists():
-                    staged.unlink()
+                    if filecmp.cmp(staged, target, shallow=False):
+                        staged.unlink()
+                    else:
+                        backup = staging / f".rollback-{uuid4().hex}-{target.name}"
+                        shutil.copy2(target, backup)
+                        os.replace(staged, target)
+                        replaced.append((target, backup))
                 else:
                     os.replace(staged, target)
                     published.append(target)
@@ -727,8 +798,9 @@ def _publish_import_files(paths: list[dict], staging: Path,
             records.append(record)
     except Exception:
         _remove_owned_files(published)
+        _restore_replaced_files(replaced)
         raise
-    return records, published
+    return records, published, replaced
 
 
 def _remove_owned_files(paths: list[Path]) -> None:
@@ -737,6 +809,13 @@ def _remove_owned_files(paths: list[Path]) -> None:
             path.unlink()
         except OSError:
             pass
+
+
+def _existing_import_models(tone_id: int) -> list[dict]:
+    with connect() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT id, model_url, name, local_path, local_size, local_sha256 "
+            "FROM models WHERE tone_id = ?", (tone_id,)).fetchall()]
 
 def backfill_tone_usernames(*, quiet: bool = True) -> int:
     """历史数据回填：username 为占位（'tone3000'）或空的 tone 重新联查补真名。
@@ -788,17 +867,20 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
     with _import_lock(dest):
         staging.mkdir(parents=True, exist_ok=False)
         published: list[Path] = []
+        replaced: list[tuple[Path, Path]] = []
         try:
             _seed_import_directory(dest, staging)
+            existing_models = _existing_import_models(tone_id)
             # A pack install is model-granular.  Fetch the complete remote set
             # so selected A1/WaveNet rows are available as well as A2 and IR.
             paths = tone3000.download(tone_id, staging, tag=slug,
                                       a2_only=False,
                                       ext="wav" if is_ir else None,
                                       return_paths=True, progress=progress, quiet=quiet,
-                                      model_ids=model_ids)
+                                      model_ids=model_ids,
+                                      existing_records=existing_models)
             dest.mkdir(parents=True, exist_ok=True)
-            paths, published = _publish_import_files(paths, staging, dest)
+            paths, published, replaced = _publish_import_files(paths, staging, dest)
             row["local_dir"] = _to_rel_path(str(dest))   # REQ-035 portable
             with connect() as conn:
                 upsert_tone(conn, row, commit=False)
@@ -816,10 +898,13 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
                             (m["model_json"] or {}).get("architecture_version")
                         ),
                         "local_path": m["local_path"],
+                        "local_size": m.get("local_size"),
+                        "local_sha256": m.get("local_sha256"),
                     }, commit=False)
                 conn.commit()
         except Exception:
             _remove_owned_files(published)
+            _restore_replaced_files(replaced)
             shutil.rmtree(staging, ignore_errors=True)
             raise
         else:
@@ -1288,13 +1373,18 @@ def preset_update_note_by_id(preset_id: int, note: str | None) -> dict:
     return preset_get_by_id(preset_id)
 
 
-def preset_update_draft(name: str, chain: dict, note: str | None = None) -> dict:
+def preset_update_draft(name: str, chain: dict, note: str | None = None,
+                        *, expected_updated_at: str | None | object =
+                        _PRESET_UPDATED_UNSET) -> dict:
     """Compatibility wrapper; the actual mutation is id-scoped."""
-    return preset_update_draft_by_id(_preset_id_for_name(name), chain, note)
+    return preset_update_draft_by_id(
+        _preset_id_for_name(name), chain, note,
+        expected_updated_at=expected_updated_at)
 
 
-def preset_update_draft_by_id(preset_id: int, chain: dict,
-                              note: str | None = None) -> dict:
+def preset_update_draft_by_id(
+        preset_id: int, chain: dict, note: str | None = None, *,
+        expected_updated_at: str | None | object = _PRESET_UPDATED_UNSET) -> dict:
     """Persist a Preset Edit draft for exactly one captured row.
 
     The draft uses the same canonical ``slots[]`` shape as ``preset_save``;
@@ -1307,12 +1397,23 @@ def preset_update_draft_by_id(preset_id: int, chain: dict,
     stored_note = _preset_note_value(note)
     now = datetime.now(timezone.utc).isoformat()
     with connect() as conn:
+        params = [stored_note, json.dumps(canonical, ensure_ascii=False), now,
+                  preset_id]
+        where = "id = ?"
+        if expected_updated_at is not _PRESET_UPDATED_UNSET:
+            where += " AND updated_at IS ?"
+            params.append(expected_updated_at)
         cur = conn.execute(
             "UPDATE presets SET note = ?, chain_json = ?, updated_at = ? "
-            "WHERE id = ?",
-            (stored_note, json.dumps(canonical, ensure_ascii=False), now, preset_id),
-        )
+            f"WHERE {where}", params)
         if not cur.rowcount:
+            if expected_updated_at is not _PRESET_UPDATED_UNSET:
+                exists = conn.execute(
+                    "SELECT 1 FROM presets WHERE id = ?", (preset_id,)
+                ).fetchone()
+                if exists:
+                    raise PresetConflictError(
+                        "preset changed externally; reopen it before saving")
             raise ValueError(f"Preset id {preset_id} no longer exists.")
         conn.commit()
     return preset_get_by_id(preset_id)

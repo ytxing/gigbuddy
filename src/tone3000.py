@@ -12,16 +12,19 @@ CLI:
     tone3000.py dry <dest> [name...]        # 下载试听干音素材（MIT，mayer/brit/rollin 等）
 """
 import json
+import hashlib
 import http.client
+import os
 import re
 import ssl
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def slugify(text, maxlen=48):
@@ -357,8 +360,26 @@ def models(tone_id, a2_only=True):
     return [m for m in ms if _is_a2_model(m)]
 
 
+def _safe_download_name(value, fallback):
+    """Keep the semantic basename while preventing remote path traversal."""
+    text = str(value or "").replace("\\", "/")
+    name = PurePosixPath(text).name
+    if name in {"", ".", ".."} or "\x00" in name:
+        return fallback
+    return name
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
-             return_paths=False, progress=None, quiet=False, model_ids=None):
+             return_paths=False, progress=None, quiet=False, model_ids=None,
+             existing_records=None):
     """下载 tone 的模型到 dest_dir；a2_only=False 下载全部（含 IR wav）；ext 强制扩展名
 
     文件名优先采用 models.name；旧响应没有 name 时采用 model_url 的 basename。
@@ -381,6 +402,10 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
         return [] if return_paths else 0
     got = 0
     records = []
+    existing_by_id = {
+        int(record["id"]): record for record in (existing_records or [])
+        if isinstance(record, dict) and record.get("id") is not None
+    }
     for i, m in enumerate(sorted(ms, key=lambda x: x["id"]), 1):
         # 文件名优先采用 models.name 原样（TONE3000 网页 zip 命名规则，保留
         # 空格和语义参数）；旧 API 响应没有 name 时回退到 URL basename，避免
@@ -389,7 +414,7 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
         if not fname:
             url_path = urllib.parse.urlparse(m.get("model_url") or "").path
             fname = Path(urllib.parse.unquote(url_path)).name
-        fname = fname or f"model-{m['id']}"
+        fname = _safe_download_name(fname, f"model-{m['id']}")
         # ext is used for IR downloads. Preserve an existing .nam/.wav suffix
         # instead of producing names such as cab.wav.wav.
         if ext:
@@ -401,7 +426,23 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
         out = dest / fname
         if progress:
             progress(i - 1, len(ms), fname)
-        if out.exists() and out.stat().st_size > 0:
+
+        existing = existing_by_id.get(int(m["id"]))
+        reuse = False
+        if existing and out.is_file():
+            try:
+                expected_size = int(existing.get("local_size"))
+            except (TypeError, ValueError):
+                expected_size = 0
+            reuse = (
+                expected_size > 0
+                and out.stat().st_size == expected_size
+                and existing.get("model_url") == m.get("model_url")
+                and existing.get("name") == m.get("name")
+                and Path(existing.get("local_path") or "").name == fname
+                and existing.get("local_sha256") == _sha256_file(out)
+            )
+        if reuse:
             got += 1
         else:
             for attempt in range(3):  # 网络中断（IncompleteRead）重试
@@ -409,7 +450,22 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
                     req = urllib.request.Request(m["model_url"])
                     with urllib.request.urlopen(req, timeout=60) as r:
                         data = r.read()
-                    out.write_bytes(data)
+                    if not data:
+                        raise ValueError("downloaded file is empty")
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f".{out.name}.", suffix=".part", dir=dest)
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(data)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.replace(temp_name, out)
+                    except Exception:
+                        try:
+                            os.unlink(temp_name)
+                        except FileNotFoundError:
+                            pass
+                        raise
                     break
                 except Exception as e:
                     if attempt == 2:
@@ -418,6 +474,8 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
                     time.sleep(1)
             got += 1
             time.sleep(0.1)
+        size = out.stat().st_size
+        digest = _sha256_file(out)
         if progress:
             progress(i, len(ms), fname)
         if return_paths:
@@ -429,7 +487,9 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
                                     ("architecture_version", m.get("architecture_version")),
                                 ) if value not in (None, "")
                             } or None,
-                            "local_path": str(out)})
+                            "local_path": str(out),
+                            "local_size": size,
+                            "local_sha256": digest})
     if not quiet:
         print(f"[{tone_id}] 下载 {got}/{len(ms)} -> {dest}")
     return records if return_paths else got

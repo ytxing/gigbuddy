@@ -292,6 +292,7 @@ class PresetPanel(Vertical):
 
     def on_mount(self) -> None:
         self._fingerprint: tuple | None = None
+        self._db_token: tuple | None = None
         self._highlighted: str | None = None
         self._selected: set[str] = set()
         self._active: str | None = None
@@ -374,6 +375,10 @@ class PresetPanel(Vertical):
     def refresh_presets(self, *, force: bool = False,
                         incremental: bool = False) -> None:
         """Reload from the DB (called on tick; skips repaint unless changed)."""
+        db_token = (library.database_change_token()
+                    + library.chain_change_token())
+        if not force and self._fingerprint is not None and db_token == self._db_token:
+            return
         with library.connect() as conn:
             fp = tuple(conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(id), 0), "
@@ -387,8 +392,10 @@ class PresetPanel(Vertical):
                        if library.CHAIN_FILE.exists() else 0)
         fp += (active, chain_mtime, self._query, self._sort)
         if not force and fp == self._fingerprint:
+            self._db_token = db_token
             return
         self._fingerprint = fp
+        self._db_token = db_token
         self._highlighted = None
         table = self.query_one("#preset-table", DataTable)
         central_anchor = self._mutation_anchor
@@ -1411,6 +1418,8 @@ class PresetEditModal(GigBuddyModal):
         super().__init__()
         self._preset_name = str(preset.get("name") or "")
         self._preset_id = _valid_preset_id(preset.get("id"))
+        self._preset_updated_at = preset.get("updated_at")
+        self._preset_has_updated_at = "updated_at" in preset
         chain = preset.get("chain") if isinstance(preset, dict) else None
         chain = chain if isinstance(chain, dict) else {}
         self._draft = deepcopy(chain)
@@ -1661,11 +1670,15 @@ class PresetEditModal(GigBuddyModal):
             self._commit_input_values()
             bypassed = len(self._draft_candidates)
             if self._preset_id is not None:
+                kwargs = ({"expected_updated_at": self._preset_updated_at}
+                          if self._preset_has_updated_at else {})
                 updated = library.preset_update_draft_by_id(
-                    self._preset_id, self._draft, self._note)
+                    self._preset_id, self._draft, self._note, **kwargs)
             else:
+                kwargs = ({"expected_updated_at": self._preset_updated_at}
+                          if self._preset_has_updated_at else {})
                 updated = library.preset_update_draft(
-                    self._preset_name, self._draft, self._note)
+                    self._preset_name, self._draft, self._note, **kwargs)
         except (TypeError, ValueError) as exc:
             self._set_status(str(exc))
             return

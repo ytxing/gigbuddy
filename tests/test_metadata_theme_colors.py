@@ -143,6 +143,11 @@ def test_theme_colors_reads_app_variables():
             await pilot.pause(0.1)
             colors = theme_colors(app)
             lower = {k: v.lower() for k, v in colors.items()}
+            if app._limited_color:
+                assert app.theme == "textual-dark"
+                assert lower["value"] == "#8fb573"
+                assert lower["warn"] == app.theme_variables["warning"].lower()
+                return
             # top-level theme colors go through Textual's Color normalization
             # (#e59a3c → #e49a3c); variables values pass through verbatim
             assert lower["header"] == "#e49a3c"   # gigbuddy primary
@@ -203,7 +208,7 @@ def test_detail_pane_rerenders_on_theme_change():
             before_hex = _cell_color(before, 0, "FILE")
             assert before_hex.startswith("#")
 
-            app.theme = "textual-dark"
+            app.theme = "compat-dark" if app._limited_color else "textual-dark"
             await pilot.pause(0.5)
             after = pane._body.content
             after_hex = _cell_color(after, 0, "FILE")

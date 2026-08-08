@@ -40,24 +40,6 @@ def test_chain_input_defaults_to_instrument():
     assert inp["source"] == "file"
 
 
-def test_write_playback_toggles_state_preserving_file_and_loop():
-    model = live.ROOT / "data" / "tones" / "m.nam"
-    model.parent.mkdir(parents=True)
-    model.write_bytes(b"model")
-    live.write_chain({"slots": [{"path": "data/tones/m.nam"}],
-                      "input": {"source": "file", "file": "data/dry_inputs/a.wav",
-                                "state": "playing", "loop": True}})
-    cfg = live.write_playback(live.PLAY_PAUSED)
-    assert cfg["input"]["state"] == "paused"
-    assert cfg["input"]["file"] == str(live.ROOT / "data" / "dry_inputs" / "a.wav")
-    assert cfg["input"]["loop"] is True
-    # REQ-035 portable：链里相对路径读取时解析为项目根下绝对
-    assert cfg["slots"] == [{"path": str(model)}]
-    cfg = live.write_playback(live.PLAY_PLAYING, loop=False)
-    assert cfg["input"]["state"] == "playing"
-    assert cfg["input"]["loop"] is False
-
-
 def test_input_source_playback_commit_does_not_publish_mutation():
     events = []
 
@@ -74,10 +56,6 @@ def test_input_source_playback_commit_does_not_publish_mutation():
 
     assert result["revision"] == 3
     assert events == []
-
-
-def test_write_playback_no_chain_returns_none():
-    assert live.write_playback(live.PLAY_PLAYING) is None
 
 
 def test_read_levels_extended_returns_playback_state():

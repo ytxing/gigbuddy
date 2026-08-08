@@ -1,12 +1,6 @@
 ---
 name: gigbuddy
-description: >
-  Use when a user asks to find, compare, explain, import, or connect guitar or
-  bass tones from TONE3000 through GigBuddy. Search TONE3000 tone packs, read
-  their gear/format/tags/makes/description, inspect every exact model name and
-  model file, choose engine-compatible NAM or IR variants, or build/apply a
-  tone chain or preset. Trigger for requests such as 找音色、找音色链、解释
-  TONE3000 description、查看一个 Tone 里面的 Model 命名、安装或试听音色。
+description: Use when a user asks to find, compare, explain, import, or connect guitar or bass tones from TONE3000 through GigBuddy. Search TONE3000 tone packs, read their gear/format/tags/makes/description, inspect exact model names and files, choose engine-compatible NAM or IR variants, or build/apply a tone chain or preset. Triggers: "find me an XX tone", "build me an XX chain", "explain this TONE3000 description", "what models are in this tone", "install or audition a tone".
 ---
 
 # GigBuddy: find and explain TONE3000 tones
@@ -34,6 +28,8 @@ bin/gigbuddy preset list [--json]
 bin/gigbuddy preset save <name> [--note "..."]
 bin/gigbuddy preset load <name>
 bin/gigbuddy preset show <name> [--json]
+bin/gigbuddy preset current | preset rename <old> <new> | preset note <name> [text]
+bin/gigbuddy preset delete <name> | preset bootstrap
 ~~~
 
 Interpret the commands as follows:
@@ -47,8 +43,12 @@ Interpret the commands as follows:
 - tone import downloads the selected Tone's supported model files and stores
   the complete Tone/Model metadata. It is a write and a network download; do it
   only for selected candidates or when the user asks to install/apply a Tone.
-- The CLI exposes --author and --tag, but not a --make or architecture
-  filter. Search a Make name as normal query text instead of inventing a flag.
+- The CLI exposes --author and --tag, and --gear (including ir); there is no
+  --make or architecture filter. Search a Make name as normal query text
+  instead of inventing a flag.
+- preset bootstrap downloads the starter model catalog and seeds the built-in
+  presets; preset save snapshots the CURRENT live chain (never builds a chain
+  from arguments).
 
 The remote search JSON may contain a Tone description and a summary
 model_name, but it does not contain the complete models[] list. To explain
@@ -68,7 +68,7 @@ Extract these constraints before searching:
 3. Sound terms: clean, edge of breakup, crunch, high gain, bright, dark,
    scooped, tight, ambient, room, direct, and so on.
 4. Capture constraints: a named mic, amp setting, room/close mic, DI/no cab,
-   full rig, A1/A2, or a CPU/quality preference.
+   full rig, or a CPU/quality preference.
 5. The requested action: explain only, find candidates, download/import,
    apply to the live chain, render, or save a preset.
 
@@ -133,9 +133,8 @@ When a cab is needed, make a separate search:
 bin/gigbuddy tone search "<speaker or cab terms>" --gear cab --limit 10 --json
 ~~~
 
-Do not use --gear ir; it is not a valid CLI choice. A Tone with format=ir
-is the canonical IR signal, while old cab/space rows may carry the same
-meaning.
+A Tone with format=ir is the canonical IR signal, while old cab/space rows may
+carry the same meaning.
 
 If no result is suitable, change one keyword or remove one constraint and
 search again. Do not choose a poor match just to produce an ID. Keep a short
@@ -235,6 +234,13 @@ description and exact Model rows do not support. If the description is empty,
 say that the selection is based on title, tags, Makes, Model names, and format
 only.
 
+## Architecture filtering (A1/WaveNet)
+
+GigBuddy filters the deprecated A1 (WaveNet) architecture everywhere:
+downloads, browsing, and display. A Tone whose models are all A1 will import
+zero playable models. Never try to force an A1 file into the chain; when a
+search returns only A1 candidates, re-search with different terms instead.
+
 ## Import, select, and connect
 
 After ranking, import only the chosen Tone or the small set the user approved:
@@ -250,7 +256,7 @@ one object from models[] by matching the user's requested variant and these
 hard checks:
 
 - An amp slot needs a real existing .nam path and an engine-compatible
-  format=nam/NAM architecture.
+  format=nam/NAM architecture (A2 or custom; never A1).
 - A cab slot needs a real existing .wav path and IR semantics.
 - A non-NAM format such as aida-x, aa-snapshot, or proteus may remain
   searchable metadata, but tone import will reject it for the current engine.
@@ -259,22 +265,24 @@ hard checks:
 Use the exact paths from tone show --json; do not invent a slug or replace a
 semantic filename with model-<id>.
 
-For a standalone amp, clear any old cab explicitly:
+Chains use the ordered slots[] format (v0.2 slot chain, up to six slots).
+For a standalone amp:
 
 ~~~bash
-bin/gigbuddy chain set '{"model":"<exact .nam path>","ir":null,"gain":1.0,"master":0.8,"quality":1.0}'
+bin/gigbuddy chain set '{"slots": [{"path": "<exact .nam path>"}], "gain": 1.0, "master": 1.0, "quality": 1.0}'
 ~~~
 
 For an amp plus a separate IR:
 
 ~~~bash
-bin/gigbuddy chain set '{"model":"<exact .nam path>","ir":"<exact .wav path>","gain":1.0,"master":0.8,"quality":1.0}'
+bin/gigbuddy chain set '{"slots": [{"path": "<exact .nam path>"}, {"path": "<exact .wav path>"}], "gain": 1.0, "master": 1.0, "quality": 1.0}'
 ~~~
 
 chain set writes the complete live configuration and the engine hot-swaps
-from data/live_chain.json. Include all model/IR/parameter keys; use ir:null
-when bypassing a previous cab. quality controls the A2 sub-model size; it
-does not choose a different TONE3000 Model and is ignored by A1 models.
+from data/live_chain.json. Include all slot paths and parameter keys; every
+tone id must come from real search output and every file path from real
+import output. quality controls the A2 sub-model size; it does not choose a
+different TONE3000 Model.
 
 For an amp-cab Tone, prefer the exact full-rig .nam variant and omit a
 separate IR unless the description and Model name explicitly identify a DI/no-
@@ -286,21 +294,40 @@ use the repository render path documented in docs/chain-schema.md. Report
 whether the result was actually rendered; finding metadata is not the same as
 audibly validating a Tone.
 
-## Presets and reporting
+## Presets and batch generation
 
 Treat preset save as a snapshot of the current live chain, not as a command
-that constructs a chain from a Tone ID. For a batch request, repeat this loop:
+that constructs a chain from a Tone ID. For a single preset:
 
-1. Search and record real Tone IDs for one style at a time.
+1. Search and record real Tone IDs.
 2. Import and inspect the selected Tone description and Model rows.
 3. Set the full chain with exact local paths.
-4. Save a distinct preset with a note containing the stated/inferred sound
-   character.
-5. Verify with preset show <name> --json and preset list.
+4. Save with a note: bin/gigbuddy preset save "<name>" --note "<character>".
 
-Before overwriting a preset, check preset list. After batch saving, remember
-that the last saved preset becomes active; use preset load <name> when a
-different one should drive the engine.
+For a batch request (a series of styles, e.g. clean / crunch / metal / blues /
+jazz), use a two-phase loop — first search and import ALL styles, then set and
+snapshot each chain:
+
+1. Parse intent into a style list; for each style record the amp search terms,
+   expected character (clean / overdrive / high-gain), and whether a cab IR is
+   needed. List the styles for user confirmation before generating.
+2. Phase A — search and import every style (record real ids, read description
+   for the note material via tone show).
+3. Phase B — per style: chain set (full slots[] + params) then
+   preset save "<style>-<character>" --note "<analysis>".
+4. Naming: lowercase ASCII hyphenated <style>-<character> (e.g. blues-clean-70s,
+   metal-modern-gain, jazz-clean-neck). Same name overwrites — check preset
+   list first; on conflict rename or ask.
+5. Verify: preset list (all + active marker), preset show <name> --json
+   (slots/model_id/paths/gain/master/note), preset load <name> (spot-check the
+   engine hot-swap).
+
+After batch saving, remember that the last saved preset becomes active; use
+preset load <name> when a different one should drive the engine. Maintain
+presets through the CLI: preset note (edit note without touching the chain),
+preset rename, preset delete.
+
+## Reporting
 
 Return a compact evidence report:
 
@@ -322,7 +349,8 @@ Return a compact evidence report:
   without checking its command result.
 - Do not treat downloads/favorites as objective sound quality.
 - Do not treat description, tags, or a Model name as measured audio evidence.
-- Do not put unsupported formats or unverified paths into the live chain.
+- Do not put unsupported formats, A1 files, or unverified paths into the live
+  chain.
 - If the network fails, report the failure, retry with a smaller focused query
   when reasonable, and do not fabricate candidates from memory.
 - If tone show says a Tone is not in the local library, import it first or

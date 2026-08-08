@@ -259,12 +259,6 @@ class _ManagedChainAdapter:
         if not self._app._managed_engine_active():
             raise ChainStateError(
                 "managed engine became inactive during rollback")
-        previous_report = self._runtime_before[0] if self._runtime_before else {}
-        previous_revision = previous_report.get("revision")
-        if (isinstance(previous_revision, bool)
-                or not isinstance(previous_revision, int)
-                or previous_revision < 0):
-            previous_revision = self._base_revision
         if not self._restore_transaction_id:
             raise ChainStateError("managed rollback has no transaction id")
         wait_kwargs = {
@@ -274,7 +268,10 @@ class _ManagedChainAdapter:
         }
         if self._runtime_session_id is not None:
             wait_kwargs["expected_session_id"] = self._runtime_session_id
-        live.wait_for_runtime_revision(previous_revision, **wait_kwargs)
+        # The rollback candidate carries the file's base revision. Telemetry
+        # may still lag behind that revision when the failed commit began, so
+        # it is not a valid acknowledgement target.
+        live.wait_for_runtime_revision(self._base_revision, **wait_kwargs)
         if self._restore_file_fingerprint is None:
             raise ChainStateError(
                 "managed rollback temporary chain disappeared")
@@ -997,6 +994,13 @@ class GigBuddyApp(App):
         self._in_ch = in_ch
         self._spawn_engine = spawn_engine
         self._engine: subprocess.Popen | None = None
+        self._engine_log_handle = None
+        self._engine_lock_handle = None
+        self._engine_restart_failures = 0
+        self._engine_retry_at = 0.0
+        self._engine_restart_exhausted = False
+        self._engine_failure_notified = False
+        self._engine_started_at = 0.0
         self._block = 256
         self._sr = 48000
         self._audio_ins: list[str] = []
@@ -1249,6 +1253,14 @@ class GigBuddyApp(App):
         page_types = (ChainPanel, DetailPane, LibraryPanel, PresetPanel)
         self._mutation_pages = tuple(
             self.query_one(page_type) for page_type in page_types)
+        if self._spawn_engine:
+            try:
+                self._engine_lock_handle = live.acquire_engine_lock()
+            except RuntimeError as exc:
+                self._spawn_engine = False
+                self._engine_restart_exhausted = True
+                self.notify(str(exc), severity="error")
+                self.call_after_refresh(self.exit)
         self._ensure_engine()
         self.set_interval(0.1, self.refresh_from_files)
         self.query_one("#lib-table-local").focus()
@@ -1279,7 +1291,22 @@ class GigBuddyApp(App):
         Also recovers from engine crashes via the 0.1s tick."""
         if not self._spawn_engine:
             return
+        if self._engine_restart_exhausted:
+            return
         if self._engine is not None and self._engine.poll() is None:
+            return
+        now = time.monotonic()
+        if self._engine is not None:
+            return_code = self._engine.poll()
+            uptime = now - self._engine_started_at
+            self._engine = None
+            if self._engine_log_handle is not None:
+                self._engine_log_handle.close()
+                self._engine_log_handle = None
+            self._record_engine_failure(return_code, uptime)
+            if self._engine_restart_exhausted:
+                return
+        if now < self._engine_retry_at:
             return
         cfg = live.read_chain()
         model_path = cfg.get("model") or next(
@@ -1298,7 +1325,27 @@ class GigBuddyApp(App):
                 self.notify("Engine stopped — pick a tone to restart audio",
                             severity="warning")
             return
-        self._start_engine()
+        if not self._start_engine():
+            self._record_engine_failure(None, 0.0)
+
+    def _record_engine_failure(self, return_code, uptime: float) -> None:
+        if uptime >= 1.0:
+            self._engine_restart_failures = 0
+        self._engine_restart_failures += 1
+        if not self._engine_failure_notified:
+            detail = f" ({return_code})" if return_code is not None else ""
+            self.notify(
+                f"Engine exited{detail}; retrying with backoff",
+                severity="warning")
+            self._engine_failure_notified = True
+        if self._engine_restart_failures >= 5:
+            self._engine_restart_exhausted = True
+            self.notify(
+                "Engine restart paused after repeated failures",
+                severity="error")
+            return
+        self._engine_retry_at = time.monotonic() + min(
+            5.0, 0.1 * (2 ** (self._engine_restart_failures - 1)))
 
     def _managed_engine_active(self) -> bool:
         """Whether this App owns a live managed runtime transaction target."""
@@ -1335,11 +1382,18 @@ class GigBuddyApp(App):
                     sidecar.unlink()
                 except FileNotFoundError:
                     pass
-            log = open(root / "data" / "engine.log", "w")
+            log = open(root / "data" / "engine.log", "a", encoding="utf-8")
+            self._engine_log_handle = log
             self._engine = subprocess.Popen(cmd, stdout=log, stderr=log,
                                             stdin=subprocess.DEVNULL)
-        except FileNotFoundError as e:
+            self._engine_started_at = time.monotonic()
+            return True
+        except OSError as e:
+            if self._engine_log_handle is not None:
+                self._engine_log_handle.close()
+                self._engine_log_handle = None
             self.notify(f"(engine spawn failed: {e})", severity="error")
+            return False
 
     def on_unmount(self) -> None:
         self._device_request_generation += 1
@@ -1353,6 +1407,9 @@ class GigBuddyApp(App):
             self._header_status_timer.stop()
             self._header_status_timer = None
         self._kill_engine()
+        if self._engine_lock_handle is not None:
+            live.release_engine_lock()
+            self._engine_lock_handle = None
 
     def _device_request_alive(self, generation: int) -> bool:
         return (generation == self._device_request_generation
@@ -1394,6 +1451,9 @@ class GigBuddyApp(App):
             except Exception:
                 self._engine.kill()
             self._engine = None
+        if self._engine_log_handle is not None:
+            self._engine_log_handle.close()
+            self._engine_log_handle = None
 
     def on_device_changed(self, event: DeviceChanged) -> None:
         """Interface changes restart only the isolated realtime engine."""
@@ -1425,7 +1485,12 @@ class GigBuddyApp(App):
             self.notify("Audio setting recorded for this session; external engine not restarted")
             return
         self._kill_engine()
-        self._start_engine()
+        self._engine_restart_failures = 0
+        self._engine_retry_at = 0.0
+        self._engine_restart_exhausted = False
+        self._engine_failure_notified = False
+        if not self._start_engine():
+            self._record_engine_failure(None, 0.0)
         self.notify(f"Engine restarted · IN {self._dev_in or 'default'} · "
                     f"OUT {self._dev_out or 'default'} · block {self._block} · "
                     f"SR {self._sr / 1000:g} kHz")
@@ -1591,8 +1656,14 @@ class GigBuddyApp(App):
             except Exception as exc:
                 self.notify(f"Chain unchanged: {exc}", severity="error")
                 return None
+        base_chain, expected_fingerprint = live.read_chain_snapshot()
+        expected_revision = base_chain.get("revision", 0)
         try:
-            live.write_chain(cfg)
+            live.write_chain(
+                cfg,
+                expected_fingerprint=expected_fingerprint,
+                expected_revision=expected_revision,
+            )
             return self._publish_chain_write(cfg)
         except Exception as exc:
             self.notify(f"Chain unchanged: {exc}", severity="error")
@@ -1740,7 +1811,7 @@ class GigBuddyApp(App):
 
     def _commit_chain_param_hold(self, key: str, value: float) -> dict | None:
         """Commit one absolute parameter value from the hold worker."""
-        base_chain = live.read_chain()
+        base_chain, base_fingerprint = live.read_chain_snapshot()
         cfg = dict(base_chain)
         lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
         value = round(max(lo, min(hi, value)), 2)
@@ -1757,7 +1828,11 @@ class GigBuddyApp(App):
                 _ManagedChainAdapter(self, expected_chain=base_chain),
                 lambda draft: draft.apply_candidate(cfg),
             )
-        persisted = live.write_chain(cfg)
+        persisted = live.write_chain(
+            cfg,
+            expected_fingerprint=base_fingerprint,
+            expected_revision=base_chain.get("revision", 0),
+        )
         if isinstance(persisted, dict):
             return persisted
         return live.read_chain() or cfg

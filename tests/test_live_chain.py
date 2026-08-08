@@ -1,9 +1,11 @@
+import hashlib
 import json
 
 import pytest
 
 from tui import live
 from tui.app import _ManagedChainAdapter
+from tui.chain_state import ChainState, SlotStatus
 
 
 @pytest.fixture
@@ -26,6 +28,17 @@ def test_read_chain_returns_a_valid_chain(chain_file):
     assert chain["slots"] == []
     assert chain["gain"] == 0.5
     assert live.consume_chain_error() is None
+
+
+def test_chain_snapshot_pairs_chain_with_its_exact_file_fingerprint(chain_file):
+    payload = b'{"slots": [], "gain": 0.5, "revision": 4}\n'
+    chain_file.write_bytes(payload)
+
+    chain, fingerprint = live.read_chain_snapshot()
+
+    assert chain["gain"] == 0.5
+    assert chain["revision"] == 4
+    assert fingerprint == hashlib.sha256(payload).hexdigest()
 
 
 def test_corrupt_chain_keeps_the_last_valid_value(chain_file):
@@ -182,6 +195,53 @@ def test_managed_adapter_rejects_a_stale_ui_chain_base(chain_file):
     with pytest.raises(live.chain_protocol.ChainFileConflict):
         _ManagedChainAdapter(
             object(), expected_chain={"slots": [], "revision": 1})
+
+
+def test_non_managed_write_rejects_a_stale_chain_base(chain_file):
+    first = live.write_chain({"slots": []})
+    fingerprint = live.chain_file_fingerprint()
+    chain_file.write_text(json.dumps({"slots": [], "gain": 2.0,
+                                      "revision": first["revision"]}))
+    external = chain_file.read_bytes()
+
+    with pytest.raises(live.chain_protocol.ChainFileConflict):
+        live.write_chain(
+            {"slots": [{"path": None}], "gain": 0.5},
+            expected_fingerprint=fingerprint,
+            expected_revision=first["revision"],
+        )
+    assert chain_file.read_bytes() == external
+
+
+def test_managed_adapter_accepts_candidate_rehydrated_from_own_poll(
+        tmp_path, monkeypatch):
+    tones = tmp_path / "data" / "tones"
+    tones.mkdir(parents=True)
+    (tones / "amp.nam").write_bytes(b"amp")
+    chain_file = tmp_path / "data" / "live_chain.json"
+    monkeypatch.setattr(live, "ROOT", tmp_path)
+    monkeypatch.setattr(live, "CHAIN_FILE", chain_file)
+    chain_file.write_text(json.dumps({
+        "slots": [{"path": None, "candidate": "data/tones/amp.nam"}],
+        "gain": 1.0,
+        "master": 1.35,
+        "quality": 1.0,
+        "revision": 6,
+    }))
+
+    state = ChainState(live.read_chain())
+    state.reconcile(
+        {"slots": [{"path": None}], "gain": 1.0,
+         "master": 1.35, "quality": 1.0, "revision": 5},
+        fingerprint="external-write", revision=5)
+    assert state.slot(0).status is SlotStatus.EMPTY
+
+    state.mark_managed_write("own-write", 6)
+    assert state.reconcile(
+        live.read_chain(), fingerprint="own-write", revision=6) is False
+    assert state.slot(0).status is SlotStatus.BYPASS
+
+    _ManagedChainAdapter(object(), expected_chain=state.to_chain())
 
 
 def test_runtime_prepare_rejection_does_not_touch_chain_file(tmp_path, monkeypatch):
@@ -343,7 +403,9 @@ def test_existing_chain_rollback_restores_original_bytes_after_ack(
     adapter._candidate_fingerprint = live.chain_file_fingerprint()
     adapter._file_write_succeeded = True
     adapter._runtime_before = ({
-        "revision": 4,
+        # The engine can still report the revision before the current file
+        # while a commit is in flight; rollback must target the file base.
+        "revision": 3,
         "status": "applied",
         "transaction_id": "old",
         "session_id": "session-1",

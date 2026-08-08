@@ -9,6 +9,11 @@ import time
 import uuid
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - GigBuddy targets POSIX terminals
+    fcntl = None
+
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
@@ -39,6 +44,7 @@ CHAIN_PARAMETER_DEFAULTS = {
 # process, even when both writes leave a slot set to null.
 _last_chain_write_fingerprint: str | None = None
 _last_chain_write_path: Path | None = None
+_engine_lock_handle = None
 
 # Keep the last successfully normalized chain per file path.  The TUI polls
 # this file while another process may be writing it, so a malformed external
@@ -61,6 +67,37 @@ CHAIN_ORDER = [
 
 def _chain_path() -> Path:
     return Path(CHAIN_FILE)
+
+
+def acquire_engine_lock():
+    """Hold the managed-engine lock for one TUI process."""
+    global _engine_lock_handle
+    if _engine_lock_handle is not None:
+        return _engine_lock_handle
+    path = Path(ROOT) / "data" / ".gigbuddy-engine.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+")
+    if fcntl is not None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            handle.close()
+            raise RuntimeError("another managed GigBuddy instance is running") from exc
+    _engine_lock_handle = handle
+    return handle
+
+
+def release_engine_lock() -> None:
+    global _engine_lock_handle
+    handle = _engine_lock_handle
+    _engine_lock_handle = None
+    if handle is None:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _remember_chain(path: Path, chain: dict) -> None:
@@ -93,6 +130,40 @@ def read_chain() -> dict:
         return deepcopy(cached) if cached is not None else {}
     _remember_chain(path, chain)
     return deepcopy(chain)
+
+
+def read_chain_snapshot() -> tuple[dict, str | None]:
+    """Read a chain and its exact file fingerprint from one writer snapshot.
+
+    The file-only commit path needs both values for CAS. Reading them through
+    separate calls can pair a chain from one write with the fingerprint from a
+    later write, so keep the lock held while reading and normalizing one exact
+    payload.
+    """
+    path = _chain_path()
+    with chain_protocol.chain_file_lock(path):
+        try:
+            payload = path.read_bytes()
+        except FileNotFoundError:
+            _remember_chain(path, {})
+            return {}, None
+        except OSError as exc:
+            _record_chain_error(path, exc)
+            cached = _chain_cache.get(path)
+            return (deepcopy(cached) if cached is not None else {}, None)
+
+        fingerprint = hashlib.sha256(payload).hexdigest()
+        try:
+            chain = chain_protocol.normalize_chain(
+                json.loads(payload.decode("utf-8")), root=ROOT)
+        except (UnicodeError, json.JSONDecodeError,
+                chain_protocol.ChainProtocolError) as exc:
+            _record_chain_error(path, exc)
+            cached = _chain_cache.get(path)
+            chain = deepcopy(cached) if cached is not None else {}
+        else:
+            _remember_chain(path, chain)
+        return deepcopy(chain), fingerprint
 
 
 def consume_chain_error() -> str | None:
@@ -425,21 +496,6 @@ def chain_input(chain: dict) -> dict:
     """当前链的 input 键（缺省 = 乐器输入）"""
     inp = chain.get("input")
     return inp if isinstance(inp, dict) else {"source": "instrument"}
-
-
-def write_playback(state: str, loop: bool | None = None) -> dict | None:
-    """播放控制：读链 → 改 input.state（loop 可选）→ 写回。返回新链或 None（链缺失）"""
-    chain = read_chain()
-    if not chain:
-        return None
-    inp = chain_input(chain)
-    inp["source"] = inp.get("source", "instrument")
-    inp["state"] = state
-    if loop is not None:
-        inp["loop"] = loop
-    chain["input"] = inp
-    write_chain(chain)
-    return chain
 
 
 def short_name(path: str) -> str:

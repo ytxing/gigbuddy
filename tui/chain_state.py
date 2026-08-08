@@ -682,16 +682,25 @@ class ChainState:
         if observed_revision is _UNSET:
             value = incoming.get("revision")
             observed_revision = value if isinstance(value, int) and not isinstance(value, bool) else None
-        can_preserve = (
+        managed_write = (
             fingerprint is not None
             and observed_revision is not None
             and fingerprint == self._managed_fingerprint
             and observed_revision == self._managed_revision
+        )
+        can_preserve = (
+            managed_write
             and _persistent_slots(incoming) == _persistent_slots(self.to_chain())
         )
         if can_preserve:
             # Keep the private Slot objects and only refresh chain-level data
-            # such as input/parameters/revision.
+            # such as input/parameters/revision. The persisted candidate is
+            # authoritative for this exact managed write and may also repair
+            # a poll that arrived before its UI callback was published.
+            incoming_slots = _slots_from_chain(incoming, paths)
+            for current, persisted in zip(self._slots, incoming_slots):
+                current.candidate = (
+                    persisted.candidate if persisted.path is None else None)
             self._chain = _chain_with_slots(incoming, [slot.path for slot in self._slots])
             self._chain_error = None
             return False
@@ -703,7 +712,7 @@ class ChainState:
         # state 与磁盘不一致，后续 managed 事务会因 fingerprint 冲突失败。
         self._slots = _slots_from_chain(
             incoming, paths,
-            carry_candidates=self._managed_fingerprint is None)
+            carry_candidates=(managed_write or self._managed_fingerprint is None))
         self._target = None
         self._managed_fingerprint = None
         self._managed_revision = None

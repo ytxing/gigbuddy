@@ -45,8 +45,10 @@ def load_wav(path):
         if bits == 16:
             x = raw.view("<i2").astype(np.float32) / 32768.0
         elif bits == 24:
-            x = (raw[0::3].astype(np.int32) << 8 | raw[1::3].astype(np.int32) << 16
-                 | raw[2::3].astype(np.int32) << 24).astype(np.float32) / 8388608.0
+            packed = raw.reshape(-1, 3).astype(np.int32)
+            x = (packed[:, 0] | packed[:, 1] << 8 | packed[:, 2] << 16)
+            x = np.where(x & 0x800000, x - 0x1000000, x)
+            x = x.astype(np.float32) / 8388608.0
         elif bits == 32:
             x = raw.view("<i4").astype(np.float32) / 2147483648.0
         else:
@@ -100,7 +102,25 @@ def apply_ir(x, ir, ir_mix=1.0):
 
 
 def _nodes(chain):
-    """兼容两种链格式：新 DSL（nodes 数组）与旧格式（amp/ir 字符串）"""
+    """兼容 canonical slots、nodes DSL 与旧 amp/ir 字符串格式."""
+    if "slots" in chain:
+        nodes = []
+        for index, slot in enumerate(chain.get("slots") or []):
+            if not isinstance(slot, dict):
+                raise ValueError(f"invalid slot {index}")
+            path = slot.get("path")
+            if path is None:
+                continue
+            suffix = Path(path).suffix.lower()
+            if suffix == ".nam":
+                nodes.append({"type": "amp", "model_file": path})
+            elif suffix == ".wav":
+                nodes.append({"type": "cab_ir", "model_file": path,
+                              "params": {"mix": float(
+                                  chain.get("ir_mix", 1.0))}})
+            else:
+                raise ValueError(f"unsupported slot format: {path}")
+        return nodes
     if "nodes" in chain:
         return chain["nodes"]
     nodes = []

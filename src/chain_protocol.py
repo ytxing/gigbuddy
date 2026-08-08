@@ -207,7 +207,18 @@ def normalize_chain(candidate: Any, *, root: Path = PROJECT_ROOT,
         if "path" not in item:
             raise ChainProtocolError(f"slot {index} must contain path")
         path = item["path"]
-        extra = {key: value for key, value in item.items() if key != "path"}
+        extra = {key: value for key, value in item.items()
+                 if key not in {"path", "candidate"}}
+        candidate_path = item.get("candidate")
+        if candidate_path is not None:
+            if path is not None:
+                raise ChainProtocolError(
+                    f"slot {index} candidate requires a bypassed slot")
+            candidate_absolute, _ = _allowed_file(
+                candidate_path, root=root, directory=TONES_DIR_NAME,
+                extensions=SUPPORTED_EXTENSIONS, require_exists=False,
+            )
+            extra["candidate"] = str(candidate_absolute)
         if path is None:
             slots.append({"path": None, **extra})
             continue

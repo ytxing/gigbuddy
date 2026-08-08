@@ -104,6 +104,35 @@ def test_invalid_slot_is_rejected_without_representing_unknown_type(tmp_path):
         )
 
 
+def test_bypass_candidate_is_scoped_and_serialized_as_a_relative_tone_path(tmp_path):
+    root = _root(tmp_path)
+    got = chain_protocol.normalize_chain(
+        {"slots": [{"path": None, "candidate": "data/tones/amp.nam"}]},
+        root=root,
+    )
+    assert got["slots"] == [{
+        "path": None,
+        "candidate": str(root / "data" / "tones" / "amp.nam"),
+    }]
+
+    chain_file = root / "data" / "live_chain.json"
+    chain_protocol.write_chain_file(chain_file, got, root=root)
+    assert json.loads(chain_file.read_text())["slots"] == [{
+        "path": None,
+        "candidate": "data/tones/amp.nam",
+    }]
+
+    invalid = [
+        {"path": "data/tones/amp.nam", "candidate": "data/tones/cab.wav"},
+        {"path": None, "candidate": "../outside.nam"},
+        {"path": None, "candidate": "data/tones/candidate.txt"},
+        {"path": None, "candidate": 7},
+    ]
+    for slot in invalid:
+        with pytest.raises(chain_protocol.ChainProtocolError):
+            chain_protocol.normalize_chain({"slots": [slot]}, root=root)
+
+
 def test_slots_are_limited_and_unknown_slot_fields_are_removed(tmp_path):
     root = _root(tmp_path)
     with pytest.raises(chain_protocol.ChainProtocolError):
