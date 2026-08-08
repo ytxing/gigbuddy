@@ -129,9 +129,10 @@ To inspect the interface without an audio backend, launch with:
 .venv/bin/python -m tui --no-engine
 ```
 
-The native engine build currently targets macOS and uses Homebrew PortAudio,
-clang++, and CMake. The TUI and library remain useful with `--no-engine` when
-those tools are not available.
+The native engine build currently targets macOS: PortAudio 19.7.0 is built
+from source into the install directory (no package manager required), using
+the system compiler and CoreAudio framework. The TUI and library remain useful
+with `--no-engine` when those tools are not available.
 
 To wipe all local data, the Python environment, and the built engine and start
 fresh, run the one-line uninstall:
@@ -281,9 +282,10 @@ in `install.sh` together when bumping.
 | RTNeural | (NeuralAudio submodule) | BSD-3-Clause | neural inference |
 | Eigen | 3.4.0 | MPL-2.0 | linear algebra (patched for NAM) |
 | math_approx | (NeuralAudio dep) | MIT | fast math |
-| PortAudio | Homebrew `portaudio` | MIT-like | audio I/O |
+| PortAudio | 19.7.0 (built from source) | MIT-like | audio I/O |
 
-**Toolchain**: Python 3.11+, clang++ (C++20), CMake, Homebrew, git.
+**Toolchain**: Xcode Command Line Tools (clang++/git/make), uv (auto-downloaded
+if missing — manages Python 3.12 and the venv).
 
 ## Known limitations
 

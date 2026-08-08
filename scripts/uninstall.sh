@@ -106,7 +106,7 @@ printf '  links: %s/gigbuddy\n' "$BIN_DIR"
 if [[ -d "$INSTALL_ROOT/data" ]]; then
   printf '  local data: %s\n' "$INSTALL_ROOT/data"
 fi
-printf '  Homebrew PortAudio: keep\n'
+printf '  local PortAudio build (.local): removed with the install\n'
 
 if [[ "$ASSUME_YES" != 1 ]]; then
   answer=''

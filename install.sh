@@ -106,15 +106,21 @@ if [[ "$NO_ENGINE" -eq 0 ]]; then
         fi
     fi
 
-    if command -v brew >/dev/null 2>&1; then
-        if ! brew --prefix portaudio >/dev/null 2>&1; then
-            echo "Installing PortAudio"
-            brew install portaudio
-        fi
-    else
-        echo "Homebrew is required to build the realtime engine (PortAudio)." >&2
-        echo "Re-run with --no-engine to use the TUI without a local engine." >&2
-        exit 1
+    # PortAudio：固定官方稳定版 v19.7.0，源码编译到本地（不依赖 Homebrew）。
+    # macOS 上 PortAudio 用系统自带的 CoreAudio 框架，零额外依赖。
+    PA_DIR="$ROOT/.local"
+    if [[ ! -f "$PA_DIR/lib/libportaudio.2.dylib" ]]; then
+        stage "Building PortAudio 19.7.0 from source"
+        PA_TARBALL="pa_stable_v190700_20210406.tgz"
+        curl -L -o /tmp/"$PA_TARBALL" \
+            "https://codeload.github.com/PortAudio/portaudio/tar.gz/refs/tags/v19.7.0"
+        tar xzf /tmp/"$PA_TARBALL" -C /tmp
+        (cd /tmp/portaudio-19.7.0 && \
+         ./configure CFLAGS="-Wno-implicit-const-int-float-conversion" \
+             --prefix="$PA_DIR" --disable-mac-universal --disable-silent-rules && \
+         make -j"$(sysctl -n hw.ncpu 2>/dev/null || printf 4)" && \
+         make install)
+        rm -f /tmp/"$PA_TARBALL"
     fi
 
     stage "Building NAM and realtime engine"

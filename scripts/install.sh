@@ -252,12 +252,6 @@ if sys.version_info < (3, 11):
     raise SystemExit("Python 3.11+ is required")
 PY
 
-command -v brew >/dev/null 2>&1 || die "Homebrew is required: https://brew.sh"
-if ! brew --prefix portaudio >/dev/null 2>&1; then
-  step "Installing PortAudio"
-  run_quiet brew install --quiet portaudio
-fi
-
 # 记录安装前状态，供失败回滚使用（rollback_install）
 if [[ -d "$INSTALL_ROOT/.git" ]]; then
   printf 'WAS_NEW_CLONE=0\nPREV_HEAD=%s\n' \
@@ -334,6 +328,16 @@ if [[ -d "$INSTALL_ROOT/cpp" ]]; then
           "$INSTALL_ROOT/third_party/NeuralAudio/NeuralAudio/$header"
       done
     fi
+  fi
+
+  # PortAudio：固定官方稳定版 v19.7.0 源码编译到本地（不依赖 Homebrew）
+  PA_DIR="$INSTALL_ROOT/.local"
+  if [[ ! -f "$PA_DIR/lib/libportaudio.2.dylib" ]]; then
+    step "Building PortAudio 19.7.0 from source"
+    PA_TARBALL="pa_stable_v190700_20210406.tgz"
+    run_quiet bash -c "curl -L -o /tmp/$PA_TARBALL https://codeload.github.com/PortAudio/portaudio/tar.gz/refs/tags/v19.7.0 && tar xzf /tmp/$PA_TARBALL -C /tmp"
+    run_quiet bash -c "cd /tmp/portaudio-19.7.0 && ./configure CFLAGS='-Wno-implicit-const-int-float-conversion' --prefix='$PA_DIR' --disable-mac-universal --disable-silent-rules && make -j\$(sysctl -n hw.ncpu 2>/dev/null || echo 4) && make install"
+    rm -f /tmp/"$PA_TARBALL"
   fi
 
   step "Building the NAM engine (this can take a while; please be patient)"
