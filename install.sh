@@ -8,13 +8,9 @@ SKIP_PRESETS=0
 SKIP_DRY_INPUTS=0
 DRY_INPUTS="all"
 
-# 阶段提示：正常打印，同时（若远程安装器传入状态文件）追加到状态区，
-# 让安装动画实时显示当前进行到哪一步。
+# 阶段提示：每一步安装内容打印一行，慢步骤自带提示。
 stage() {
     echo "$1"
-    if [[ -n "${GIGBUDDY_STATUS_FILE:-}" ]]; then
-        printf '==> %s\n' "$1" >> "$GIGBUDDY_STATUS_FILE"
-    fi
 }
 
 usage() {

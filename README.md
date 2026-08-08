@@ -89,8 +89,9 @@ One line from the terminal — downloads, installs, and initializes everything:
 curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
 ```
 
-It installs into `~/.local/share/gigbuddy` and links `gigbuddy` / `gigbuddy-tui`
-into `~/.local/bin`. Run interactively and you can choose another location —
+It installs into `~/.local/share/gigbuddy` and links the `gigbuddy` command
+into `~/.local/bin`. Launch the TUI with
+`~/.local/share/gigbuddy/.venv/bin/python -m tui`. Run interactively and you can choose another location —
 `"."` for the current directory or any path (useful when you want the bundled
 agent skill available inside your own project folder); set `GIGBUDDY_HOME` to
 skip the prompt. Remove everything with `~/.local/bin/gigbuddy`'s sibling:

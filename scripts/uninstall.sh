@@ -102,7 +102,7 @@ fi
 
 printf 'GigBuddy will remove:\n'
 printf '  files: %s\n' "$INSTALL_ROOT"
-printf '  links: %s/gigbuddy and %s/gigbuddy-tui\n' "$BIN_DIR" "$BIN_DIR"
+printf '  links: %s/gigbuddy\n' "$BIN_DIR"
 if [[ -d "$INSTALL_ROOT/data" ]]; then
   printf '  local data: %s\n' "$INSTALL_ROOT/data"
 fi

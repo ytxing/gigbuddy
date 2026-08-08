@@ -294,14 +294,49 @@ printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
   printf 'HAD_THIRDPARTY=%s\n' "$([[ -d "$INSTALL_ROOT/third_party" ]] && printf 1 || printf 0)"
 } >> "$ROLLBACK_FILE"
 
-step "Installing GigBuddy (venv, library, starter presets, dry inputs, engine — downloading models and compiling can take a while; please be patient)"
-# 根 install.sh 的阶段标题同步进 banner 状态区（GIGBUDDY_STATUS_FILE 钩子）
-GIGBUDDY_STATUS_FILE="$STATUS_FILE" run_quiet "$INSTALL_ROOT/install.sh"
+step "Creating Python environment"
+if [[ ! -x "$INSTALL_ROOT/.venv/bin/python" ]]; then
+  run_quiet "$PYTHON_BIN" -m venv "$INSTALL_ROOT/.venv"
+fi
+
+step "Installing Python dependencies"
+run_quiet "$INSTALL_ROOT/.venv/bin/python" -m pip install --quiet --upgrade pip
+run_quiet "$INSTALL_ROOT/.venv/bin/python" -m pip install --quiet -r "$INSTALL_ROOT/requirements.txt"
+
+step "Downloading starter presets and dry inputs (this can take a while; please be patient)"
+run_quiet env PYTHONPATH="$INSTALL_ROOT/src" \
+  "$INSTALL_ROOT/.venv/bin/python" "$INSTALL_ROOT/scripts/bootstrap.py"
+
+# 引擎依赖与编译（逻辑与根 install.sh 同步维护）
+if [[ -d "$INSTALL_ROOT/cpp" ]]; then
+  if [[ ! -d "$INSTALL_ROOT/third_party/NeuralAudio" ]]; then
+    step "Fetching engine dependencies (NeuralAudio + NAM)"
+    run_quiet git clone --recurse-submodules \
+      https://github.com/mikeoliphant/NeuralAudio \
+      "$INSTALL_ROOT/third_party/NeuralAudio"
+    run_quiet git -C "$INSTALL_ROOT/third_party/NeuralAudio" checkout --quiet 49100f9
+    # Eigen 版本坑自动化：RTNeural vendored Eigen 指向 master（3.5 pre），
+    # 与 NAM Core 不兼容（缺 unsupported/Eigen/FFT + placeholders::lastN）。
+    EIGEN_DIR="$INSTALL_ROOT/third_party/NeuralAudio/deps/RTNeural/modules/Eigen"
+    if [[ ! -f "$EIGEN_DIR/unsupported/Eigen/FFT" ]]; then
+      echo "Patching Eigen: RTNeural vendors 3.5-pre (incompatible); using 3.4.0"
+      rm -rf "$EIGEN_DIR"
+      run_quiet bash -c "curl -sSL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz | tar xz -C '$INSTALL_ROOT/third_party/NeuralAudio/deps/RTNeural/modules' && mv '$INSTALL_ROOT/third_party/NeuralAudio/deps/RTNeural/modules/eigen-3.4.0' '$EIGEN_DIR'"
+      for header in LSTM.h LSTMDynamic.h; do
+        sed -i '' 's/Eigen::placeholders::lastN/Eigen::lastN/g' \
+          "$INSTALL_ROOT/third_party/NeuralAudio/NeuralAudio/$header"
+      done
+    fi
+  fi
+
+  step "Building the NAM engine (this can take a while; please be patient)"
+  run_quiet "$INSTALL_ROOT/cpp/build.sh"
+fi
 
 step "Linking commands"
 mkdir -p "$BIN_DIR"
 # bin/gigbuddy 是相对仓库根的 bash 包装脚本，不能直接 symlink（BASH_SOURCE
-# 会解析到链接位置）；生成指向安装目录的 wrapper。TUI 同理。
+# 会解析到链接位置）；生成指向安装目录的 wrapper。
 write_wrapper() {
   local command_name="$1" exec_line="$2"
   local link="$BIN_DIR/$command_name"
@@ -313,14 +348,12 @@ write_wrapper() {
   chmod +x "$link"
 }
 write_wrapper gigbuddy "\"$INSTALL_ROOT/bin/gigbuddy\" \"\$@\""
-write_wrapper gigbuddy-tui "\"$INSTALL_ROOT/.venv/bin/python\" -m tui \"\$@\""
 
 # 安装成功：不再需要回滚状态
 rm -f "$ROLLBACK_FILE"
 stop_banner
 printf '\nGigBuddy ready\n'
 printf '  %s/gigbuddy\n' "$BIN_DIR"
-printf '  %s/gigbuddy-tui\n' "$BIN_DIR"
 printf '  install: %s\n' "$INSTALL_ROOT"
 if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
   printf 'Add to PATH if needed: %s\n' "$BIN_DIR"
