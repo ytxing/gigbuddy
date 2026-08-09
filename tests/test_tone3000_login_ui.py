@@ -1,6 +1,7 @@
 """Regression coverage for the TONE3000 login state in LibraryPanel."""
 
 import asyncio
+import threading
 
 from textual.widgets import Button, DataTable
 
@@ -121,5 +122,46 @@ def test_login_button_reloads_current_tone_view(monkeypatch):
             assert calls["login"] == 1
             assert not button.display
             assert table.ordered_rows[0].key.value == "remote:7"
+
+    run(scenario())
+
+
+def test_tone_rows_render_before_download_state_probe(monkeypatch, tmp_path):
+    """The remote page must remain usable while local status is enriched."""
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
+    release_probe = threading.Event()
+    probe_started = threading.Event()
+
+    def search(*_args, **_kwargs):
+        return [{"id": 7, "title": "Visible tone", "gear": "amp",
+                 "username": "tester", "downloads_count": 1,
+                 "favorites_count": 0, "a2_models_count": 1}]
+
+    def slow_mark(rows):
+        probe_started.set()
+        release_probe.wait(2)
+        return [{**row, "download_state": "all", "downloaded": 1}
+                for row in rows]
+
+    monkeypatch.setattr(library.tone3000, "search", search)
+    monkeypatch.setattr(library.tone3000, "top_creators",
+                        lambda **_kwargs: [])
+    monkeypatch.setattr(library, "mark_download_state", slow_mark)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.1)
+            app.query_one(LibraryPanel).activate_view_tab("pane-tone")
+            await pilot.pause(0.3)
+            table = app.query_one("#lib-table-tone", DataTable)
+            assert probe_started.is_set()
+            assert table.ordered_rows[0].key.value == "remote:7"
+            assert not app.query_one(LibraryPanel)._tone_loading
+            release_probe.set()
+            await pilot.pause(0.3)
+            assert "✓" in str(table.get_cell("remote:7", "title"))
 
     run(scenario())

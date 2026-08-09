@@ -2110,33 +2110,42 @@ class LibraryPanel(Vertical):
         # Exact model lookups already identify the requested files. Resolve
         # their local state from SQLite directly instead of issuing another
         # remote model-list request before rendering the result.
-        try:
-            if spec.model_ids:
-                local_by_tone = await asyncio.to_thread(
-                    library.downloaded_model_ids_by_tone)
-                for hit in hits:
-                    matched = set(hit.get("matched_model_ids") or spec.model_ids)
-                    downloaded = matched & local_by_tone.get(int(hit["id"]), set())
-                    hit["downloaded"] = len(downloaded)
-                    hit["download_state"] = (
-                        "all" if matched and downloaded >= matched else
-                        "partial" if downloaded else "none")
-            else:
-                hits = await asyncio.to_thread(library.mark_download_state, hits)
-        except library.tone3000.AuthenticationRequiredError:
-            if not self._tone_alive(generation, request_id):
+        # A normal search must render its remote rows before probing each
+        # locally known tone's model list.  The latter is an optional status
+        # enrichment and can take several seconds when many visible tones are
+        # installed.  Keep exact model lookup and silent prefetch unchanged so
+        # their cache/state semantics remain deterministic.
+        if spec.model_ids or silent:
+            try:
+                if spec.model_ids:
+                    local_by_tone = await asyncio.to_thread(
+                        library.downloaded_model_ids_by_tone)
+                    for hit in hits:
+                        matched = set(
+                            hit.get("matched_model_ids") or spec.model_ids)
+                        downloaded = matched & local_by_tone.get(
+                            int(hit["id"]), set())
+                        hit["downloaded"] = len(downloaded)
+                        hit["download_state"] = (
+                            "all" if matched and downloaded >= matched else
+                            "partial" if downloaded else "none")
+                else:
+                    hits = await asyncio.to_thread(
+                        library.mark_download_state, hits)
+            except library.tone3000.AuthenticationRequiredError:
+                if not self._tone_alive(generation, request_id):
+                    return
+                self._show_tone_auth_required(table, silent=silent)
                 return
-            self._show_tone_auth_required(table, silent=silent)
-            return
-        except Exception as e:
-            if not self._tone_alive(generation, request_id):
+            except Exception as e:
+                if not self._tone_alive(generation, request_id):
+                    return
+                self._tone_loading = False
+                if not silent:
+                    self._update_tone_subtitle(error=True)
+                    self._show_status_if_empty(
+                        table, self._network_error("TONE3000 search", e))
                 return
-            self._tone_loading = False
-            if not silent:
-                self._update_tone_subtitle(error=True)
-                self._show_status_if_empty(
-                    table, self._network_error("TONE3000 search", e))
-            return
         if not self._tone_alive(generation, request_id):
             return
         self._tone_loading = False
@@ -2182,6 +2191,19 @@ class LibraryPanel(Vertical):
         self._publish_highlight(table)
         if not append:
             self._focus_if_pane_active(table)
+
+        if not spec.model_ids:
+            # Keep the list usable while the optional download-state probe
+            # checks the remote model sets for locally known tones.
+            try:
+                updated = await asyncio.to_thread(
+                    library.mark_download_state,
+                    [dict(tone) for tone in hits])
+            except Exception:
+                return
+            if not self._tone_alive(generation, request_id):
+                return
+            self._apply_download_state_updates(updated)
 
     async def _load_more_tones(self) -> None:
         """Fetch the next remote page without moving the cursor or clearing rows."""
