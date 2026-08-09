@@ -193,13 +193,42 @@ def test_output_calibration_round_trip_uses_slot_and_request_identity(
         "output_gain_db": 4.5,
     }))
 
-    assert live.request_output_calibration(2, timeout=0.02) == 4.5
+    result = live.request_output_calibration(2, timeout=0.02)
+    assert result == 4.5
+    assert result.recommended_output_gain_db == 4.5
+    assert result.clamped is False
     request = json.loads(control_file.read_text())
     assert request == {
         "operation": "calibrate_output",
         "request_id": "request-1",
         "slot_index": 2,
     }
+
+
+def test_output_calibration_preserves_clamped_backend_recommendation(
+        tmp_path, monkeypatch):
+    control_file = tmp_path / "control.json"
+    reply_file = tmp_path / "control.reply.json"
+    monkeypatch.setattr(live, "CONTROL_FILE", control_file)
+    monkeypatch.setattr(live, "CONTROL_REPLY_FILE", reply_file)
+    monkeypatch.setattr(live, "wait_for_engine_ready", lambda **_: "session-1")
+    monkeypatch.setattr(
+        live.uuid, "uuid4", lambda: SimpleNamespace(hex="request-1"))
+    reply_file.write_text(json.dumps({
+        "status": "calibrated",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "output_gain_db": 24.0,
+        "recommended_output_gain_db": 30.0,
+        "clamped": True,
+    }))
+
+    result = live.request_output_calibration(0, timeout=0.02)
+
+    assert isinstance(result, float)
+    assert result == 24.0
+    assert result.recommended_output_gain_db == 30.0
+    assert result.clamped is True
 
 
 def test_engine_ready_accepts_prepare_reply_for_the_same_session(tmp_path, monkeypatch):

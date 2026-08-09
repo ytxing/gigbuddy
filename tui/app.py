@@ -2552,7 +2552,11 @@ class GigBuddyApp(App):
             # Serialize the request so a concurrent mutation cannot replace
             # the reply before this worker consumes it.
             with self._managed_transaction_lock:
-                value = live.request_output_calibration(index)
+                result = live.request_output_calibration(index)
+                value = float(result)
+                recommended = float(
+                    getattr(result, "recommended_output_gain_db", value))
+                clamped = bool(getattr(result, "clamped", False))
         except Exception as exc:
             try:
                 self.call_from_thread(
@@ -2563,7 +2567,7 @@ class GigBuddyApp(App):
         try:
             self.call_from_thread(
                 self._apply_slot_calibration, generation, index,
-                expected_path, value)
+                expected_path, value, clamped, recommended)
         except Exception:
             pass
 
@@ -2573,7 +2577,10 @@ class GigBuddyApp(App):
         self.notify(f"Calibration failed: {error}", severity="error")
 
     def _apply_slot_calibration(self, generation: int, index: int,
-                                expected_path: str, value: float) -> None:
+                                expected_path: str, value: float,
+                                clamped: bool = False,
+                                recommended_output_gain_db: float | None = None
+                                ) -> None:
         if generation != self._calibration_generation:
             return
         panel = self.query_one(ChainPanel)
@@ -2586,9 +2593,21 @@ class GigBuddyApp(App):
             self.notify("Calibration discarded: Slot changed while waiting",
                         severity="warning")
             return
+        note = f"Calibrated Slot {index + 1:02d} output to {value:+.1f} dB"
+        recommended = value
+        if clamped:
+            recommended = (value if recommended_output_gain_db is None
+                           else recommended_output_gain_db)
+            note += f" (clamped from {recommended:+.1f} dB)"
         if abs(snapshot.output_gain_db - value) < 0.005:
-            self.notify(f"Slot {index + 1:02d} output is already calibrated")
+            if clamped:
+                self.notify(
+                    f"Slot {index + 1:02d} output is already {value:+.1f} dB "
+                    f"(clamped from {recommended:+.1f} dB)")
+            else:
+                self.notify(f"Slot {index + 1:02d} output is already calibrated")
             return
+
         def apply_calibration(state: ChainState):
             try:
                 current = state.slot(index)
@@ -2600,7 +2619,7 @@ class GigBuddyApp(App):
 
         self._commit_slot_mutation(
             apply_calibration,
-            f"Calibrated Slot {index + 1:02d} output to {value:+.1f} dB",
+            note,
             failure_note="Calibration discarded: Slot changed while waiting")
 
     def on_add_slot_button_requested(self, _event) -> None:

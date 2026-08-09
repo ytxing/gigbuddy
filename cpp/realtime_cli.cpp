@@ -1640,6 +1640,11 @@ int main(int argc, char** argv) {
                                                  recommendation));
                                     response["status"] = "calibrated";
                                     response["output_gain_db"] = bounded;
+                                    response["recommended_output_gain_db"] =
+                                        recommendation;
+                                    response["clamped"] =
+                                        recommendation < SLOT_GAIN_MIN_DB
+                                        || recommendation > SLOT_GAIN_MAX_DB;
                                     response.erase("error");
                                 }
                             }

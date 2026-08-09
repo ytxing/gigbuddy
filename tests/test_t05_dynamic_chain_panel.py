@@ -273,6 +273,37 @@ def test_managed_calibration_eventually_updates_slot_output(monkeypatch,
     asyncio.run(scenario())
 
 
+def test_calibration_notice_explains_backend_clamp(monkeypatch, tmp_path):
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel
+
+    _patch_managed_runtime(monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.1)
+            panel = app.query_one(ChainPanel)
+            path = panel.state.slot(1).path
+            notes = []
+
+            def capture(_mutation, note, **_kwargs):
+                notes.append(note)
+                return True
+
+            monkeypatch.setattr(app, "_commit_slot_mutation", capture)
+            app._calibration_generation = 1
+            app._apply_slot_calibration(
+                1, 1, path, 24.0, True, 30.0)
+
+            assert notes == [
+                "Calibrated Slot 02 output to +24.0 dB "
+                "(clamped from +30.0 dB)"
+            ]
+
+    asyncio.run(scenario())
+
+
 def test_managed_gain_and_master_bumps_do_not_block_ui(monkeypatch, tmp_path):
     from tui.app import GigBuddyApp
     from tui.panels import ChainPanel

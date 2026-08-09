@@ -32,6 +32,22 @@ DRY_INPUTS_DIR = ROOT / "data" / "dry_inputs"
 # 干声输入源（live_chain.json 的 input 键）的播放状态常量（与引擎协议一致）
 PLAY_STOPPED, PLAY_PLAYING, PLAY_PAUSED = "stopped", "playing", "paused"
 
+
+class OutputCalibrationResult(float):
+    """Float-compatible CAL result with optional backend recommendation data."""
+
+    recommended_output_gain_db: float
+    clamped: bool
+
+    def __new__(cls, output_gain_db: float, *,
+                recommended_output_gain_db: float,
+                clamped: bool):
+        result = float.__new__(cls, output_gain_db)
+        result.recommended_output_gain_db = float(recommended_output_gain_db)
+        result.clamped = bool(clamped)
+        return result
+
+
 # Chain parameter defaults are part of the live protocol.  UI reset actions,
 # missing-key fallbacks, and preset-facing views must all use the same values.
 CHAIN_PARAMETER_DEFAULTS = {
@@ -298,7 +314,8 @@ def request_runtime_prepare(chain: dict, transaction_id: str, *,
 
 
 def request_output_calibration(slot_index: int, *, timeout: float = 2.0,
-                               poll_interval: float = 0.02) -> float:
+                               poll_interval: float = 0.02
+                               ) -> OutputCalibrationResult:
     """Ask the managed engine for one active NAM Slot's output trim."""
     if isinstance(slot_index, bool) or not isinstance(slot_index, int):
         raise ValueError("Slot calibration requires an integer index")
@@ -332,7 +349,20 @@ def request_output_calibration(slot_index: int, *, timeout: float = 2.0,
                         or not chain_protocol.SLOT_GAIN_MIN_DB <= value
                         <= chain_protocol.SLOT_GAIN_MAX_DB):
                     raise RuntimeError("engine returned an invalid output recommendation")
-                return float(value)
+                recommended = response.get("recommended_output_gain_db", value)
+                if (isinstance(recommended, bool)
+                        or not isinstance(recommended, (int, float))
+                        or not math.isfinite(recommended)):
+                    raise RuntimeError(
+                        "engine returned invalid calibration metadata")
+                clamped = response.get("clamped", False)
+                if not isinstance(clamped, bool):
+                    raise RuntimeError(
+                        "engine returned invalid calibration metadata")
+                return OutputCalibrationResult(
+                    float(value),
+                    recommended_output_gain_db=float(recommended),
+                    clamped=clamped)
             if response.get("status") == "rejected":
                 raise RuntimeError(
                     f"output calibration failed: "
