@@ -51,6 +51,135 @@ LEGACY_ANON_KEY = os.environ.get(
     "Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU")
 DEFAULT_CLIENT_ID = "t3k_pub_JYKns9gy0ua38l1n9eICrPVn_P6jeAYG"
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/oauth/callback"
+
+# OAuth callback 成功页。字符画为 dos_rebel 字体的 GIGBUDDY，每行固定 96
+# 字符（含行尾空格），行尾空格是右缘对齐的一部分，切勿删除；行内 ▒ 为
+# U+2592 中等阴影块。字体本身是斜体设计（rebel = 倾斜），左缘逐行内缩属
+# 正常特征，不是错位。
+_CALLBACK_ART = [
+    "   █████████  █████   █████████  ███████████  █████  █████ ██████████   ██████████   █████ █████",
+    "  ███▒▒▒▒▒███▒▒███   ███▒▒▒▒▒███▒▒███▒▒▒▒▒███▒▒███  ▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███ ▒▒███ ",
+    " ███     ▒▒▒  ▒███  ███     ▒▒▒  ▒███    ▒███ ▒███   ▒███  ▒███   ▒▒███ ▒███   ▒▒███ ▒▒███ ███  ",
+    "▒███          ▒███ ▒███          ▒██████████  ▒███   ▒███  ▒███    ▒███ ▒███    ▒███  ▒▒█████   ",
+    "▒███    █████ ▒███ ▒███    █████ ▒███▒▒▒▒▒███ ▒███   ▒███  ▒███    ▒███ ▒███    ▒███   ▒▒███    ",
+    "▒▒███  ▒▒███  ▒███ ▒▒███  ▒▒███  ▒███    ▒███ ▒███   ▒███  ▒███    ███  ▒███    ███     ▒███    ",
+    " ▒▒█████████  █████ ▒▒█████████  ███████████  ▒▒████████   ██████████   ██████████      █████   ",
+    "  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒      ▒▒▒▒▒    ",
+]
+
+# Normal text is intentional here: the browser's font fallback can corrupt
+# box-drawing glyphs, while these messages must remain readable everywhere.
+_CALLBACK_MESSAGES = (
+    "Login successful",
+    "You can return to GigBuddy now.",
+)
+
+_TONE3000_LOGO_SVG = (
+    Path(__file__).with_name("tone3000_logo.svg")
+    .read_text(encoding="utf-8")
+    .strip()
+)
+
+_CALLBACK_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GigBuddy - Login</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root { color-scheme: dark; }
+  html { min-height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #3d2e1f, transparent 60%),
+      #1b1512;
+    color: #f0e2cc;
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+    min-height: 100svh; display: flex; align-items: center;
+    justify-content: center; text-align: center; padding: 24px 20px;
+    overflow-x: hidden;
+  }
+  .callback-content {
+    width: 100%; display: flex; flex-direction: column; align-items: center;
+    gap: clamp(12px, 2.5vh, 22px);
+  }
+  .powered-by {
+    display: flex; align-items: center; justify-content: center;
+    gap: 10px; color: #c9b18b; font-size: clamp(11px, 1.2vw, 14px);
+    line-height: 1; font-weight: 600; letter-spacing: 0;
+    opacity: 0.82;
+  }
+  .powered-by svg {
+    display: block; width: min(210px, 38vw); height: auto;
+  }
+  .logo-viewport {
+    width: 100%; overflow-x: auto; overflow-y: hidden;
+    display: flex; justify-content: safe center;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(245, 176, 66, 0.45) transparent;
+  }
+  .logo-viewport { padding: 0 10px; }
+  pre {
+    font-family: "Menlo", "SF Mono", Consolas, "Liberation Mono", monospace;
+    white-space: pre; font-variant-ligatures: none;
+  }
+  pre.logo {
+    /* 等宽字体保证 █▒ 方块字符对齐 */
+    /* 96 字符按视口自适应缩放，避免窄窗口横向溢出；
+       等宽字体字符实际宽约 0.59em，按 58 折算取整 */
+    font-size: clamp(10px, calc((100vw - 80px) / 58), 22px);
+    line-height: 1.15; font-weight: bold;
+    /* 多段金渐变背景横向流动 = 波浪效果 */
+    background: linear-gradient(90deg,
+      #8f6b46, #f5b042, #e59a3c, #f5b042, #8f6b46, #f5b042, #8f6b46);
+    background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 6px 24px rgba(229, 154, 60, 0.35));
+    animation: wave 5s linear infinite;
+    flex: 0 0 auto; width: max-content;
+  }
+  @keyframes wave {
+    from { background-position: 0% 0; }
+    to   { background-position: 300% 0; }
+  }
+  .logo-viewport::-webkit-scrollbar {
+    height: 5px;
+  }
+  .logo-viewport::-webkit-scrollbar-thumb {
+    background: rgba(245, 176, 66, 0.45); border-radius: 5px;
+  }
+  .success-copy {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    color: #d6bf98; font-size: clamp(14px, 1.8vw, 18px);
+    line-height: 1.35; font-weight: 600; letter-spacing: 0;
+    text-shadow: 0 3px 18px rgba(229, 154, 60, 0.2);
+  }
+  .success-copy p { margin: 0; }
+  @media (max-height: 620px) {
+    body { justify-content: flex-start; overflow-y: auto; }
+    .callback-content { margin-block: auto; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    pre.logo { animation: none; }
+  }
+</style>
+</head>
+<body>
+<main class="callback-content">
+<div class="powered-by" role="img" aria-label="Powered by TONE3000">
+<span>Powered by</span>
+""" + _TONE3000_LOGO_SVG + """
+</div>
+<div class="logo-viewport">
+<pre class="logo" role="img" aria-label="GigBuddy">""" + "\n".join(_CALLBACK_ART) + """</pre>
+</div>
+<div class="success-copy">
+""" + "\n".join(f"<p>{message}</p>" for message in _CALLBACK_MESSAGES) + """
+</div>
+</main>
+</body>
+</html>
+"""
 TOKEN_FILE = Path.home() / ".config" / "gigbuddy" / "tone3000_tokens.json"
 _MIN_REQUEST_INTERVAL = 0.6  # documented default: 100 requests per minute
 _last_request_at = 0.0
@@ -241,8 +370,7 @@ def login(*, timeout: float = 300, open_browser: bool = True,
             self.send_response(200 if "code" in result else 400)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(
-                b"<html><body>You can return to GigBuddy now.</body></html>")
+            self.wfile.write(_CALLBACK_PAGE.encode("utf-8"))
 
         def log_message(self, *_args):
             return
