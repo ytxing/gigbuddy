@@ -1588,7 +1588,7 @@ class ChainSlotRow(Horizontal):
 
 
 class ChainSlotAction(Static):
-    """Fixed-width model-switch action cell beside one Slot."""
+    """Fixed-width Slot-move action cell beside one Slot."""
 
     ALLOW_SELECT = False
 
@@ -1603,7 +1603,7 @@ class ChainSlotAction(Static):
     def on_click(self, event: MouseEvent) -> None:
         self.slot.focus()
         self.slot.post_message(
-            ChainSlotWidget.SwitchRequested(self.slot.index, self.direction))
+            ChainSlotWidget.MoveRequested(self.slot.index, self.direction))
         event.stop()
 
 

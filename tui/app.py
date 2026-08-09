@@ -10,9 +10,11 @@ Run: .venv/bin/python -m tui            (spawns the realtime engine automaticall
 import argparse
 import asyncio
 from copy import deepcopy
+from dataclasses import dataclass
 from functools import partial
 import hashlib
 import json
+from queue import Empty, Queue
 import re
 import subprocess
 import sys
@@ -91,6 +93,16 @@ def _preset_mutation_key(preset_id: object, name: object = None) -> str | None:
 
 class _ManagedNoOp(Exception):
     """Internal signal for a transactional mutation that made no change."""
+
+
+@dataclass(frozen=True)
+class _ManagedChainJob:
+    """One ordered managed mutation executed away from the Textual loop."""
+
+    mutation: Callable[[ChainState], object]
+    note: str
+    failure_note: str | None = None
+    on_success: Callable[[dict, int | None], None] | None = None
 
 
 class _ManagedChainAdapter:
@@ -1050,6 +1062,14 @@ class GigBuddyApp(App):
             int, str, float, bool, bool] | None = None
         self._param_hold_worker_active = False
         self._param_hold_last_commit_at = 0.0
+        # All managed chain writes share one file/runtime critical section.
+        # Slot actions and single-step parameters use the queue below; the
+        # existing coalesced hold worker enters the same lock.
+        self._managed_transaction_lock = threading.Lock()
+        self._managed_writer_queue: Queue[_ManagedChainJob | None] = Queue()
+        self._managed_writer_thread: threading.Thread | None = None
+        self._managed_writer_lock = threading.Lock()
+        self._managed_writer_stopping = False
         self._calibration_generation = 0
         for guitar_theme in GUITAR_AMP_THEMES:
             self.register_theme(guitar_theme)
@@ -1367,6 +1387,119 @@ class GigBuddyApp(App):
             and self._engine.poll() is None
         )
 
+    def _enqueue_managed_mutation(
+            self, mutation: Callable[[ChainState], object], note: str, *,
+            failure_note: str | None = None,
+            on_success: Callable[[dict, int | None], None] | None = None,
+    ) -> bool:
+        """Queue one managed mutation without blocking Textual's event loop."""
+        if not self._managed_engine_active():
+            return False
+        job = _ManagedChainJob(
+            mutation=mutation,
+            note=note,
+            failure_note=failure_note,
+            on_success=on_success,
+        )
+        with self._managed_writer_lock:
+            if self._managed_writer_stopping:
+                return False
+            thread = self._managed_writer_thread
+            if thread is None or not thread.is_alive():
+                thread = threading.Thread(
+                    target=self._drain_managed_mutations,
+                    name="managed-chain-writer", daemon=True)
+                self._managed_writer_thread = thread
+                thread.start()
+            self._managed_writer_queue.put(job)
+        return True
+
+    def _drain_managed_mutations(self) -> None:
+        """Serialize managed file/runtime transactions on a background thread."""
+        while True:
+            job = self._managed_writer_queue.get()
+            if job is None:
+                return
+            with self._managed_writer_lock:
+                if self._managed_writer_stopping:
+                    continue
+            try:
+                if not self._managed_engine_active():
+                    raise RuntimeError("managed engine is no longer active")
+                # Read the latest file for every job. This preserves ordered
+                # clicks even while the UI callback for the previous job is
+                # waiting in Textual's message queue.
+                with self._managed_transaction_lock:
+                    base_chain, _ = live.read_chain_snapshot()
+                    state = ChainState(base_chain)
+
+                    def transactional_mutation(draft: ChainState):
+                        result = job.mutation(draft)
+                        if result is False:
+                            raise _ManagedNoOp
+                        return result
+
+                    persisted = state.commit(
+                        _ManagedChainAdapter(
+                            self, expected_chain=base_chain),
+                        transactional_mutation)
+                    target_index = state.target_index
+            except _ManagedNoOp:
+                self._dispatch_managed_writer_callback(
+                    self._managed_job_failed, job,
+                    job.failure_note or job.note)
+            except Exception as exc:
+                self._dispatch_managed_writer_callback(
+                    self._managed_job_failed, job,
+                    f"Chain unchanged: {exc}")
+            else:
+                self._dispatch_managed_writer_callback(
+                    self._managed_job_succeeded, job, persisted, target_index)
+
+    def _dispatch_managed_writer_callback(self, callback, *args) -> None:
+        try:
+            self.call_from_thread(callback, *args)
+        except Exception:
+            # The app may be unmounting while an in-flight runtime transaction
+            # finishes. The file transaction is already complete; no widget
+            # callback is safe after the Textual message pump is gone.
+            pass
+
+    def _managed_job_succeeded(self, job: _ManagedChainJob,
+                               persisted: dict,
+                               target_index: int | None) -> None:
+        if not getattr(self, "is_mounted", False):
+            return
+        try:
+            panel = self.query_one(ChainPanel)
+            # A poll may have observed the file before this callback. Applying
+            # the candidate first keeps the callback correct in both orders.
+            panel.state.apply_candidate(persisted)
+            if target_index is not None and target_index < panel.state.slot_count:
+                panel.state.focus_slot(target_index)
+            committed = self._publish_chain_write(persisted)
+            if job.on_success is not None:
+                job.on_success(committed, target_index)
+            if job.note:
+                self.notify(job.note)
+        except Exception as exc:
+            self.notify(f"Chain changed but UI refresh failed: {exc}",
+                        severity="error")
+
+    def _managed_job_failed(self, job: _ManagedChainJob, message: str) -> None:
+        if not getattr(self, "is_mounted", False):
+            return
+        try:
+            current = live.read_chain()
+            if current:
+                self._publish_chain_write(current)
+        except Exception:
+            pass
+        if not message:
+            return
+        self.notify(message, severity="warning" if message == job.failure_note
+                    else "error")
+
     def _start_engine(self) -> None:
         """Spawn realtime_cli as a child; it hot-swaps via live_chain.json and feeds
         level.json back. Killed on TUI exit. Use --no-engine if running it externally."""
@@ -1415,6 +1548,14 @@ class GigBuddyApp(App):
             # touching widgets after the app has been unmounted.
             self._param_hold_generation += 1
             self._param_hold_pending = None
+        with self._managed_writer_lock:
+            self._managed_writer_stopping = True
+            while True:
+                try:
+                    self._managed_writer_queue.get_nowait()
+                except Empty:
+                    break
+            self._managed_writer_queue.put(None)
         self._calibration_generation += 1
         if self._header_status_timer is not None:
             self._header_status_timer.stop()
@@ -1658,14 +1799,15 @@ class GigBuddyApp(App):
             panel = None
         if (panel is not None and not panel._legacy_mode
                 and self._managed_engine_active()):
-            adapter = _ManagedChainAdapter(
-                self, expected_chain=panel.state.to_chain())
             try:
-                committed = panel.state.commit(
-                    adapter,
-                    lambda draft: draft.apply_candidate(cfg),
-                )
-                return self._publish_chain_write(committed)
+                with self._managed_transaction_lock:
+                    adapter = _ManagedChainAdapter(
+                        self, expected_chain=panel.state.to_chain())
+                    committed = panel.state.commit(
+                        adapter,
+                        lambda draft: draft.apply_candidate(cfg),
+                    )
+                    return self._publish_chain_write(committed)
             except Exception as exc:
                 self.notify(f"Chain unchanged: {exc}", severity="error")
                 return None
@@ -1683,8 +1825,34 @@ class GigBuddyApp(App):
             return None
 
     def _bump(self, key: str, delta: float) -> None:
+        ranges = {
+            "gain": (0.0, 10.0),
+            "master": (0.0, 10.0),
+            "quality": (0.0, 1.0),
+        }
+        if key not in ranges:
+            self.notify(f"Unknown chain parameter: {key}", severity="warning")
+            return
+        if self._managed_engine_active():
+            def mutation(state: ChainState):
+                cfg = state.to_chain()
+                previous = float(cfg.get(
+                    key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+                lo, hi = ranges[key]
+                value = round(max(lo, min(hi, previous + delta)), 2)
+                if value == previous:
+                    return False
+                cfg[key] = value
+                return state.apply_candidate(cfg)
+
+            self._enqueue_managed_mutation(
+                mutation, "",
+                on_success=lambda persisted, _target: self._publish_mutation(
+                    "chain-param", (f"chain:{key}",),
+                    persisted.get("revision")),
+            )
+            return
         cfg = live.read_chain()
-        ranges = {"gain": (0.0, 10.0), "master": (0.0, 10.0)}
         lo, hi = ranges[key]
         previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
         value = previous + delta
@@ -1702,9 +1870,26 @@ class GigBuddyApp(App):
 
         quality 仍按 0..1 钳制（SlimmableContainer 子模型尺寸）。
         """
-        cfg = live.read_chain()
         lo, hi = (0.0, 1.0) if key == "quality" else (0.0, 10.0)
         value = max(lo, min(hi, value))
+        if self._managed_engine_active():
+            def mutation(state: ChainState):
+                cfg = state.to_chain()
+                previous = float(cfg.get(
+                    key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+                if round(value, 2) == previous:
+                    return False
+                cfg[key] = round(value, 2)
+                return state.apply_candidate(cfg)
+
+            self._enqueue_managed_mutation(
+                mutation, "",
+                on_success=lambda persisted, _target: self._publish_mutation(
+                    "chain-param", (f"chain:{key}",),
+                    persisted.get("revision")),
+            )
+            return
+        cfg = live.read_chain()
         previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
         value = round(value, 2)
         if value == previous:
@@ -1824,31 +2009,33 @@ class GigBuddyApp(App):
 
     def _commit_chain_param_hold(self, key: str, value: float) -> dict | None:
         """Commit one absolute parameter value from the hold worker."""
-        base_chain, base_fingerprint = live.read_chain_snapshot()
-        cfg = dict(base_chain)
-        lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
-        value = round(max(lo, min(hi, value)), 2)
-        previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
-        if value == previous:
-            return None
-        cfg[key] = value
-        if self._managed_engine_active():
-            # The adapter's expected chain is the file state read before the
-            # candidate edit. Passing the already-mutated cfg makes its CAS
-            # check reject every managed mouse commit as a false conflict.
-            state = ChainState(base_chain)
-            return state.commit(
-                _ManagedChainAdapter(self, expected_chain=base_chain),
-                lambda draft: draft.apply_candidate(cfg),
+        with self._managed_transaction_lock:
+            base_chain, base_fingerprint = live.read_chain_snapshot()
+            cfg = dict(base_chain)
+            lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
+            value = round(max(lo, min(hi, value)), 2)
+            previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+            if value == previous:
+                return None
+            cfg[key] = value
+            if self._managed_engine_active():
+                # The adapter's expected chain is the file state read before
+                # the candidate edit. Passing the already-mutated cfg makes
+                # its CAS check reject every managed mouse commit as a false
+                # conflict.
+                state = ChainState(base_chain)
+                return state.commit(
+                    _ManagedChainAdapter(self, expected_chain=base_chain),
+                    lambda draft: draft.apply_candidate(cfg),
+                )
+            persisted = live.write_chain(
+                cfg,
+                expected_fingerprint=base_fingerprint,
+                expected_revision=base_chain.get("revision", 0),
             )
-        persisted = live.write_chain(
-            cfg,
-            expected_fingerprint=base_fingerprint,
-            expected_revision=base_chain.get("revision", 0),
-        )
-        if isinstance(persisted, dict):
-            return persisted
-        return live.read_chain() or cfg
+            if isinstance(persisted, dict):
+                return persisted
+            return live.read_chain() or cfg
 
     def _param_hold_committed(self, generation: int, key: str,
                               value: float, final: bool,
@@ -1899,18 +2086,7 @@ class GigBuddyApp(App):
 
         1.0 = full precision (default), lower = lighter CPU. A1 models ignore it.
         """
-        cfg = live.read_chain()
-        previous = float(cfg.get(
-            "quality", live.CHAIN_PARAMETER_DEFAULTS["quality"]))
-        q = round(previous + delta, 2)
-        cfg["quality"] = max(0.0, min(1.0, q))
-        if cfg["quality"] == previous:
-            return
-        persisted = self._commit_external_chain(cfg)
-        if persisted is None:
-            return
-        self._publish_mutation(
-            "chain-param", ("chain:quality",), persisted.get("revision"))
+        self._bump("quality", delta)
 
     def action_focus_search(self) -> None:
         focused = self.focused
@@ -2180,6 +2356,26 @@ class GigBuddyApp(App):
         if slot is not None:
             slot.focus()
 
+    def _publish_slot_commit(self, persisted: dict,
+                             focus_index: int | None, note: str) -> None:
+        """Publish one completed Slot transaction on the UI thread."""
+        panel = self.query_one(ChainPanel)
+        detail = self.query_one(DetailPane)
+        keep_pack_focus = detail._pack_mode and detail._pack_origin != "slot"
+        if detail._pack_slot_index is not None:
+            detail.refresh_pack_active(persisted)
+        if not panel.state.slot_count:
+            detail.clear()
+        if focus_index is not None and not keep_pack_focus:
+            self.call_after_refresh(
+                lambda index=focus_index: self._focus_slot(index))
+        self._publish_mutation(
+            "slot",
+            (f"slot:{focus_index}" if focus_index is not None else "chain",),
+            persisted.get("revision"),
+        )
+        self.notify(note)
+
     def _commit_slot_mutation(self, mutation, note: str,
                               *, failure_note: str | None = None) -> bool:
         """Apply one ordered-Slot mutation and publish the canonical chain.
@@ -2195,41 +2391,32 @@ class GigBuddyApp(App):
             return False
         state = panel.state
         if self._managed_engine_active():
-            def transactional_mutation(draft):
-                result = mutation(draft)
-                if result is False:
-                    raise _ManagedNoOp
-                return result
+            queued = self._enqueue_managed_mutation(
+                mutation, "", failure_note=failure_note or note,
+                on_success=lambda persisted, focus_index: (
+                    self._publish_slot_commit(
+                        persisted, focus_index, note)))
+            if not queued:
+                self.notify("Managed engine is no longer active",
+                            severity="error")
+            return queued
 
-            try:
-                persisted = state.commit(
-                    _ManagedChainAdapter(
-                        self, expected_chain=state.to_chain()),
-                    transactional_mutation)
-            except _ManagedNoOp:
-                self.notify(failure_note or note, severity="warning")
-                return False
-            except Exception as exc:
-                self.notify(f"Chain unchanged: {exc}", severity="error")
-                return False
-            focus_index = state.target_index
-        else:
-            before = state.checkpoint()
-            try:
-                result = mutation(state)
-            except ChainStateError as exc:
-                self.notify(str(exc), severity="warning")
-                return False
-            if result is False:
-                self.notify(failure_note or note, severity="warning")
-                return False
-            focus_index = state.target_index
-            candidate = state.to_chain()
-            persisted = self._commit_external_chain(candidate)
-            if persisted is None:
-                state.restore_checkpoint(before)
-                panel.chain = state.to_chain()
-                return False
+        before = state.checkpoint()
+        try:
+            result = mutation(state)
+        except ChainStateError as exc:
+            self.notify(str(exc), severity="warning")
+            return False
+        if result is False:
+            self.notify(failure_note or note, severity="warning")
+            return False
+        focus_index = state.target_index
+        candidate = state.to_chain()
+        persisted = self._commit_external_chain(candidate)
+        if persisted is None:
+            state.restore_checkpoint(before)
+            panel.chain = state.to_chain()
+            return False
         try:
             state.mark_managed_write(
                 live.last_chain_write_fingerprint(),
@@ -2264,10 +2451,12 @@ class GigBuddyApp(App):
     def _add_slot(self) -> None:
         panel = self.query_one(ChainPanel)
         index = panel.state.slot_count
+        managed = self._managed_engine_active()
         if self._commit_slot_mutation(
                 lambda state: state.add_slot(),
                 f"Added Slot {index + 1:02d}"):
-            self._focus_slot(index)
+            if not managed:
+                self._focus_slot(index)
 
     def _delete_slot(self, index: int) -> None:
         panel = self.query_one(ChainPanel)
@@ -2395,9 +2584,19 @@ class GigBuddyApp(App):
         if abs(snapshot.output_gain_db - value) < 0.005:
             self.notify(f"Slot {index + 1:02d} output is already calibrated")
             return
+        def apply_calibration(state: ChainState):
+            try:
+                current = state.slot(index)
+            except ChainStateError:
+                return False
+            if current.path != expected_path:
+                return False
+            return state.set_slot_gain(index, "output_gain_db", value)
+
         self._commit_slot_mutation(
-            lambda state: state.set_slot_gain(index, "output_gain_db", value),
-            f"Calibrated Slot {index + 1:02d} output to {value:+.1f} dB")
+            apply_calibration,
+            f"Calibrated Slot {index + 1:02d} output to {value:+.1f} dB",
+            failure_note="Calibration discarded: Slot changed while waiting")
 
     def on_add_slot_button_requested(self, _event) -> None:
         self._add_slot()

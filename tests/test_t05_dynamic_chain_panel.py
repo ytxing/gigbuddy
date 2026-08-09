@@ -8,17 +8,24 @@ the old fixed AMP/CAB widgets from becoming the v0.2 oracle.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from types import SimpleNamespace
+import time
 from pathlib import Path
 
 import pytest
 
 from tui.chain_state import (
+    CommitReceipt,
     MAX_SLOTS,
     ChainState,
     ChainStateError,
+    PreparedCommit,
     SlotStatus,
 )
+from tui import live
 from tui.live import CHAIN_PARAMETER_DEFAULTS
+from tui.panels import ChainSlotAction, ChainSlotWidget
 
 
 def _chain(paths: list[str | None], **overrides: object) -> dict:
@@ -145,6 +152,150 @@ def test_reorder_swaps_adjacent_rows_and_noops_at_edges():
     assert state.move_slot(2, 1) is False
     with pytest.raises(ChainStateError, match="direction"):
         state.move_slot(1, 0)
+
+
+def test_slot_move_arrow_posts_reorder_message_not_model_switch():
+    state = ChainState(_chain(["a.nam", "b.nam"]))
+    slot = ChainSlotWidget(1, state.slot(1))
+    messages = []
+    slot.focus = lambda: None
+    slot.post_message = messages.append
+
+    action = ChainSlotAction(slot, -1)
+    action.on_click(SimpleNamespace(stop=lambda: None))
+
+    assert len(messages) == 1
+    assert isinstance(messages[0], ChainSlotWidget.MoveRequested)
+    assert messages[0].index == 1
+    assert messages[0].direction == -1
+
+
+def _patch_managed_runtime(monkeypatch, tmp_path):
+    """Give managed UI tests a private file/runtime boundary."""
+    chain_file = tmp_path / "live_chain.json"
+    level_file = tmp_path / "level.json"
+    control_file = tmp_path / "live_control.json"
+    control_reply_file = tmp_path / "live_control.reply.json"
+    for name, value in (
+            ("CHAIN_FILE", chain_file), ("LEVEL_FILE", level_file),
+            ("CONTROL_FILE", control_file),
+            ("CONTROL_REPLY_FILE", control_reply_file)):
+        monkeypatch.setattr(live, name, value)
+    live._chain_cache.clear()
+    model_paths = sorted(live.TONES_DIR.rglob("*.nam"))[:2]
+    assert len(model_paths) == 2
+    chain = _chain([str(path) for path in model_paths], revision=1)
+    live.write_chain(chain, revision=1)
+
+    class SlowAdapter:
+        def __init__(self, _app, *, expected_chain=None):
+            self._base_fingerprint = live.chain_file_fingerprint()
+            self._base_revision = expected_chain.get("revision", 0)
+
+        def snapshot_runtime(self):
+            return ({}, None)
+
+        def prepare(self, candidate):
+            time.sleep(0.15)
+            prepared = deepcopy(candidate)
+            prepared["revision"] = int(candidate["revision"]) + 1
+            return PreparedCommit(
+                prepared, {}, int(prepared["revision"]))
+
+        def write_file(self, candidate):
+            persisted = live.write_chain(
+                candidate,
+                expected_fingerprint=self._base_fingerprint,
+                expected_revision=self._base_revision,
+                revision=candidate["revision"],
+            )
+            return CommitReceipt(
+                live.chain_file_fingerprint(), persisted["revision"])
+
+        def apply_runtime(self, _prepared):
+            return None
+
+        def restore_file(self, _chain):
+            return None
+
+        def restore_runtime(self, _snapshot):
+            return None
+
+    monkeypatch.setattr("tui.app._ManagedChainAdapter", SlowAdapter)
+
+
+def test_managed_move_does_not_block_ui_and_publishes_after_worker(
+        monkeypatch, tmp_path):
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel
+
+    _patch_managed_runtime(monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        app._managed_engine_active = lambda: True
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.1)
+            panel = app.query_one(ChainPanel)
+            before = [slot.path for slot in panel.state.slots]
+            started = time.perf_counter()
+            app._move_slot(1, -1)
+            elapsed = time.perf_counter() - started
+
+            assert elapsed < 0.05
+            await pilot.pause(0.35)
+            assert [slot.path for slot in panel.state.slots] == [
+                before[1], before[0]]
+            await pilot.pause(0.2)
+
+    asyncio.run(scenario())
+
+
+def test_managed_calibration_eventually_updates_slot_output(monkeypatch,
+                                                            tmp_path):
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel
+
+    _patch_managed_runtime(monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        app._managed_engine_active = lambda: True
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.1)
+            panel = app.query_one(ChainPanel)
+            path = panel.state.slot(1).path
+            app._calibration_generation = 1
+            app._apply_slot_calibration(1, 1, path, -5.875)
+            await pilot.pause(0.35)
+            assert panel.state.slot(1).output_gain_db == pytest.approx(-5.88)
+
+    asyncio.run(scenario())
+
+
+def test_managed_gain_and_master_bumps_do_not_block_ui(monkeypatch, tmp_path):
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel
+
+    _patch_managed_runtime(monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        app._managed_engine_active = lambda: True
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.1)
+            started = time.perf_counter()
+            app._bump("gain", 0.05)
+            app._bump("master", 0.05)
+            elapsed = time.perf_counter() - started
+
+            assert elapsed < 0.05
+            await pilot.pause(0.5)
+            panel = app.query_one(ChainPanel)
+            assert panel.state.chain["gain"] == pytest.approx(1.05)
+            assert panel.state.chain["master"] == pytest.approx(1.05)
+
+    asyncio.run(scenario())
 
 
 def test_active_bypass_and_empty_are_distinct_state_values():
