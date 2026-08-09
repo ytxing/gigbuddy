@@ -237,11 +237,9 @@ class LibraryTable(ClickSelectTable):
         if matched_model_ids:
             detail += " · model " + ", ".join(
                 f"#{model_id}" for model_id in matched_model_ids)
-        marker = {
-            "all": ("+ ", "bold $success"),
-            "partial": ("~ ", "bold $warning"),
-            "none": ("- ", "dim"),
-        }.get(tone.get("download_state"), ("", None))
+        marker = (
+            ("✓ ", "bold $success")
+            if tone.get("download_state") in ("all", "partial") else ("", None))
         return detail, marker[1], marker[0]
 
     def _focused_title_cell(self) -> Text | None:
@@ -473,8 +471,8 @@ class LibraryPanel(Vertical):
         table.add_column("Fav", key="favorites")
         table.add_column("Up", key="uploaded")
         table.add_column("Format", key="format", width=8)
-        table.add_column("Arch", key="arch")
         table.add_column("Files", key="files")
+        table.add_column("Arch", key="arch")
         return table
 
     @staticmethod
@@ -1896,7 +1894,7 @@ class LibraryPanel(Vertical):
             else:
                 status.content = (
                     f"{self._tone_status_hint(self._search_spec)}"
-                    " · + downloaded · ~ partial · - new")
+                    " · ✓ downloaded")
         if silent:
             return
         self._update_tone_subtitle()
@@ -2049,7 +2047,7 @@ class LibraryPanel(Vertical):
         if silent:
             return  # prefetch done: cache filled, UI chrome untouched
         status.content = (
-            f"{self._tone_status_hint(spec)} · ✓ downloaded · ◐ partial · ○ new")
+            f"{self._tone_status_hint(spec)} · ✓ downloaded")
         self._update_tone_subtitle()
         if not append and not table.row_count:
             # 空结果：没有可显示的 tone，此时才清 detail（不再是搜索瞬间）
@@ -2441,7 +2439,7 @@ class LibraryPanel(Vertical):
         if matched_model_ids:
             title = f"{title} · model #{', #'.join(str(i) for i in matched_model_ids)}"
         state = t.get("download_state")
-        marker_plain = {"all": "+ ", "partial": "~ ", "none": "- "}.get(state, "")
+        marker_plain = ("✓ " if state in ("all", "partial") else "").ljust(2)
         # 先拼完整标题（含 model 后缀）再截断，marker 宽度一并计入：
         # 总宽不超过列宽，尾部 … 与后缀不会被表格渲染裁剪掉。列宽随表格
         # 缩放自适应（LibraryTable._title_cell_limit），此处同步使用。
