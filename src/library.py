@@ -1021,6 +1021,9 @@ def preset_set_active(name: str | None) -> None:
 
 
 _PRESET_DEFAULTS = {"gain": 1.0, "master": 1.0, "quality": 1.0}
+_PRESET_SLOT_GAIN_DEFAULT_DB = 0.0
+_PRESET_SLOT_GAIN_MIN_DB = -24.0
+_PRESET_SLOT_GAIN_MAX_DB = 24.0
 
 
 def _preset_number(value: object, name: str, lower: float, upper: float) -> int | float:
@@ -1037,6 +1040,21 @@ def _preset_model_id(value: object, index: int) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"Preset Slot {index + 1:02d} model_id is invalid")
     return value
+
+
+def _preset_slot_gains(item: dict, index: int) -> dict[str, int | float]:
+    """Validate Slot trims and omit zero defaults from legacy-shaped presets."""
+    values: dict[str, int | float] = {}
+    for key in ("input_gain_db", "output_gain_db"):
+        value = _preset_number(
+            item.get(key, _PRESET_SLOT_GAIN_DEFAULT_DB),
+            f"Slot {index + 1:02d} {key}",
+            _PRESET_SLOT_GAIN_MIN_DB,
+            _PRESET_SLOT_GAIN_MAX_DB,
+        )
+        if value != _PRESET_SLOT_GAIN_DEFAULT_DB:
+            values[key] = value
+    return values
 
 
 def _preset_note_value(note: str | None) -> str:
@@ -1062,21 +1080,22 @@ def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
     if not legacy and "path" not in item:
         raise ValueError(f"Preset Slot {index + 1:02d} must contain path")
     model_id = _preset_model_id(item.get("model_id"), index)
+    gains = _preset_slot_gains(item, index)
     raw_path = item.get("path")
     if raw_path is None:
         # Bypassed slots keep the model reference with no active file: the
         # engine skips them until the user activates the slot.
         candidate = item.get("candidate")
         if candidate is not None:
-            return {"model_id": model_id, "path": None,
+            return {"model_id": model_id, "path": None, **gains,
                     "candidate": _preset_storage_path(candidate),
                     "bypass": True}
         if model_id is not None and not legacy and not item.get("bypass"):
             raise ValueError(
                 f"Preset Slot {index + 1:02d} cannot have model_id without path")
-        return {"model_id": model_id, "path": None,
+        return {"model_id": model_id, "path": None, **gains,
                 **({"bypass": True} if item.get("bypass") else {})}
-    return {"model_id": model_id,
+    return {"model_id": model_id, **gains,
             "path": _preset_storage_path(raw_path, index)}
 
 
@@ -1165,7 +1184,10 @@ def _live_preset_chain(cfg: dict) -> dict:
         if not isinstance(item, dict):
             raise ValueError(f"Live Slot {index + 1:02d} is invalid")
         path = item.get("path")
-        slots.append({"path": None if path is None else _to_abs_path(path)})
+        slots.append({
+            "path": None if path is None else _to_abs_path(path),
+            **_preset_slot_gains(item, index),
+        })
     return {
         "slots": slots,
         "gain": cfg.get("gain", _PRESET_DEFAULTS["gain"]),
@@ -1196,12 +1218,14 @@ def _preset_chain_from_live(cfg: dict) -> dict:
                 "model_id": (_model_id_for_path(candidate)
                              if candidate else None),
                 "path": None,
+                **_preset_slot_gains(item, index),
                 **({"candidate": _preset_storage_path(candidate),
                     "bypass": True} if candidate else {}),
             })
             continue
         slots.append({
             "model_id": _model_id_for_path(path),
+            **_preset_slot_gains(item, index),
             "path": _preset_storage_path(path, index),
         })
     return _canonical_preset_chain({
@@ -1480,16 +1504,27 @@ def _resolved_preset_chain(preset: dict) -> dict:
             model_id = slot.get("model_id")
             candidate = slot.get("candidate") or (
                 _model_path(model_id) if model_id is not None else None)
-            slots.append({"model_id": model_id, "path": None,
-                          **({"candidate": _preset_storage_path(candidate)}
-                             if candidate else {})})
+            slots.append({
+                "model_id": model_id,
+                "path": None,
+                **_preset_slot_gains(slot, index),
+                **({"candidate": _preset_storage_path(candidate)}
+                   if candidate else {}),
+            })
             continue
         try:
-            slots.append({"model_id": slot.get("model_id"),
-                          "path": _resolve_preset_slot(slot, index)})
+            slots.append({
+                "model_id": slot.get("model_id"),
+                **_preset_slot_gains(slot, index),
+                "path": _resolve_preset_slot(slot, index),
+            })
         except ValueError as exc:
             errors.append(str(exc))
-            slots.append({"model_id": slot.get("model_id"), "path": None})
+            slots.append({
+                "model_id": slot.get("model_id"),
+                **_preset_slot_gains(slot, index),
+                "path": None,
+            })
     if errors:
         raise ValueError(f"Preset '{preset['name']}' cannot be loaded: "
                          + "; ".join(errors))
@@ -1531,7 +1566,18 @@ def preset_is_dirty(name: str | None = None, chain: dict | None = None,
         return True
     expected_paths = [slot["path"] for slot in expected["slots"]]
     actual_paths = [slot["path"] for slot in actual["slots"]]
+    expected_gains = [
+        (slot.get("input_gain_db", _PRESET_SLOT_GAIN_DEFAULT_DB),
+         slot.get("output_gain_db", _PRESET_SLOT_GAIN_DEFAULT_DB))
+        for slot in expected["slots"]
+    ]
+    actual_gains = [
+        (slot.get("input_gain_db", _PRESET_SLOT_GAIN_DEFAULT_DB),
+         slot.get("output_gain_db", _PRESET_SLOT_GAIN_DEFAULT_DB))
+        for slot in actual["slots"]
+    ]
     return (actual_paths != expected_paths
+            or actual_gains != expected_gains
             or actual["gain"] != expected["gain"]
             or actual["master"] != expected["master"]
             or actual["quality"] != expected["quality"])
@@ -1556,9 +1602,10 @@ def preset_load_by_id(preset_id: int) -> dict | None:
     cfg: dict = {
         "slots": [
             {"path": slot["path"],
+             **_preset_slot_gains(slot, index),
              **({"candidate": slot["candidate"]}
                 if slot.get("candidate") else {})}
-            for slot in resolved["slots"]
+            for index, slot in enumerate(resolved["slots"])
         ],
         "gain": resolved["gain"],
         "master": resolved["master"],
@@ -1883,6 +1930,8 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
         def remote_ids(t: dict) -> tuple[int, str, set[int]]:
             try:
                 ms = tone3000.models(t["id"], a2_only=False)
+            except tone3000.AuthenticationRequiredError:
+                raise
             except Exception:
                 return t["id"], "partial", set()
             if model_is_ir({}, t):
@@ -2036,6 +2085,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pt = sub.add_parser("tone", help="tone library operations")
     tsub = pt.add_subparsers(dest="tone_cmd", required=True)
+    tsub.add_parser("login", help="sign in to TONE3000 in the system browser")
     pl = tsub.add_parser("list", help="list imported tones")
     pl.add_argument("--gear", choices=["amp", "amp-cab", "pedal", "outboard",
                                         "cab", "space", "experimental", "full-rig", "ir"],
@@ -2101,7 +2151,15 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     if args.cmd == "tone":
-        if args.tone_cmd == "list":
+        if args.tone_cmd == "login":
+            try:
+                tone3000.login()
+            except (tone3000.AuthenticationRequiredError,
+                    tone3000.Tone3000HTTPError, OSError, ValueError) as exc:
+                print(f"TONE3000 login failed: {exc}", file=sys.stderr)
+                return 1
+            print("TONE3000 login complete.")
+        elif args.tone_cmd == "list":
             tones = list_tones(args.gear, args.limit, args.query)
             print(json.dumps(tones, ensure_ascii=False, indent=2) if args.json else
                   (_fmt_table(tones) if tones else "No imported tones yet — `gigbuddy tone search <q>` first."))

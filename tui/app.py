@@ -646,8 +646,9 @@ class GigBuddyApp(App):
         display: none;
     }
     /* Remote download states are a persistent list legend, not a result row. */
-    #tone-login-button {
-        height: 1; min-width: 24; width: auto; margin: 0 1; padding: 0 1;
+    #tone-login-button, #creators-login-button {
+        height: auto; min-width: 24; width: auto; margin: 0 1; padding: 0 1;
+        color: $background; text-style: bold;
     }
     #tone-status {
         dock: bottom; height: 1; padding: 0 1;
@@ -2854,6 +2855,8 @@ class GigBuddyApp(App):
                 cfg = dict(current)
                 cfg["slots"] = [
                     {"path": slot.get("path"),
+                     **{key: slot[key] for key in
+                        ("input_gain_db", "output_gain_db") if key in slot},
                      **({"candidate": slot["candidate"]}
                         if slot.get("candidate") else {})}
                     for slot in resolved.get("slots", ())

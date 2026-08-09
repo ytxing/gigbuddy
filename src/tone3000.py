@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""GigBuddy TONE3000 检索层（零本地库依赖，纯 API）
+"""GigBuddy TONE3000 integration (zero local database dependencies).
 
-基于公开 Supabase anon key（JWT role=anon，设计上公开给客户端）。
-数据源: TONE3000 (原 ToneHunt)，90k+ NAM 模型。
+The integration uses TONE3000's documented OAuth 2.0 + PKCE flow and its
+authenticated ``/api/v1`` REST API.  Access and refresh tokens are kept in the
+user's config directory; no server-side secret is required for this desktop
+application.
 
 CLI:
     tone3000.py search <query>              # 关键词搜索（全部架构）
@@ -11,11 +13,14 @@ CLI:
     tone3000.py download <tone_id> <dest>   # 下载全部 A2 .nam 到目录
     tone3000.py dry <dest> [name...]        # 下载试听干音素材（MIT，mayer/brit/rollin 等）
 """
+import base64
 import json
 import hashlib
 import http.client
+import http.server
 import os
 import re
+import secrets
 import ssl
 import sys
 import tempfile
@@ -24,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from pathlib import Path, PurePosixPath
 
 
@@ -32,10 +38,24 @@ def slugify(text, maxlen=48):
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return (s[:maxlen].rstrip("-") or "tone")
 
-API = "https://api.tone3000.com/rest/v1"
-KEY = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-       "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6eWJpdW9weGtkeGJ5dG5vamRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgwODIxNjUsImV4cCI6MjA1MzY1ODE2NX0."
-       "Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU")
+TONE3000_ORIGIN = "https://www.tone3000.com"
+API = f"{TONE3000_ORIGIN}/api/v1"
+# The current REST API does not expose the public aggregate view used by the
+# library's download/favorites leaderboards. Keep this read-only compatibility
+# endpoint isolated from the OAuth-backed API above.
+LEGACY_API = "https://api.tone3000.com/rest/v1"
+LEGACY_ANON_KEY = os.environ.get(
+    "TONE3000_SUPABASE_ANON_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6eWJpdW9weGtkeGJ5dG5vamRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgwODIxNjUsImV4cCI6MjA1MzY1ODE2NX0."
+    "Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU")
+DEFAULT_CLIENT_ID = "t3k_pub_JYKns9gy0ua38l1n9eICrPVn_P6jeAYG"
+DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/oauth/callback"
+TOKEN_FILE = Path.home() / ".config" / "gigbuddy" / "tone3000_tokens.json"
+_MIN_REQUEST_INTERVAL = 0.6  # documented default: 100 requests per minute
+_last_request_at = 0.0
+_request_lock = threading.Lock()
+_token_lock = threading.RLock()
 
 ROOT = Path(__file__).resolve().parent.parent
 VERIFIED_FILE = ROOT / "data" / "verified_users.json"
@@ -49,30 +69,251 @@ BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "Chrome/126.0 Safari/537.36")
 
 
-def _canonical_tone(row: dict) -> dict:
-    """Expose TONE3000's current Tone field while keeping legacy rows usable.
+class AuthenticationRequiredError(RuntimeError):
+    """The current user must complete the TONE3000 login flow."""
 
-    The public API documents ``format`` as canonical and ``platform`` as a
-    deprecated alias.  The legacy Supabase RPCs used by this integration still
-    return ``platform``, so normalize that response at the API boundary instead
-    of making every caller know which backend generated the row.
-    """
+
+class Tone3000HTTPError(RuntimeError):
+    """An HTTP error returned by the documented TONE3000 API."""
+
+    def __init__(self, status: int, message: str = "") -> None:
+        self.status = int(status)
+        self.message = str(message or "")
+        detail = f"TONE3000 API returned HTTP {self.status}"
+        if self.message:
+            detail += f": {self.message}"
+        super().__init__(detail)
+
+
+def _client_id() -> str:
+    return os.environ.get("TONE3000_CLIENT_ID", DEFAULT_CLIENT_ID).strip()
+
+
+def _redirect_uri() -> str:
+    return os.environ.get("TONE3000_REDIRECT_URI", DEFAULT_REDIRECT_URI).strip()
+
+
+def _pkce_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def authorization_url(*, code_verifier: str, state: str,
+                      redirect_uri: str | None = None) -> str:
+    """Build the official OAuth authorization URL using S256 PKCE."""
+    params = {
+        "client_id": _client_id(),
+        "redirect_uri": redirect_uri or _redirect_uri(),
+        "response_type": "code",
+        "code_challenge": _pkce_challenge(code_verifier),
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    return f"{TONE3000_ORIGIN}/api/v1/oauth/authorize?{urllib.parse.urlencode(params)}"
+
+
+def _read_tokens() -> dict:
+    try:
+        value = json.loads(TOKEN_FILE.read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_tokens(tokens: dict) -> None:
+    """Persist OAuth tokens with a user-only file mode."""
+    with _token_lock:
+        payload = dict(tokens or {})
+        if "expires_at" not in payload:
+            try:
+                expires_in = float(payload.get("expires_in", 0))
+            except (TypeError, ValueError):
+                expires_in = 0.0
+            payload["expires_at"] = time.time() + max(expires_in, 0.0)
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            TOKEN_FILE.parent.chmod(0o700)
+        except OSError:
+            pass
+        temporary = TOKEN_FILE.with_name(f".{TOKEN_FILE.name}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n")
+        temporary.chmod(0o600)
+        temporary.replace(TOKEN_FILE)
+        TOKEN_FILE.chmod(0o600)
+
+
+def _clear_tokens() -> None:
+    """Remove unusable persisted credentials so the next request can log in."""
+    with _token_lock:
+        try:
+            TOKEN_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # A read-only config directory should not hide the actual auth error.
+            pass
+
+
+def _token_request(body: dict) -> dict:
+    request = urllib.request.Request(
+        f"{API}/oauth/token",
+        data=urllib.parse.urlencode(body).encode("ascii"),
+        headers={"Content-Type": "application/x-www-form-urlencoded",
+                 "Accept": "application/json", "User-Agent": BROWSER_UA},
+        method="POST",
+    )
+    result = _open_json(request)
+    if not isinstance(result, dict) or not result.get("access_token"):
+        raise AuthenticationRequiredError("TONE3000 token response was invalid")
+    return result
+
+
+def access_token(*, force_refresh: bool = False) -> str:
+    """Return a usable access token, refreshing it before expiry."""
+    env_token = os.environ.get("TONE3000_ACCESS_TOKEN", "").strip()
+    # An explicit environment token is an isolated credential source. Keep
+    # using it on a forced retry rather than silently switching identities to
+    # the OAuth token stored on disk.
+    if env_token:
+        return env_token
+    # Several download-state workers can discover an expired token at once.
+    # Serialize the refresh and re-read the file after waiting so only the
+    # first worker consumes the refresh token.
+    with _token_lock:
+        tokens = _read_tokens()
+        token = str(tokens.get("access_token") or "")
+        try:
+            expires_at = float(tokens.get("expires_at", 0))
+        except (TypeError, ValueError):
+            expires_at = 0.0
+        if token and not force_refresh and time.time() < expires_at - 60:
+            return token
+        refresh = str(tokens.get("refresh_token") or "")
+        if refresh:
+            try:
+                fresh = _token_request({
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": _client_id(),
+                })
+            except Tone3000HTTPError as exc:
+                if exc.status == 400 and "invalid_grant" in exc.message.casefold():
+                    _clear_tokens()
+                    raise AuthenticationRequiredError(
+                        "TONE3000 login expired; log in again.") from exc
+                raise
+            if not fresh.get("refresh_token"):
+                fresh["refresh_token"] = refresh
+            _write_tokens(fresh)
+            return str(fresh["access_token"])
+        raise AuthenticationRequiredError(
+            "TONE3000 login required; run `gigbuddy tone login`.")
+
+
+def login(*, timeout: float = 300, open_browser: bool = True,
+          redirect_uri: str | None = None) -> dict:
+    """Run the local-browser OAuth callback flow and save the resulting tokens."""
+    redirect_uri = redirect_uri or _redirect_uri()
+    parsed = urllib.parse.urlparse(redirect_uri)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+        raise ValueError("TONE3000 redirect_uri must be a local HTTP callback")
+    if parsed.path != "/oauth/callback":
+        raise ValueError("TONE3000 redirect_uri path must be /oauth/callback")
+    verifier = secrets.token_urlsafe(48)
+    state = secrets.token_urlsafe(24)
+    url = authorization_url(code_verifier=verifier, state=state,
+                            redirect_uri=redirect_uri)
+    result: dict[str, str] = {}
+
+    class CallbackHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler hook
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            returned_state = query.get("state", [""])[0]
+            if returned_state != state:
+                result["error"] = "OAuth state mismatch"
+            elif query.get("error"):
+                result["error"] = query.get(
+                    "error_description", query.get("error", ["login failed"]))[0]
+            elif query.get("code"):
+                result["code"] = query["code"][0]
+            else:
+                result["error"] = "OAuth callback did not contain a code"
+            self.send_response(200 if "code" in result else 400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body>You can return to GigBuddy now.</body></html>")
+
+        def log_message(self, *_args):
+            return
+
+    port = parsed.port or 8765
+    try:
+        server = http.server.HTTPServer((parsed.hostname, port), CallbackHandler)
+    except OSError as exc:
+        raise AuthenticationRequiredError(
+            f"Cannot listen for the TONE3000 OAuth callback at {redirect_uri}: {exc}"
+        ) from exc
+    server.timeout = min(1.0, max(float(timeout), 0.05))
+    deadline = time.monotonic() + max(float(timeout), 0.05)
+    if open_browser:
+        try:
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+        if not opened:
+            print(f"Open this URL to sign in:\n{url}")
+    try:
+        while time.monotonic() < deadline and not result:
+            server.handle_request()
+    finally:
+        server.server_close()
+    if result.get("error"):
+        raise AuthenticationRequiredError(result["error"])
+    if not result.get("code"):
+        raise AuthenticationRequiredError("TONE3000 login timed out")
+    tokens = _token_request({
+        "grant_type": "authorization_code",
+        "code": result["code"],
+        "code_verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "client_id": _client_id(),
+    })
+    _write_tokens(tokens)
+    return tokens
+
+
+def _canonical_tone(row: dict) -> dict:
+    """Normalize documented API rows to the shape used by the local library."""
     if not isinstance(row, dict):
         return row
+    user = row.get("user")
+    if isinstance(user, dict):
+        for target, source in (("user_id", "id"), ("username", "username"),
+                               ("avatar_url", "avatar_url"),
+                               ("user_url", "url")):
+            if row.get(target) in (None, "") and user.get(source) not in (None, ""):
+                row[target] = user[source]
+    if row.get("user_url") in (None, "") and row.get("username"):
+        row["user_url"] = f"{TONE3000_ORIGIN}/{row['username']}"
     if row.get("format") in (None, "") and row.get("platform") not in (None, ""):
         row["format"] = row["platform"]
-    # 标签/设备名语义上是无序集合，两条 API 路径（search RPC 聚合 vs
-    # tone_by_id 的 in 查询）返回顺序不同——统一按名称排序，让详情
-    # 异步刷新前后的顺序恒定一致。
+    if row.get("platform") in (None, "") and row.get("format") not in (None, ""):
+        row["platform"] = row["format"]
     for key in ("tags", "makes"):
         value = row.get(key)
         if isinstance(value, list):
-            row[key] = sorted(value, key=str)
+            names = []
+            for item in value:
+                name = item.get("name") if isinstance(item, dict) else item
+                if name not in (None, ""):
+                    names.append(str(name))
+            row[key] = sorted(names, key=str.casefold)
     return row
 
 
 def _canonical_tones(rows):
-    return [_canonical_tone(row) for row in (rows or [])]
+    return [_canonical_tone(row) for row in _response_rows(rows)]
 
 
 def _is_a2_model(model: dict) -> bool:
@@ -171,61 +412,216 @@ def _remember_verified(name: str) -> None:
 
 
 def _open_json(req):
-    """Read a TONE3000 API response with bounded retry for dropped TLS links."""
+    """Read JSON with bounded TLS and rate-limit retries."""
     transient = (urllib.error.URLError, ssl.SSLError, TimeoutError,
                  ConnectionResetError, http.client.IncompleteRead)
-    for attempt in range(5):
+    for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=60) as response:
                 return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < 2:
+                retry_after = (exc.headers.get("Retry-After")
+                               if exc.headers is not None else None)
+                try:
+                    if retry_after is None:
+                        raise ValueError
+                    delay = max(float(retry_after), 0.0)
+                except (TypeError, ValueError):
+                    delay = 0.5 * (2 ** attempt)
+                time.sleep(delay)
+                continue
+            try:
+                payload = json.loads(exc.read())
+            except (OSError, ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                message = (payload.get("error_description")
+                           or payload.get("error") or payload.get("message"))
+            else:
+                message = None
+            raise Tone3000HTTPError(exc.code, message or exc.reason) from exc
         except transient:
             if attempt == 2:
                 raise
             time.sleep(0.5 * (2 ** attempt))
 
 
+def _request_json(url: str, *, params: dict | None = None,
+                  method: str = "GET", body: dict | None = None,
+                  authenticated: bool = True):
+    """Issue one documented API request and retry one expired bearer token."""
+    global _last_request_at
+    query = {key: value for key, value in (params or {}).items()
+             if value not in (None, "")}
+    if query:
+        separator = "&" if "?" in url else "?"
+        url = url + separator + urllib.parse.urlencode(query)
+    encoded = None
+    headers = {"Accept": "application/json", "Content-Type": "application/json",
+               "User-Agent": BROWSER_UA}
+    if url.startswith(LEGACY_API):
+        headers.update({"apikey": LEGACY_ANON_KEY,
+                        "Authorization": f"Bearer {LEGACY_ANON_KEY}",
+                        "Content-Profile": "public"})
+    if body is not None:
+        encoded = json.dumps(body).encode("utf-8")
+    for attempt in range(2):
+        if authenticated:
+            token = access_token(force_refresh=attempt == 1)
+            headers["Authorization"] = f"Bearer {token}"
+        if _MIN_REQUEST_INTERVAL > 0:
+            with _request_lock:
+                now = time.monotonic()
+                delay = _MIN_REQUEST_INTERVAL - (now - _last_request_at)
+                if delay > 0:
+                    time.sleep(delay)
+                _last_request_at = time.monotonic()
+        request = urllib.request.Request(
+            url, data=encoded, headers=headers, method=method)
+        try:
+            return _open_json(request)
+        except Tone3000HTTPError as exc:
+            if authenticated and exc.status == 401 and attempt == 0:
+                continue
+            raise
+
+
 def _get(url, **params):
-    if params:
-        url += "?" + "&".join(f"{k}={urllib.parse.quote(str(v), safe=',.')}" for k, v in params.items())
-    req = urllib.request.Request(url, headers={
-        "apikey": KEY, "Authorization": f"Bearer {KEY}", "content-profile": "public"})
-    return _open_json(req)
+    """GET an official endpoint; retain an unauthenticated utility seam."""
+    return _request_json(
+        url, params=params, authenticated=url.startswith(API))
+
+
+def _response_rows(response) -> list[dict]:
+    """Extract rows from an official paginated response or a legacy list."""
+    if isinstance(response, list):
+        return response
+    if isinstance(response, dict):
+        rows = response.get("data")
+        if isinstance(rows, list):
+            return rows
+    return []
+
+
+def _response_object(response) -> dict | None:
+    """Extract one object from a direct or envelope-style API response."""
+    if isinstance(response, dict):
+        data = response.get("data")
+        if isinstance(data, dict):
+            return data
+        return response
+    if isinstance(response, list) and response and isinstance(response[0], dict):
+        return response[0]
+    return None
+
+
+def _canonical_creator(row: dict) -> dict:
+    """Keep the creator aggregate names used by the existing TUI."""
+    result = dict(row)
+    if result.get("public_tones_count") is None:
+        result["public_tones_count"] = result.get("tones_count") or 0
+    if result.get("public_models_count") is None:
+        result["public_models_count"] = result.get("models_count") or 0
+    return result
 
 
 def _post(url, body):
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                 headers={"apikey": KEY, "Authorization": f"Bearer {KEY}",
-                                          "content-profile": "public", "Content-Type": "application/json"},
-                                 method="POST")
-    return _open_json(req)
+    """POST helper; search bodies are translated to official REST query params."""
+    if url == f"{API}/tones/search":
+        gears = list(body.get("gear_filters") or ())
+        format_filter = "ir" if "ir" in gears else None
+        gears = [gear for gear in gears if gear != "ir"]
+        params = {
+            "query": body.get("query_term", ""),
+            "page": body.get("page_number", 1),
+            "page_size": 25,
+            "sort": body.get("order_by", "trending"),
+            "gears": "_".join(gears or ()),
+            "format": format_filter,
+            "tags": "_".join(body.get("tag_names") or ()),
+            "makes": "_".join(body.get("make_names") or ()),
+            "creators": ",".join(body.get("usernames") or ()),
+        }
+        return _get(url, **params)
+    return _request_json(url, method="POST", body=body,
+                         authenticated=url.startswith(API))
 
 
 def search(query="", page_size=50, order_by="trending", gear_filters=None,
            usernames=None, tag_names=None, make_names=None, page_number=1):
-    """search_tones_a2 RPC：关键词 + 全部架构 + 排序（trending / newest /
-    best-match / downloads-all-time，对齐 tone3000.com 官网排序；空查询即
-    trending 流）。``architecture_filter=None`` 是该 RPC 的“全部架构”值，
-    不能使用 ``"2"``，否则 A1-only 与部分 IR tone 会从所有远程表中消失。
+    """Search the official paginated tone catalog.
 
-    gear_filters: None 或合法值列表 — ["amp"] / ["cab"] / ["space"] /
-    ["amp-cab"]（TONE3000 原生 gear 值，无 "ir"）
-    usernames: 作者名列表（精确），tag_names: 标签名列表（精确），
-    make_names: 设备/Make 名列表（精确）—— 与 query 叠加过滤
+    TONE3000 currently caps one response at 25 rows. Keep the caller-facing
+    ``page_size`` contract by composing consecutive official pages here.
     """
-    return _canonical_tones(_post(f"{API}/rpc/search_tones_a2", {
-        "query_term": query, "page_number": page_number, "page_size": page_size,
-        "order_by": order_by, "tag_names": tag_names, "make_names": make_names,
-        "gear_filters": gear_filters, "is_calibrated": False, "size_filters": None,
-        "usernames": usernames, "architecture_filter": None}))
+    requested = max(0, int(page_size))
+    if requested == 0:
+        return []
+    remote_page_size = 25
+    logical_page = max(1, int(page_number))
+    start_offset = (logical_page - 1) * requested
+    first_page = start_offset // remote_page_size + 1
+    skip = start_offset % remote_page_size
+    pages = (skip + requested + remote_page_size - 1) // remote_page_size
+    rows: list[dict] = []
+    total = None
+    total_pages = None
+    for offset in range(pages):
+        response = _post(f"{API}/tones/search", {
+            # Keep these names as the adapter contract used by legacy callers;
+            # _post translates them to the documented REST query parameters.
+            "query_term": query,
+            "page_number": first_page + offset,
+            "page_size": remote_page_size,
+            "order_by": order_by,
+            "tag_names": tag_names,
+            "make_names": make_names,
+            "gear_filters": gear_filters,
+            "is_calibrated": False,
+            "size_filters": None,
+            "usernames": usernames,
+            "architecture_filter": None,
+        })
+        if isinstance(response, dict):
+            page_rows = response.get("data") or []
+            total = response.get("total", total)
+            total_pages = response.get("total_pages", total_pages)
+        else:
+            page_rows = response or []
+        if not isinstance(page_rows, list):
+            page_rows = []
+        rows.extend(page_rows)
+        if not page_rows:
+            break
+        if total_pages is not None:
+            try:
+                if first_page + offset >= int(total_pages):
+                    break
+            except (TypeError, ValueError):
+                pass
+        if len(page_rows) < remote_page_size:
+            break
+    if total is not None:
+        for row in rows:
+            if isinstance(row, dict):
+                row["total_count"] = total
+    return _canonical_tones(rows[skip:skip + requested])
 
 
 def top(limit=50):
-    """tones_counts 排行（下载/收藏）"""
-    return _canonical_tones(_get(f"{API}/tones_counts",
-                select=("id,title,gear,downloads_count,favorites_count,"
-                        "a1_models_count,a2_models_count,custom_models_count,"
-                        "irs_count,models_count,platform"),
-                order="downloads_count.desc", limit=limit))
+    """Return the public all-time downloads aggregate ordering."""
+    requested = max(0, int(limit))
+    if requested == 0:
+        return []
+    rows = _canonical_tones(_get(
+        f"{LEGACY_API}/tones_counts",
+        select=("id,title,description,gear,downloads_count,favorites_count,"
+                "a1_models_count,a2_models_count,custom_models_count,"
+                "irs_count,models_count,created_at,user_id,platform"),
+        order="downloads_count.desc", limit=requested))
+    _attach_usernames(rows, api=LEGACY_API)
+    return rows
 
 
 def top_favorites(limit=50, text=None, usernames=None):
@@ -246,9 +642,10 @@ def top_favorites(limit=50, text=None, usernames=None):
                "irs_count,models_count,created_at,user_id",
         order="favorites_count.desc", limit=limit)
     if usernames:
-        user_ids = [u["id"] for u in _get(
-            f"{API}/users", username=f"in.({','.join(usernames)})",
-            select="id", limit=300)]
+        user_response = _get(
+            f"{LEGACY_API}/users", username=f"in.({','.join(usernames)})",
+            select="id", limit=300)
+        user_ids = [u["id"] for u in _response_rows(user_response)]
         if not user_ids:
             return []  # 作者不存在，无需再查排行
         params["user_id"] = f"in.({','.join(user_ids)})"
@@ -258,43 +655,51 @@ def top_favorites(limit=50, text=None, usernames=None):
         safe = re.sub(r"[*%\\(),]", " ", text).strip()
         if safe:
             params["or"] = f"(title.ilike.*{safe}*,description.ilike.*{safe}*)"
-    rows = _canonical_tones(_get(f"{API}/tones_counts", **params))
-    _attach_usernames(rows)
+    rows = _canonical_tones(_get(f"{LEGACY_API}/tones_counts", **params))
+    _attach_usernames(rows, api=LEGACY_API)
     return rows
 
 
 def top_creators(sort_by="tones", page_size=100, page_number=1):
-    """Official TONE3000 creator leaderboard.
+    """Return the official paginated public creator leaderboard."""
+    requested = max(0, int(page_size))
+    if requested == 0:
+        return []
+    remote_page_size = 10
+    logical_page = max(1, int(page_number))
+    start_offset = (logical_page - 1) * requested
+    first_page = start_offset // remote_page_size + 1
+    skip = start_offset % remote_page_size
+    pages = (skip + requested + remote_page_size - 1) // remote_page_size
+    rows: list[dict] = []
+    for offset in range(pages):
+        response = _get(
+            f"{API}/users", sort=sort_by, page=first_page + offset,
+            page_size=remote_page_size)
+        page_rows = _response_rows(response)
+        rows.extend(page_rows)
+        if not page_rows:
+            break
+        if isinstance(response, dict):
+            try:
+                if first_page + offset >= int(response.get("total_pages")):
+                    break
+            except (TypeError, ValueError):
+                pass
+        if len(page_rows) < remote_page_size:
+            break
+    return [_canonical_creator(row) for row in rows[skip:skip + requested]
+            if isinstance(row, dict)]
 
-    The website's ``/top-creators`` page reads ``user_public_counts`` directly;
-    use the same stable aggregate fields instead of rebuilding creator totals
-    from arbitrary pages of tone search results.
-    """
-    column = {
-        "tones": "public_tones_count",
-        "downloads": "downloads_count",
-        "favorites": "favorites_count",
-        "models": "public_models_count",
-    }.get(sort_by, "public_tones_count")
-    page_size = max(1, int(page_size))
-    page_number = max(1, int(page_number))
-    return _get(
-        f"{API}/user_public_counts",
-        select="*",
-        order=f"{column}.desc,username.asc",
-        limit=page_size,
-        offset=(page_number - 1) * page_size,
-        **{column: "gt.0"},
-    )
 
-
-def _attach_usernames(rows: list[dict]) -> None:
+def _attach_usernames(rows: list[dict], *, api: str = API) -> None:
     """按 user_id 批量联查 users，就地补 username/avatar_url（REQ-023）。"""
     user_ids = sorted({r.get("user_id") for r in rows if r.get("user_id")})
     if not user_ids:
         return
-    users = _get(f"{API}/users", id=f"in.({','.join(user_ids)})",
-                 select="id,username,avatar_url", limit=len(user_ids))
+    users = _response_rows(_get(
+        f"{api}/users", id=f"in.({','.join(user_ids)})",
+        select="id,username,avatar_url", limit=len(user_ids)))
     by_id = {u["id"]: u for u in users}
     for row in rows:
         u = by_id.get(row.get("user_id"))
@@ -304,42 +709,25 @@ def _attach_usernames(rows: list[dict]) -> None:
 
 
 def user(username: str) -> dict | None:
-    """用户资料（bio/display_name/avatar/verified 依据等）；查不到返回 None。
-
-    TOP CREATORS 聚焦作者行时展示作者信息用（REQ-012）；verified 徽章仍走
-    verify_username 的独立判定。
-    """
-    rows = _get(f"{API}/users", username=f"eq.{username}", limit=1)
-    return rows[0] if rows else None
+    """Look up one public user through the documented username search."""
+    response = _get(f"{API}/users", query=username, page=1, page_size=10)
+    rows = _response_rows(response)
+    wanted = str(username).casefold()
+    return next((row for row in rows
+                 if str(row.get("username") or "").casefold() == wanted), None)
 
 
 def user_stats(username: str) -> dict | None:
-    """作者资料 + 四项统计（作者页多行介绍用，REQ-020）。
-
-    stats: tones = 远程真实数（search usernames 的 total_count）；
-    downloads/favorites/models = tones_counts 按 user 的前 200 条求和
-    （PostgREST 聚合端点 400 被禁，这是可用的近似真实值）。
-    """
+    """Return public user data and the counts supplied by the official API."""
     info = user(username)
     if not info:
         return None
-    stats = {"tones": None, "downloads": 0, "favorites": 0, "models": 0}
-    uid = info.get("id")
-    try:
-        hits = _get(f"{API}/tones_counts", user_id=f"eq.{uid}",
-                    select="downloads_count,favorites_count,models_count",
-                    limit=200)
-        stats["downloads"] = sum(h.get("downloads_count") or 0 for h in hits)
-        stats["favorites"] = sum(h.get("favorites_count") or 0 for h in hits)
-        stats["models"] = sum(h.get("models_count") or 0 for h in hits)
-    except Exception:
-        pass
-    try:
-        hits = search("", page_size=1, usernames=[username])
-        stats["tones"] = next((h.get("total_count") for h in hits
-                               if h.get("total_count") is not None), None)
-    except Exception:
-        pass
+    stats = {
+        "tones": info.get("tones_count", info.get("public_tones_count")),
+        "downloads": info.get("downloads_count") or 0,
+        "favorites": info.get("favorites_count") or 0,
+        "models": info.get("models_count", info.get("public_models_count")) or 0,
+    }
     return {**info, "stats": stats}
 
 
@@ -350,14 +738,54 @@ def models(tone_id, a2_only=True):
     用 JSONB 投影只取 architecture，不拉全量 model_json（多模型 tone 的全量
     响应可达 19MB+、耗时 60s+，见 scripts/import_handoff.py 踩坑记录）。
     """
-    ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
-              select=("id,model_url,name,"
-                      "architecture:model_json->>architecture,"
-                      "architecture_version:model_json->>architecture_version"),
-              limit=300)
-    if not a2_only:
-        return ms
-    return [m for m in ms if _is_a2_model(m)]
+    remote_page_size = 300
+
+    def fetch(architecture: str | None) -> list[dict]:
+        rows: list[dict] = []
+        page = 1
+        while True:
+            params = {"tone_id": tone_id, "page": page,
+                      "page_size": remote_page_size}
+            if architecture is not None:
+                params["architecture"] = architecture
+            response = _get(f"{API}/models", **params)
+            page_rows = _response_rows(response)
+            rows.extend(page_rows)
+            if not page_rows:
+                break
+            total_pages = None
+            if isinstance(response, dict):
+                try:
+                    total_pages = int(response.get("total_pages"))
+                    if page >= total_pages:
+                        break
+                except (TypeError, ValueError):
+                    pass
+            if total_pages is None and len(page_rows) < remote_page_size:
+                break
+            page += 1
+        return rows
+
+    # The documented default is A1 + Custom and explicitly excludes A2.
+    # Preserve GigBuddy's existing all-model behavior by adding the A2 page
+    # when callers request the complete model set.
+    architectures = ["2"] if a2_only else [None, "2"]
+    rows: list[dict] = []
+    seen: set[int] = set()
+    for architecture in architectures:
+        for model in fetch(architecture):
+            model_id = model.get("id") if isinstance(model, dict) else None
+            if model_id is not None:
+                try:
+                    key = int(model_id)
+                except (TypeError, ValueError):
+                    key = hash(str(model_id))
+                if key in seen:
+                    continue
+                seen.add(key)
+            rows.append(model)
+    return ([m for m in rows if _is_a2_model(m)]
+            if a2_only else rows)
 
 
 def _safe_download_name(value, fallback):
@@ -445,9 +873,24 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
         if reuse:
             got += 1
         else:
-            for attempt in range(3):  # 网络中断（IncompleteRead）重试
+            try:
+                bearer = access_token()
+            except (AuthenticationRequiredError, Tone3000HTTPError,
+                    urllib.error.URLError, json.JSONDecodeError):
+                # ``models()`` already authenticates official API calls. Keep
+                # the downloader usable for caller-supplied public URLs and
+                # network-free adapters; an official model URL will still
+                # surface its 401 below and require login.
+                bearer = None
+            network_attempts = 0
+            refreshed = False
+            while True:
                 try:
-                    req = urllib.request.Request(m["model_url"])
+                    headers = {"Accept": "application/octet-stream",
+                               "User-Agent": BROWSER_UA}
+                    if bearer:
+                        headers["Authorization"] = f"Bearer {bearer}"
+                    req = urllib.request.Request(m["model_url"], headers=headers)
                     with urllib.request.urlopen(req, timeout=60) as r:
                         data = r.read()
                     if not data:
@@ -467,10 +910,21 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
                             pass
                         raise
                     break
-                except Exception as e:
-                    if attempt == 2:
+                except urllib.error.HTTPError as e:
+                    if e.code == 401 and not refreshed:
+                        bearer = access_token(force_refresh=True)
+                        refreshed = True
+                        continue
+                    if network_attempts >= 2:
                         raise
-                    print(f"[{tone_id}] {fname} 下载中断({e})，重试 {attempt + 2}/3", flush=True)
+                    network_attempts += 1
+                    print(f"[{tone_id}] {fname} 下载中断({e})，重试 {network_attempts + 1}/3", flush=True)
+                    time.sleep(1)
+                except Exception as e:
+                    if network_attempts >= 2:
+                        raise
+                    network_attempts += 1
+                    print(f"[{tone_id}] {fname} 下载中断({e})，重试 {network_attempts + 1}/3", flush=True)
                     time.sleep(1)
             got += 1
             time.sleep(0.1)
@@ -496,46 +950,25 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
 
 
 def tone_by_id(tone_id, with_models=False):
-    """Full metadata for one tone via REST (no RPC needed).
-
-    Assembles a dict shaped identically to search_tones_a2 rows (23 fields;
-    total_count is a search-level aggregation and stays excluded):
-    tones_counts (+users for username/avatar_url, +tone_tags/tags, +tone_makes/makes
-    for the tag/make name arrays, +models for model_name). Returns None if the
-    tone does not exist (or was deleted).
-    """
-    rows = _get(f"{API}/tones_counts", id=f"eq.{tone_id}", limit=1)
-    if not rows:
+    """Fetch one tone through the documented ``/tones/{id}`` resource."""
+    response = _get(f"{API}/tones/{int(tone_id)}")
+    tone = _response_object(response)
+    if tone is None:
         return None
-    t = _canonical_tone(dict(rows[0]))
+    t = _canonical_tone(dict(tone))
     if t.get("is_deleted"):
         return None
-    # username / avatar_url live on the users table
-    u = _get(f"{API}/users", id=f"eq.{t['user_id']}", select="username,avatar_url", limit=1)
-    t["username"] = (u[0].get("username") if u else None)
-    t["avatar_url"] = (u[0].get("avatar_url") if u else None)
-    # tags: tone_tags join -> names
-    ids = [r["tag_id"] for r in _get(f"{API}/tone_tags", tone_id=f"eq.{tone_id}", select="tag_id", limit=300)]
-    if ids:
-        chunks = ",".join(str(i) for i in ids)
-        t["tags"] = [r["name"] for r in _get(f"{API}/tags", id=f"in.({chunks})", select="name", limit=300)]
-    else:
-        t["tags"] = []
-    # makes: tone_makes join -> names
-    ids = [r["make_id"] for r in _get(f"{API}/tone_makes", tone_id=f"eq.{tone_id}", select="make_id", limit=300)]
-    if ids:
-        chunks = ",".join(str(i) for i in ids)
-        t["makes"] = [r["name"] for r in _get(f"{API}/makes", id=f"in.({chunks})", select="name", limit=300)]
-    else:
-        t["makes"] = []
-    # model_name: first model's metadata name (NAM A2 metadata carries it)
-    ms = _get(f"{API}/models", tone_id=f"eq.{tone_id}",
-              select="id,name:model_json->metadata->>name", limit=50)
-    t["model_name"] = None
-    for m in ms:
-        if m.get("name"):
-            t["model_name"] = m["name"]
-            break
+    t.setdefault("tags", [])
+    t.setdefault("makes", [])
+    # ``model_name`` is a legacy library field. Official Tone responses expose
+    # model counts only, so derive the first model name from the documented
+    # models endpoint while preserving the existing row shape.
+    t["model_name"] = t.get("model_name")
+    if not t["model_name"]:
+        for model in models(tone_id, a2_only=False):
+            if model.get("name"):
+                t["model_name"] = model["name"]
+                break
     return _canonical_tone(t)
 
 
@@ -549,12 +982,11 @@ def tones_for_model_ids(model_ids):
     ids = list(dict.fromkeys(int(model_id) for model_id in model_ids))
     if not ids:
         return []
-    chunks = ",".join(str(model_id) for model_id in ids)
-    models_by_id = {
-        int(row["id"]): row for row in _get(
-            f"{API}/models", id=f"in.({chunks})", select="id,tone_id", limit=len(ids))
-        if row.get("id") is not None and row.get("tone_id") is not None
-    }
+    models_by_id = {}
+    for model_id in ids:
+        row = _response_object(_get(f"{API}/models/{model_id}"))
+        if row and row.get("id") is not None and row.get("tone_id") is not None:
+            models_by_id[int(row["id"])] = row
     matches: dict[int, list[int]] = {}
     for model_id in ids:
         row = models_by_id.get(model_id)

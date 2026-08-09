@@ -90,6 +90,34 @@ def test_save_preserves_order_duplicates_empty_and_excludes_runtime_state():
     assert note == "snapshot"
 
 
+def test_slot_gains_round_trip_through_preset_and_dirty_check():
+    amp, _cab = _seed_models()
+    library.chain_set({
+        "slots": [{"path": str(amp), "input_gain_db": 3.5,
+                   "output_gain_db": -2.25}],
+        "gain": 0.8, "master": 0.6, "quality": 0.7,
+    })
+
+    saved = library.preset_save("trimmed")
+
+    assert saved["chain"]["slots"] == [{
+        "model_id": 101,
+        "path": "data/tones/amp.nam",
+        "input_gain_db": 3.5,
+        "output_gain_db": -2.25,
+    }]
+
+    library.chain_set({"slots": [{"path": str(amp)}], "gain": 0.8,
+                       "master": 0.6, "quality": 0.7})
+    assert library.preset_is_dirty("trimmed") is True
+
+    loaded = library.preset_load("trimmed")
+
+    assert loaded["slots"][0]["input_gain_db"] == pytest.approx(3.5)
+    assert loaded["slots"][0]["output_gain_db"] == pytest.approx(-2.25)
+    assert library.preset_is_dirty("trimmed") is False
+
+
 @pytest.mark.parametrize(
     ("legacy", "expected"),
     [

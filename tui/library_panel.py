@@ -19,7 +19,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.events import Leave, MouseEvent, MouseMove
 from textual.message import Message
-from textual.widgets import (DataTable, Input, Select,
+from textual.widgets import (Button, DataTable, Input, Select,
                              TabbedContent, TabPane)
 from textual.widgets._tabbed_content import ContentTabs  # noqa: E402
 
@@ -366,7 +366,13 @@ class LibraryTable(ClickSelectTable):
         "操作了一下"后进不了二级菜单的窗口）。提示行上改为触发重试。
         """
         if self.row_count and self.ordered_rows[0].key.value == "__status__":
-            self.screen.query_one(LibraryPanel).retry_active()
+            panel = self.screen.query_one(LibraryPanel)
+            if self.id == "lib-table-tone" and panel._tone_auth_required:
+                panel._focus_tone_login()
+            elif self.id == "lib-table-creators" and panel._creator_auth_required:
+                panel._focus_creator_login()
+            else:
+                panel.retry_active()
             return
         super().action_select_cursor()
 
@@ -526,6 +532,8 @@ class LibraryPanel(Vertical):
                     id="tone-search-bar",
                 )
                 yield self._make_table("lib-table-tone")
+                yield Button("Log in to TONE3000", id="tone-login-button",
+                             variant="primary")
                 yield MarqueeBar(id="tone-status")
             with TabPane("TOP CREATORS", id="pane-creators"):
                 yield SearchBar(
@@ -535,6 +543,8 @@ class LibraryPanel(Vertical):
                     id="creators-search-bar",
                 )
                 yield self._make_creators_table()
+                yield Button("Log in to TONE3000", id="creators-login-button",
+                             variant="primary")
 
     def on_mount(self) -> None:
         self._mode = "local"
@@ -578,6 +588,9 @@ class LibraryPanel(Vertical):
         self._tone_loading = False
         self._tone_request_id = 0
         self._tone_error = False
+        self._tone_auth_required = False
+        self.query_one("#tone-login-button", Button).display = False
+        self.query_one("#creators-login-button", Button).display = False
         self._local_page = 0
         self._local_has_more = False
         self._local_loading = False
@@ -589,6 +602,7 @@ class LibraryPanel(Vertical):
         self._creator_tones: dict[str, list[dict]] = {}
         self._creator_request_id = 0
         self._creator_error = False
+        self._creator_auth_required = False
         self._local_selected: set[int] = set()
         self._mutation_anchor: ViewAnchor | None = None
         self._screen_generation = 1
@@ -1141,7 +1155,8 @@ class LibraryPanel(Vertical):
         # auto-width column grows to fit the message and stays on the left
         # side of the viewport crop.
         cols = list(table.ordered_columns)
-        target = next((i for i, col in enumerate(cols) if col.auto_width), 0)
+        target = 0 if table.id == "lib-table-tone" else next(
+            (i for i, col in enumerate(cols) if col.auto_width), 0)
         cells = [""] * len(cols)
         cells[target] = f"[dim]{message}[/dim]"
         table.add_row(*cells, key="__status__")
@@ -1156,6 +1171,87 @@ class LibraryPanel(Vertical):
             return
         table.clear()
         self._status_row(table, message)
+
+    def _set_tone_login_visible(self, visible: bool) -> None:
+        try:
+            button = self.query_one("#tone-login-button", Button)
+        except Exception:
+            return
+        button.display = visible
+        if not visible:
+            button.disabled = False
+
+    def _focus_tone_login(self) -> None:
+        if not getattr(self, "_tone_auth_required", False):
+            return
+        try:
+            button = self.query_one("#tone-login-button", Button)
+        except Exception:
+            return
+        if button.display and not button.disabled:
+            button.focus()
+
+    def _show_tone_auth_required(self, table: DataTable, *,
+                                 silent: bool = False,
+                                 message: str | None = None) -> None:
+        """Show the user-facing login action for a TONE3000 auth failure."""
+        self._tone_loading = False
+        if silent:
+            return
+        self._tone_auth_required = True
+        self._tone_error = False
+        self._set_tone_login_visible(True)
+        self._show_status_if_empty(
+            table, message or "TONE3000 login required — select Log in.")
+        try:
+            self.query_one("#tone-status", MarqueeBar).content = (
+                "login required · select Log in")
+        except Exception:
+            pass
+        self._update_tone_subtitle()
+        self._focus_tone_login()
+
+    def _clear_tone_auth_required(self) -> None:
+        self._tone_auth_required = False
+        self._set_tone_login_visible(False)
+
+    def _set_creator_login_visible(self, visible: bool) -> None:
+        try:
+            button = self.query_one("#creators-login-button", Button)
+        except Exception:
+            return
+        button.display = visible
+        if not visible:
+            button.disabled = False
+
+    def _focus_creator_login(self) -> None:
+        if not getattr(self, "_creator_auth_required", False):
+            return
+        try:
+            button = self.query_one("#creators-login-button", Button)
+        except Exception:
+            return
+        if button.display and not button.disabled:
+            button.focus()
+
+    def _show_creator_auth_required(self, table: DataTable, *,
+                                    silent: bool = False,
+                                    message: str | None = None) -> None:
+        """Show the user-facing login action for the creator leaderboard."""
+        self._creator_loading = False
+        if silent:
+            return
+        self._creator_auth_required = True
+        self._creator_error = False
+        self._set_creator_login_visible(True)
+        self._show_status_if_empty(
+            table, message or "TONE3000 login required — select Log in.")
+        self._update_creator_subtitle()
+        self._focus_creator_login()
+
+    def _clear_creator_auth_required(self) -> None:
+        self._creator_auth_required = False
+        self._set_creator_login_visible(False)
 
     @staticmethod
     def _network_error(action: str, error: Exception) -> str:
@@ -1173,11 +1269,17 @@ class LibraryPanel(Vertical):
         banners say "Press r to retry", which this satisfies."""
         active = getattr(self, "_active_pane", "pane-local")
         if active == "pane-tone":
+            if self._tone_auth_required:
+                self._focus_tone_login()
+                return
             if self._tone_cache_key is not None:
                 self._tone_cache.pop(self._tone_cache_key, None)
             self.run_worker(partial(self._reload_tone_table, refresh=True),
                             name="search", exclusive=True)
         elif active == "pane-creators":
+            if self._creator_auth_required:
+                self._focus_creator_login()
+                return
             self._creator_cache = None
             self.run_worker(partial(self._show_top_creators, refresh=True),
                             name="creators", exclusive=True)
@@ -1196,7 +1298,10 @@ class LibraryPanel(Vertical):
             return
         loaded = len(self._remote_tones)
         count = f"{loaded}/{self._tone_total}" if self._tone_total else str(loaded)
-        if error:
+        if self._tone_auth_required:
+            self._tone_error = False
+            state = "login required"
+        elif error:
             self._tone_error = True
             state = f"{count} · load failed"
         elif self._tone_has_more:
@@ -1927,6 +2032,7 @@ class LibraryPanel(Vertical):
             key = (query, self._type_filter, self._sort)
             self._tone_cache_key = key
             self._tone_error = False
+            self._clear_tone_auth_required()
         self._set_search_spec(query, spec)
         self._tone_request_view = (
             None if silent else self._view_identity("pane-tone"))
@@ -1976,6 +2082,11 @@ class LibraryPanel(Vertical):
                     usernames=self._effective_authors(spec) or None,
                     tag_names=list(spec.tags) or None,
                     make_names=list(spec.makes) or None)
+        except library.tone3000.AuthenticationRequiredError:
+            if not self._tone_alive(generation, request_id):
+                return
+            self._show_tone_auth_required(table, silent=silent)
+            return
         except Exception as e:
             if not self._tone_alive(generation, request_id):
                 return
@@ -2008,6 +2119,11 @@ class LibraryPanel(Vertical):
                         "partial" if downloaded else "none")
             else:
                 hits = await asyncio.to_thread(library.mark_download_state, hits)
+        except library.tone3000.AuthenticationRequiredError:
+            if not self._tone_alive(generation, request_id):
+                return
+            self._show_tone_auth_required(table, silent=silent)
+            return
         except Exception as e:
             if not self._tone_alive(generation, request_id):
                 return
@@ -2020,6 +2136,7 @@ class LibraryPanel(Vertical):
         if not self._tone_alive(generation, request_id):
             return
         self._tone_loading = False
+        self._clear_tone_auth_required()
         self._tone_page = page
         total = next((hit.get("total_count") for hit in hits
                       if hit.get("total_count") is not None), None)
@@ -2065,6 +2182,50 @@ class LibraryPanel(Vertical):
     async def _load_more_tones(self) -> None:
         """Fetch the next remote page without moving the cursor or clearing rows."""
         await self._show_search(self._query, order_by=self._selected_order(), append=True)
+
+    async def _login_tone3000(self) -> None:
+        """Open OAuth in the browser, then reload the active remote view."""
+        creator_view = self._active_pane == "pane-creators"
+        button_id = ("#creators-login-button" if creator_view
+                     else "#tone-login-button")
+        try:
+            button = self.query_one(button_id, Button)
+            table = (self._creator_table() if creator_view
+                     else self._table_for_pane("pane-tone"))
+        except Exception:
+            return
+        if table is None:
+            return
+        button.disabled = True
+        try:
+            await asyncio.to_thread(library.tone3000.login)
+        except library.tone3000.AuthenticationRequiredError:
+            show_auth = (self._show_creator_auth_required if creator_view
+                         else self._show_tone_auth_required)
+            show_auth(
+                table,
+                message="TONE3000 login cancelled — select Log in to retry.")
+            return
+        except Exception:
+            show_auth = (self._show_creator_auth_required if creator_view
+                         else self._show_tone_auth_required)
+            show_auth(
+                table,
+                message="TONE3000 login unavailable — select Log in to retry.")
+            return
+        finally:
+            button.disabled = False
+        if creator_view:
+            self._clear_creator_auth_required()
+            self._creator_cache = None
+            self.run_worker(partial(self._show_top_creators, refresh=True),
+                            name="creators", exclusive=True)
+        else:
+            self._clear_tone_auth_required()
+            if self._tone_cache_key is not None:
+                self._tone_cache.pop(self._tone_cache_key, None)
+            self.run_worker(partial(self._reload_tone_table, refresh=True),
+                            name="search", exclusive=True)
 
     # ---- recommended views (TONE3000 tab) ---------------------------------
 
@@ -2120,6 +2281,11 @@ class LibraryPanel(Vertical):
                     library.tone3000.top_favorites, 50,
                     text=spec.text or None,
                     usernames=self._effective_authors(spec) or None)
+            except library.tone3000.AuthenticationRequiredError:
+                if not self._tone_alive(generation, request_id) or silent:
+                    return
+                self._show_tone_auth_required(table)
+                return
             except Exception as e:
                 if not self._tone_alive(generation, request_id) or silent:
                     return
@@ -2132,6 +2298,11 @@ class LibraryPanel(Vertical):
                 return
             try:
                 hits = await asyncio.to_thread(library.mark_download_state, hits)
+            except library.tone3000.AuthenticationRequiredError:
+                if not self._tone_alive(generation, request_id) or silent:
+                    return
+                self._show_tone_auth_required(table)
+                return
             except Exception as e:
                 if not self._tone_alive(generation, request_id) or silent:
                     return
@@ -2143,6 +2314,7 @@ class LibraryPanel(Vertical):
             if not self._tone_alive(generation, request_id):
                 return
             self._tone_loading = False
+            self._clear_tone_auth_required()
             self._remote_tones = {}
             table.clear()
             table.cursor_type = "row"
@@ -2179,7 +2351,10 @@ class LibraryPanel(Vertical):
                 [token for token, _action in self._border_hint_actions()])
             return
         count = len(self._creator_tones)
-        if error:
+        if self._creator_auth_required:
+            self._creator_error = False
+            state = "login required"
+        elif error:
             self._creator_error = True
             state = f"{count} · load failed"
         else:
@@ -2314,6 +2489,7 @@ class LibraryPanel(Vertical):
             self._creator_request_id += 1
             request_id = self._creator_request_id
             self._creator_error = False
+            self._clear_creator_auth_required()
         self._creator_request_view = (
             None if silent else self._view_identity("pane-creators"))
         table = self._creator_table()
@@ -2336,6 +2512,14 @@ class LibraryPanel(Vertical):
                 sort_by=self._creator_sort,
                 page_size=CREATOR_PAGE_SIZE,
                 page_number=page)
+        except library.tone3000.AuthenticationRequiredError:
+            if not self._creator_alive(generation, request_id):
+                return
+            table = self._creator_table()
+            if table is None:
+                return
+            self._show_creator_auth_required(table, silent=silent)
+            return
         except Exception as e:
             if not self._creator_alive(generation, request_id):
                 return
@@ -2366,6 +2550,7 @@ class LibraryPanel(Vertical):
             self._creator_has_more = False
             self._creator_tones = {}
             table.clear()
+        self._clear_creator_auth_required()
         self._creator_loading = False
         self._creator_page = page
         existing_count = len(self._creator_tones)
@@ -2544,6 +2729,13 @@ class LibraryPanel(Vertical):
                 # An empty TONE3000 query is the public Trending feed; do not
                 # jump back to LOCAL merely because the input was cleared.
                 self.run_worker(partial(self._reload_tone_table), name="search", exclusive=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id not in {"tone-login-button", "creators-login-button"}:
+            return
+        self.run_worker(self._login_tone3000, name="tone-login",
+                        group="tone-login", exclusive=True)
+
     def _border_hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
         view_action = (
             ViewTabStrip.NAVIGATION_HINT,
@@ -2575,14 +2767,18 @@ class LibraryPanel(Vertical):
             return [*actions, view_action]
         if active == "pane-tone":
             actions: list[tuple[str, Callable[[], None]]] = []
-            if self._tone_error:
+            if self._tone_auth_required:
+                actions.append(("log in", self._focus_tone_login))
+            elif self._tone_error:
                 actions.append(("r retry", self.retry_active))
             elif self._tone_has_more:
                 actions.append(("↓ more", self._load_more_from_hint))
             actions.append(("enter detail", lambda: self._table().action_select_cursor()))
             return [*actions, view_action]
         actions = []
-        if self._creator_error:
+        if self._creator_auth_required:
+            actions.append(("log in", self._focus_creator_login))
+        elif self._creator_error:
             actions.append(("r retry", self.retry_active))
         elif self._creator_has_more:
             actions.append(("↓ more", self._load_more_from_hint))
@@ -2707,7 +2903,12 @@ class LibraryPanel(Vertical):
         if key == "__status__":
             # 加载/失败提示行：Enter/双击 = 重试当前视图（REQ-011：此前静默
             # 吞掉，用户"操作了一下"后在加载/失败窗口 Enter 全部无效）。
-            self.retry_active()
+            if self._active_pane == "pane-tone" and self._tone_auth_required:
+                self._focus_tone_login()
+            elif self._active_pane == "pane-creators" and self._creator_auth_required:
+                self._focus_creator_login()
+            else:
+                self.retry_active()
             return
         kind, _, tid = key.partition(":")
         if kind == "local":

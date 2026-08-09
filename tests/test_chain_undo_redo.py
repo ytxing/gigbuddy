@@ -54,7 +54,9 @@ def _seed_presets(tmp_path) -> None:
                                  {"path": str(tones / "cab-a.wav")}],
                       "gain": 1.0, "master": 0.8, "quality": 1.0})
     library.preset_save("preset-a", note="chain A (amp-a + cab-a)")
-    live.write_chain({"slots": [{"path": str(tones / "amp-b.nam")}],
+    live.write_chain({"slots": [{"path": str(tones / "amp-b.nam"),
+                                 "input_gain_db": 1.5,
+                                 "output_gain_db": -2.5}],
                       "gain": 0.5, "master": 0.6})
     library.preset_save("preset-b", note="chain B (amp-b, no IR)")
     live.write_chain({"slots": [{"path": str(tones / "amp-c.nam")}],
@@ -82,7 +84,11 @@ def test_undo_restores_preset_config_and_redo_reapplies(monkeypatch, tmp_path):
             app._apply_preset("preset-b")
             await pilot.pause(0.2)
             cfg = live.read_chain()
-            assert cfg["slots"] == [{"path": str(tones / "amp-b.nam")}]
+            assert cfg["slots"] == [{
+                "path": str(tones / "amp-b.nam"),
+                "input_gain_db": 1.5,
+                "output_gain_db": -2.5,
+            }]
             assert cfg["gain"] == 0.5
             # undo → 链 A 完整恢复
             await pilot.press("ctrl+z")
@@ -97,7 +103,11 @@ def test_undo_restores_preset_config_and_redo_reapplies(monkeypatch, tmp_path):
             await pilot.press("ctrl+shift+z")
             await pilot.pause(0.2)
             cfg = live.read_chain()
-            assert cfg["slots"] == [{"path": str(tones / "amp-b.nam")}]
+            assert cfg["slots"] == [{
+                "path": str(tones / "amp-b.nam"),
+                "input_gain_db": 1.5,
+                "output_gain_db": -2.5,
+            }]
     run(scenario())
 
 
