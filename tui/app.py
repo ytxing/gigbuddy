@@ -635,7 +635,7 @@ class GigBuddyApp(App):
     }
     /* Remote download states are a persistent list legend, not a result row. */
     #tone-status {
-        dock: bottom; height: 1; padding: 0 1;
+        display: none; dock: bottom; height: 1; padding: 0 1;
         color: $text-muted; content-align: left middle;
     }
     #lib-status { color: $text-muted; padding: 0 1; }
