@@ -4561,9 +4561,13 @@ class DetailPane(Vertical):
         including REQ-038 的 i install / u uninstall 批量动作 token。"""
         if self._view_tabs.activate_from_border(event):
             return
-        if self._view_mode not in ("description", "selection", "empty", "creator"):
-            return
-        border_hint_click(self, event, self._border_hint_actions())
+        if self._view_mode in ("description", "selection", "empty", "creator"):
+            if border_hint_click(self, event, self._border_hint_actions()):
+                return
+        # Keep ordinary detail clicks inside this pane. Otherwise the app-level
+        # coordinate router can reinterpret the same click as a chain-slot hit.
+        self.focus()
+        event.stop()
 
     def on_mouse_move(self, event: MouseMove) -> None:
         self._view_tabs.hover_from_border(event)
