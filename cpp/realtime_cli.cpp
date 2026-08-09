@@ -18,6 +18,7 @@
 #include "NeuralModel.h"
 #include "json.hpp"
 #include <portaudio.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <chrono>
@@ -45,6 +46,13 @@ static void on_sigint(int) { g_stop.store(true, std::memory_order_relaxed); }
 
 // 前置声明（read_wav_ir 定义在文件后部，make_ir 先用到）
 static bool read_wav_ir(const char* path, std::vector<float>& out, uint32_t& sr);
+
+static constexpr float SLOT_GAIN_MIN_DB = -24.0f;
+static constexpr float SLOT_GAIN_MAX_DB = 24.0f;
+
+static float db_to_linear(float db) {
+    return powf(10.0f, db / 20.0f);
+}
 
 // 简单 FIR（环形历史缓冲，IR 截断至 MAX_IR_TAPS）
 class FirFilter {
@@ -168,6 +176,11 @@ struct ChainNode {
     std::shared_ptr<NeuralAudio::NeuralModel> nam;
     std::shared_ptr<FirFilter> ir;
     std::string path;
+    size_t slotIndex = 0;
+    float inputGainDb = 0.0f;
+    float outputGainDb = 0.0f;
+    float inputGain = 1.0f;
+    float outputGain = 1.0f;
 };
 
 struct PreparedChain {
@@ -283,6 +296,8 @@ struct SlotSpec {
     bool empty = true;
     NodeKind kind = NodeKind::Nam;
     std::string path;
+    float inputGainDb = 0.0f;
+    float outputGainDb = 0.0f;
 };
 
 struct InputSpec {
@@ -370,6 +385,23 @@ static bool resolve_asset_path(const std::string& raw, const char* allowedDir,
     return true;
 }
 
+static bool read_slot_gain_db(const nlohmann::json& item, const char* key,
+                              float& result, std::string& error) {
+    result = 0.0f;
+    if (!item.contains(key)) return true;
+    if (!item.at(key).is_number()) {
+        error = std::string("slot.") + key + " must be a number";
+        return false;
+    }
+    result = item.at(key).get<float>();
+    if (!std::isfinite(result)
+        || result < SLOT_GAIN_MIN_DB || result > SLOT_GAIN_MAX_DB) {
+        error = std::string("slot.") + key + " is out of range";
+        return false;
+    }
+    return true;
+}
+
 static bool parse_slot_specs(const nlohmann::json& j, std::vector<SlotSpec>& slots,
                              std::string& error) {
     if (j.contains("slots")) {
@@ -392,6 +424,12 @@ static bool parse_slot_specs(const nlohmann::json& j, std::vector<SlotSpec>& slo
             }
             if (!item.contains("path")) {
                 error = "slot.path is required";
+                return false;
+            }
+            if (!read_slot_gain_db(item, "input_gain_db", spec.inputGainDb,
+                                   error)
+                || !read_slot_gain_db(item, "output_gain_db",
+                                      spec.outputGainDb, error)) {
                 return false;
             }
             if (item.at("path").is_null()) {
@@ -579,6 +617,53 @@ static std::vector<std::string> slot_signature(const std::vector<SlotSpec>& slot
     return signature;
 }
 
+static void set_node_gains(ChainNode& node, const SlotSpec& slot,
+                           size_t slotIndex) {
+    node.slotIndex = slotIndex;
+    node.inputGainDb = slot.inputGainDb;
+    node.outputGainDb = slot.outputGainDb;
+    node.inputGain = db_to_linear(slot.inputGainDb);
+    node.outputGain = db_to_linear(slot.outputGainDb);
+}
+
+static bool apply_slot_gains(PreparedChain& chain,
+                             const std::vector<SlotSpec>& slots,
+                             std::string& error) {
+    size_t nodeIndex = 0;
+    for (size_t slotIndex = 0; slotIndex < slots.size(); ++slotIndex) {
+        const auto& slot = slots[slotIndex];
+        if (slot.empty) continue;
+        if (nodeIndex >= chain.nodes.size()
+            || chain.nodes[nodeIndex].slotIndex != slotIndex) {
+            error = "prepared chain Slot layout does not match candidate";
+            return false;
+        }
+        set_node_gains(chain.nodes[nodeIndex], slot, slotIndex);
+        ++nodeIndex;
+    }
+    if (nodeIndex != chain.nodes.size()) {
+        error = "prepared chain has an unexpected Slot";
+        return false;
+    }
+    return true;
+}
+
+static bool prepared_matches_slot_gains(
+        const PreparedChain& chain, const std::vector<SlotSpec>& slots) {
+    size_t nodeIndex = 0;
+    for (size_t slotIndex = 0; slotIndex < slots.size(); ++slotIndex) {
+        const auto& slot = slots[slotIndex];
+        if (slot.empty) continue;
+        if (nodeIndex >= chain.nodes.size()
+            || chain.nodes[nodeIndex].slotIndex != slotIndex
+            || chain.nodes[nodeIndex].inputGainDb != slot.inputGainDb
+            || chain.nodes[nodeIndex].outputGainDb != slot.outputGainDb)
+            return false;
+        ++nodeIndex;
+    }
+    return nodeIndex == chain.nodes.size();
+}
+
 static void stamp_prepared_runtime_fields(const std::shared_ptr<PreparedChain>& chain,
                                           float gain, float master, bool mute,
                                           const InputSpec& input) {
@@ -635,11 +720,13 @@ static bool build_prepared_chain(const std::vector<SlotSpec>& slots, float quali
     chain->revision = revision;
     chain->signature = slot_signature(slots);
     chain->nodes.reserve(slots.size());
-    for (const auto& slot : slots) {
+    for (size_t slotIndex = 0; slotIndex < slots.size(); ++slotIndex) {
+        const auto& slot = slots[slotIndex];
         if (slot.empty) continue;
         ChainNode node;
         node.kind = slot.kind;
         node.path = slot.path;
+        set_node_gains(node, slot, slotIndex);
         if (slot.kind == NodeKind::Nam) {
             node.nam = make_nam(slot.path, loader, error);
             if (!node.nam) {
@@ -668,7 +755,8 @@ static bool preflight_chain(const nlohmann::json& j,
                             NeuralAudio::NeuralModelLoader& loader,
                             int sr, std::string& error,
                             std::shared_ptr<PreparedChain>* preparedResult = nullptr,
-                            bool allowExternalPaths = false) {
+                            bool allowExternalPaths = false,
+                            const Ctx* currentContext = nullptr) {
     if (!j.is_object()) {
         error = "chain must be an object";
         return false;
@@ -717,9 +805,21 @@ static bool preflight_chain(const nlohmann::json& j,
     }
 
     std::shared_ptr<PreparedChain> prepared;
-    if (!build_prepared_chain(slots, quality, revision, loader, sr,
-                              prepared, error))
+    const auto signature = slot_signature(slots);
+    const auto current = currentContext
+        ? std::atomic_load(&currentContext->chain) : nullptr;
+    if (current && current->signature == signature) {
+        // Trims and quality are runtime parameters. Reuse the existing model
+        // instances during managed preflight instead of loading every NAM
+        // again just to validate a parameter-only candidate.
+        prepared = std::make_shared<PreparedChain>(*current);
+        prepared->quality = quality;
+        prepared->revision = revision;
+        if (!apply_slot_gains(*prepared, slots, error)) return false;
+    } else if (!build_prepared_chain(slots, quality, revision, loader, sr,
+                                     prepared, error)) {
         return false;
+    }
     stamp_prepared_runtime_fields(prepared, gain, master, mute, input);
     if (preparedResult != nullptr) *preparedResult = prepared;
     return true;
@@ -781,6 +881,7 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
         && ctx.managedPreparedChain->revision == revision
         && ctx.managedPreparedChain->quality == quality
         && ctx.managedPreparedChain->signature == signature
+        && prepared_matches_slot_gains(*ctx.managedPreparedChain, slots)
         && prepared_matches_runtime_fields(
             *ctx.managedPreparedChain, gain, master, mute, input));
     if (requireManagedPrepare && !matchesPreflight) {
@@ -789,6 +890,7 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
             && current->revision == revision
             && current->quality == quality
             && current->signature == signature
+            && prepared_matches_slot_gains(*current, slots)
             && prepared_matches_runtime_fields(
                 *current, gain, master, mute, input));
         if (alreadyApplied) {
@@ -816,6 +918,10 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
             next = std::make_shared<PreparedChain>(*current);
             next->quality = quality;
             next->revision = revision;
+            if (!apply_slot_gains(*next, slots, error)) {
+                fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+                return false;
+            }
         }
     } else if (chainChanged) {
         if (!build_prepared_chain(slots, quality, revision, loader,
@@ -837,6 +943,10 @@ static bool apply_chain(const nlohmann::json& j, NeuralAudio::NeuralModelLoader&
         next = std::make_shared<PreparedChain>(*current);
         next->quality = quality;
         next->revision = revision;
+        if (!apply_slot_gains(*next, slots, error)) {
+            fprintf(stderr, "[live] chain rejected: %s\n", error.c_str());
+            return false;
+        }
     }
     stamp_prepared_runtime_fields(next, gain, master, mute, input);
 
@@ -928,6 +1038,26 @@ static float block_peak(const float* buf, int n) {
     return p;
 }
 
+static void apply_linear_gain(float* buffer, int frames, float gain) {
+    if (gain == 1.0f) return;
+    for (int i = 0; i < frames; ++i) buffer[i] *= gain;
+}
+
+static void process_node(ChainNode& node, float* buffer, int frames,
+                         bool updateQuality, float quality) {
+    apply_linear_gain(buffer, frames, node.inputGain);
+    if (node.kind == NodeKind::Nam && node.nam) {
+        if (updateQuality && node.nam->HasQualityScaling()
+            && node.nam->GetQualityScaleFactor() != quality) {
+            node.nam->SetQualityScaleFactor(quality);
+        }
+        node.nam->Process(buffer, buffer, frames);
+    } else if (node.kind == NodeKind::Ir && node.ir) {
+        node.ir->process(buffer, buffer, frames);
+    }
+    apply_linear_gain(buffer, frames, node.outputGain);
+}
+
 // 纯 DSP 链（无 PortAudio 依赖，输出端可插拔——pa_callback 与未来其它输出端共用）：
 // mono 输入(scratch) → gain → slot[0..n] → 交叉淡化(crossfade) → master/mute → out
 static void process_block(const float* in, float* out, int frames, Ctx& c) {
@@ -944,24 +1074,12 @@ static void process_block(const float* in, float* out, int frames, Ctx& c) {
         // 交叉淡化：旧链淡出、新链淡入，输出连续（成熟音频方案——持续音
         // 上的切换不再经历"淡出到 0 → 交换 → 淡入"的静音凹陷咔哒）。
         std::copy(c.scratch.begin(), c.scratch.begin() + frames, c.scratch2.begin());
-        for (auto& node : old->nodes) {
-            if (node.kind == NodeKind::Nam && node.nam)
-                node.nam->Process(c.scratch2.data(), c.scratch2.data(), frames);
-            else if (node.kind == NodeKind::Ir && node.ir)
-                node.ir->process(c.scratch2.data(), c.scratch2.data(), frames);
-        }
+        for (auto& node : old->nodes)
+            process_node(node, c.scratch2.data(), frames, false, 1.0f);
         if (chain) {
-            for (auto& node : chain->nodes) {
-                if (node.kind == NodeKind::Nam && node.nam) {
-                    if (node.nam->HasQualityScaling() &&
-                        node.nam->GetQualityScaleFactor() != chain->quality) {
-                        node.nam->SetQualityScaleFactor(chain->quality);
-                    }
-                    node.nam->Process(c.scratch.data(), c.scratch.data(), frames);
-                } else if (node.kind == NodeKind::Ir && node.ir) {
-                    node.ir->process(c.scratch.data(), c.scratch.data(), frames);
-                }
-            }
+            for (auto& node : chain->nodes)
+                process_node(node, c.scratch.data(), frames, true,
+                             chain->quality);
         }
         int pos = c.fadePos.load(std::memory_order_relaxed);
         // 等功率交叉淡化（equal-power）：旧链 × cos(θ)、新链 × sin(θ)。
@@ -979,22 +1097,10 @@ static void process_block(const float* in, float* out, int frames, Ctx& c) {
         }
         c.fadePos.store(pos, std::memory_order_relaxed);
     } else if (chain) {
-        for (auto& node : chain->nodes) {
-            if (node.kind == NodeKind::Nam && node.nam) {
-                // Quality changes are applied by the audio thread at a block
-                // boundary. This preserves node reuse without racing NAM's
-                // mutable quality state from the live-file watcher.
-                if (node.nam->HasQualityScaling() &&
-                    node.nam->GetQualityScaleFactor() != chain->quality) {
-                    node.nam->SetQualityScaleFactor(chain->quality);
-                }
-                node.nam->Process(c.scratch.data(), c.scratch.data(), frames);
-            } else if (node.kind == NodeKind::Ir && node.ir) {
-                // FirFilter is sample-aligned and supports in-place processing;
-                // no additional audio block or staging buffer is introduced.
-                node.ir->process(c.scratch.data(), c.scratch.data(), frames);
-            }
-        }
+        for (auto& node : chain->nodes)
+            // Quality changes are applied at a block boundary, preserving
+            // node reuse without racing the live-file watcher.
+            process_node(node, c.scratch.data(), frames, true, chain->quality);
         std::copy(c.scratch.begin(), c.scratch.begin() + frames, out);
     } else {
         std::copy(c.scratch.begin(), c.scratch.begin() + frames, out);
@@ -1470,12 +1576,10 @@ int main(int argc, char** argv) {
         if (g_stop.load(std::memory_order_relaxed)) break;
         Pa_Sleep(100);
         if (controlPath && managedLive) {
-            std::string controlPayload;
+                std::string controlPayload;
             if (read_text_file(resolve_path(controlPath), controlPayload)
                 && controlPayload != lastControlPayload) {
                 lastControlPayload = controlPayload;
-                ctx.managedPreparedChain.reset();
-                ctx.managedPreparedTransactionId.clear();
                 nlohmann::json response = {
                     {"status", "rejected"},
                     {"session_id", ctx.runtimeSessionId},
@@ -1486,6 +1590,63 @@ int main(int argc, char** argv) {
                 std::string requestTransactionId;
                 try {
                     const auto request = nlohmann::json::parse(controlPayload);
+                    std::string operation;
+                    if (request.contains("operation")
+                        && request.at("operation").is_string())
+                        operation = request.at("operation").get<std::string>();
+                    if (operation == "calibrate_output") {
+                        std::string requestId;
+                        response["request_id"] = requestId;
+                        if (request.contains("request_id")
+                            && request.at("request_id").is_string()) {
+                            requestId = request.at("request_id").get<std::string>();
+                            response["request_id"] = requestId;
+                        }
+                        int slotIndex = -1;
+                        if (request.contains("slot_index")
+                            && request.at("slot_index").is_number_integer())
+                            slotIndex = request.at("slot_index").get<int>();
+                        if (requestId.empty() || slotIndex < 0 || slotIndex >= 6) {
+                            response["error"] = "invalid calibration request";
+                        } else {
+                            const auto current = std::atomic_load(&ctx.chain);
+                            const ChainNode* target = nullptr;
+                            if (current) {
+                                for (const auto& node : current->nodes) {
+                                    if (node.slotIndex == (size_t)slotIndex) {
+                                        target = &node;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!target) {
+                                response["error"] = "Slot is empty or bypassed";
+                            } else if (target->kind != NodeKind::Nam
+                                       || !target->nam) {
+                                response["error"] = "output calibration is only available for NAM";
+                            } else {
+                                const float recommendation =
+                                    target->nam->GetRecommendedOutputDBAdjustment();
+                                if (!std::isfinite(recommendation)) {
+                                    response["error"] = "NAM returned an invalid output recommendation";
+                                } else {
+                                    // The protocol deliberately bounds manual
+                                    // trims. Keep a backend recommendation
+                                    // inside the same safe range before the UI
+                                    // writes it to the Slot.
+                                    const float bounded = std::max(
+                                        SLOT_GAIN_MIN_DB,
+                                        std::min(SLOT_GAIN_MAX_DB,
+                                                 recommendation));
+                                    response["status"] = "calibrated";
+                                    response["output_gain_db"] = bounded;
+                                    response.erase("error");
+                                }
+                            }
+                        }
+                    } else {
+                    ctx.managedPreparedChain.reset();
+                    ctx.managedPreparedTransactionId.clear();
                     std::string transactionId;
                     if (request.contains("transaction_id")
                         && request.at("transaction_id").is_string())
@@ -1512,7 +1673,8 @@ int main(int argc, char** argv) {
                         std::string error;
                         std::shared_ptr<PreparedChain> preparedChain;
                         const bool prepared = preflight_chain(
-                            candidate, loader, sr, error, &preparedChain);
+                            candidate, loader, sr, error, &preparedChain,
+                            false, &ctx);
                         response["transaction_id"] = transactionId;
                         response["revision"] = revision;
                         response["status"] = prepared ? "prepared" : "rejected";
@@ -1525,6 +1687,7 @@ int main(int argc, char** argv) {
                             ctx.managedPreparedTransactionId.clear();
                             response["error"] = error;
                         }
+                    }
                     }
                 } catch (const std::exception& exception) {
                     response["transaction_id"] = requestTransactionId;

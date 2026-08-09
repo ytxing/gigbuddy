@@ -1,5 +1,6 @@
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -174,6 +175,31 @@ def test_runtime_prepare_round_trip_uses_transaction_identity(tmp_path, monkeypa
     assert request["operation"] == "prepare"
     assert request["transaction_id"] == "tx-1"
     assert request["candidate"]["revision"] == 3
+
+
+def test_output_calibration_round_trip_uses_slot_and_request_identity(
+        tmp_path, monkeypatch):
+    control_file = tmp_path / "control.json"
+    reply_file = tmp_path / "control.reply.json"
+    monkeypatch.setattr(live, "CONTROL_FILE", control_file)
+    monkeypatch.setattr(live, "CONTROL_REPLY_FILE", reply_file)
+    monkeypatch.setattr(live, "wait_for_engine_ready", lambda **_: "session-1")
+    monkeypatch.setattr(
+        live.uuid, "uuid4", lambda: SimpleNamespace(hex="request-1"))
+    reply_file.write_text(json.dumps({
+        "status": "calibrated",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "output_gain_db": 4.5,
+    }))
+
+    assert live.request_output_calibration(2, timeout=0.02) == 4.5
+    request = json.loads(control_file.read_text())
+    assert request == {
+        "operation": "calibrate_output",
+        "request_id": "request-1",
+        "slot_index": 2,
+    }
 
 
 def test_engine_ready_accepts_prepare_reply_for_the_same_session(tmp_path, monkeypatch):

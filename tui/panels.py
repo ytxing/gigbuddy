@@ -1028,6 +1028,14 @@ class ChainSlotWidget(Static):
     can_focus = True
     ALLOW_SELECT = False
 
+    IO_STEP_DB = 1.0
+    IO_VALUE_WIDTH = 5
+    IO_LABEL_WIDTH = 7
+    IO_BUTTON_WIDTH = 3
+    IO_GAP = 1
+    IO_CAL_WIDTH = 5
+    IO_PARAM_KEYS = ("input_gain_db", "output_gain_db")
+
     class SwitchRequested(Message):
         def __init__(self, index: int, direction: int) -> None:
             super().__init__()
@@ -1055,6 +1063,18 @@ class ChainSlotWidget(Static):
             self.index = index
             self.direction = direction
 
+    class ParamRequested(Message):
+        def __init__(self, index: int, key: str, delta: float) -> None:
+            super().__init__()
+            self.index = index
+            self.key = key
+            self.delta = float(delta)
+
+    class CalibrateRequested(Message):
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
     BINDINGS = [
         Binding("up", "switch_up", "prev model", show=False),
         Binding("down", "switch_down", "next model", show=False),
@@ -1062,6 +1082,10 @@ class ChainSlotWidget(Static):
         Binding("d", "delete_slot", "delete", show=False),
         Binding("alt+up", "move_up", "move ↑", show=False),
         Binding("alt+down", "move_down", "move ↓", show=False),
+        Binding("i", "input_down", "input dB -", show=False),
+        Binding("I", "input_up", "input dB +", show=False),
+        Binding("o", "output_down", "output dB -", show=False),
+        Binding("O", "output_up", "output dB +", show=False),
     ]
 
     def __init__(self, index: int, snapshot: SlotSnapshot,
@@ -1073,6 +1097,11 @@ class ChainSlotWidget(Static):
         self.gear = gear
         self.quality_unsupported = quality_unsupported
         self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
+        self._io_hover: tuple[str, object] | str | None = None
+        self._io_editing: str | None = None
+        self._io_edit_text = ""
+        self._slot_row = None
+        self._io_widget = None
         super().__init__(classes="chain-slot")
 
     @property
@@ -1091,13 +1120,140 @@ class ChainSlotWidget(Static):
             return "[bold $error]●[/]"
         return "[bold $state-idle]○[/]"
 
+    def _io_value(self, key: str) -> float:
+        try:
+            return float(getattr(self.snapshot, key, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _is_nam_slot(self) -> bool:
+        path = self.snapshot.path or ""
+        return bool(path) and Path(str(path)).suffix.casefold() == ".nam"
+
+    def bind_row(self, row) -> None:
+        self._slot_row = row
+
+    def bind_io_widget(self, widget) -> None:
+        self._io_widget = widget
+
+    def _format_io_value(self, key: str) -> str:
+        if self._io_editing == key:
+            return self._io_edit_text.rjust(self.IO_VALUE_WIDTH)
+        return f"{self._io_value(key):+05.1f}"
+
+    def _io_button(self, key: str, delta: float, text: str) -> str:
+        content = _escape(text)
+        if self._io_hover == (key, delta):
+            return f"[b $background on $accent]{content}[/]"
+        return f"[b $accent]{content}[/]"
+
+    def _io_calibrate_button(self) -> str:
+        content = _escape("[CAL]")
+        if self._io_hover == "calibrate":
+            return f"[b $background on $accent]{content}[/]"
+        return f"[b $accent]{content}[/]"
+
+    def _io_line_markup(self, label: str, key: str, *, calibrate: bool = False) -> str:
+        minus = self._io_button(key, -self.IO_STEP_DB, "[-]")
+        plus = self._io_button(key, self.IO_STEP_DB, "[+]")
+        value = self._format_io_value(key)
+        gap = " " * self.IO_GAP
+        line = (f"{label:<{self.IO_LABEL_WIDTH}}{minus}{gap}"
+                f"{value}{gap}{plus}")
+        if calibrate:
+            line += f"{gap}{self._io_calibrate_button()}"
+        return line
+
+    def _io_right_markup(self) -> str:
+        return "\n".join((
+            self._io_line_markup("input", "input_gain_db"),
+            self._io_line_markup(
+                "output", "output_gain_db", calibrate=self._is_nam_slot()),
+        ))
+
+    def _set_io_hover(self, hover: tuple[str, object] | str | None) -> None:
+        if hover == self._io_hover:
+            return
+        self._io_hover = hover
+        self._refresh_io_widget()
+
+    def _refresh_io_widget(self) -> None:
+        widget = self._io_widget
+        if widget is None:
+            return
+        try:
+            widget.refresh()
+        except RuntimeError:
+            pass
+
+    def _post_param(self, key: str, delta: float) -> None:
+        message = self.ParamRequested(self.index, key, delta)
+        message.set_sender(self)
+        self.post_message(message)
+
+    def _post_calibrate(self) -> None:
+        message = self.CalibrateRequested(self.index)
+        message.set_sender(self)
+        self.post_message(message)
+
+    def _begin_io_edit(self, key: str) -> None:
+        current = f"{self._io_value(key):+05.1f}".strip()
+        self._io_editing = key
+        self._io_edit_text = current
+        self._set_io_hover((key, "value"))
+        self.focus()
+
+    def _cancel_io_edit(self) -> None:
+        if self._io_editing is None:
+            return
+        self._io_editing = None
+        self._io_edit_text = ""
+        self._refresh_io_widget()
+        self._update_border()
+
+    def _apply_io_edit(self) -> None:
+        key = self._io_editing
+        text = self._io_edit_text.strip()
+        self._io_editing = None
+        self._io_edit_text = ""
+        if not text:
+            self._refresh_io_widget()
+            self._update_border()
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            self._refresh_io_widget()
+            self._update_border()
+            return
+        delta = round(value - self._io_value(key), 2)
+        self._refresh_io_widget()
+        self._update_border()
+        if delta:
+            self._post_param(key, delta)
+
+    def _append_io_edit_char(self, char: str) -> None:
+        if char in "+-" and self._io_edit_text:
+            return
+        if char == "." and "." in self._io_edit_text:
+            return
+        if len(self._io_edit_text) >= self.IO_VALUE_WIDTH:
+            return
+        self._io_edit_text += char
+        self._refresh_io_widget()
+
     def _update_border(self) -> None:
-        parent = self.parent
-        if parent is None:
+        row = self._slot_row
+        if row is None:
             return
         target = " - TARGET" if getattr(self, "is_target", False) else ""
-        parent.border_title = (
+        row.border_title = (
             f"{self._state_lamp()} {self._display_label()}{target}")
+
+    def _refresh_row_hint(self) -> None:
+        refresh = getattr(self._slot_row, "refresh_hint", None)
+        if refresh is not None:
+            refresh()
 
     def _content_width(self) -> int:
         return max(12, (self.size.width or 28) - 2)
@@ -1115,13 +1271,22 @@ class ChainSlotWidget(Static):
     def on_focus(self, _event) -> None:
         self._offset = 0
         self._update_border()
+        self._refresh_row_hint()
+        self._refresh_io_widget()
         self.refresh()
 
     def on_blur(self, _event) -> None:
+        self._cancel_io_edit()
         self._offset = 0
+        self._update_border()
+        self._refresh_row_hint()
+        self._refresh_io_widget()
         self.refresh()
 
     def on_resize(self, _event) -> None:
+        self._update_border()
+        self._refresh_row_hint()
+        self._refresh_io_widget()
         self.refresh()
 
     def set_target(self, value: bool) -> None:
@@ -1139,7 +1304,12 @@ class ChainSlotWidget(Static):
         self.quality_unsupported = quality_unsupported
         self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
         self._offset = 0
+        self._io_hover = None
+        self._io_editing = None
+        self._io_edit_text = ""
         self._update_border()
+        self._refresh_row_hint()
+        self._refresh_io_widget()
         self.refresh()
 
     def render(self) -> str:
@@ -1198,19 +1368,140 @@ class ChainSlotWidget(Static):
     def action_move_down(self) -> None:
         self.post_message(self.MoveRequested(self.index, +1))
 
+    def action_input_down(self) -> None:
+        self._post_param("input_gain_db", -self.IO_STEP_DB)
+
+    def action_input_up(self) -> None:
+        self._post_param("input_gain_db", self.IO_STEP_DB)
+
+    def action_output_down(self) -> None:
+        self._post_param("output_gain_db", -self.IO_STEP_DB)
+
+    def action_output_up(self) -> None:
+        self._post_param("output_gain_db", self.IO_STEP_DB)
+
+    def on_key(self, event: Key) -> None:
+        if self._io_editing is None:
+            return
+        event.stop()
+        if event.key == "escape":
+            self._cancel_io_edit()
+        elif event.key == "enter":
+            self._apply_io_edit()
+        elif event.key == "backspace":
+            self._io_edit_text = self._io_edit_text[:-1]
+            self._refresh_io_widget()
+            self._update_border()
+        else:
+            char = "." if event.key == "full_stop" else event.key
+            if len(char) == 1 and char in "+-0123456789.":
+                self._append_io_edit_char(char)
+
+
+class ChainSlotIOWidget(Static):
+    """Fixed-width two-row I/O controls beside one Slot."""
+
+    ALLOW_SELECT = False
+
+    def __init__(self, slot: ChainSlotWidget) -> None:
+        self.slot = slot
+        super().__init__(classes="chain-slot-io")
+        slot.bind_io_widget(self)
+
+    def render(self) -> str:
+        return self.slot._io_right_markup()
+
+    def _hit_at_offset(self, offset_x: int, offset_y: int):
+        """Return the control under a coordinate local to this widget.
+
+        The hit map mirrors the fixed columns in ``ChainSlotWidget`` rather
+        than parsing rendered text.  That keeps mouse behavior stable when a
+        value changes or CAL is conditionally visible.
+        """
+        if offset_y not in (0, 1):
+            return None
+
+        key = ("input_gain_db" if offset_y == 0
+               else "output_gain_db")
+        minus_start = self.slot.IO_LABEL_WIDTH
+        value_start = (minus_start + self.slot.IO_BUTTON_WIDTH
+                       + self.slot.IO_GAP)
+        plus_start = (value_start + self.slot.IO_VALUE_WIDTH
+                      + self.slot.IO_GAP)
+        if (minus_start <= offset_x
+                < minus_start + self.slot.IO_BUTTON_WIDTH):
+            return ("param", key, -self.slot.IO_STEP_DB,
+                    minus_start, minus_start + self.slot.IO_BUTTON_WIDTH)
+        if value_start <= offset_x < value_start + self.slot.IO_VALUE_WIDTH:
+            return ("value", key, 0.0, value_start,
+                    value_start + self.slot.IO_VALUE_WIDTH)
+        if (plus_start <= offset_x
+                < plus_start + self.slot.IO_BUTTON_WIDTH):
+            return ("param", key, self.slot.IO_STEP_DB,
+                    plus_start, plus_start + self.slot.IO_BUTTON_WIDTH)
+        cal_start = (plus_start + self.slot.IO_BUTTON_WIDTH
+                     + self.slot.IO_GAP)
+        if (offset_y == 1 and self.slot._is_nam_slot()
+                and cal_start <= offset_x
+                < cal_start + self.slot.IO_CAL_WIDTH):
+            return ("calibrate", None, 0.0,
+                    cal_start, cal_start + self.slot.IO_CAL_WIDTH)
+        return None
+
+    def _hit_at(self, screen_x: int, screen_y: int):
+        """Return the control under a screen coordinate."""
+        try:
+            offset_x = screen_x - self.region.x
+            offset_y = screen_y - self.region.y
+        except Exception:
+            return None
+        return self._hit_at_offset(offset_x, offset_y)
+
+    def on_click(self, event: MouseEvent) -> None:
+        hit = self._hit_at(event.screen_x, event.screen_y)
+        if hit is None:
+            return
+        kind, key, delta, _start, _end = hit
+        self.slot.focus()
+        if kind == "param" and key is not None:
+            self.slot._post_param(key, delta)
+        elif kind == "value" and key is not None:
+            self.slot._begin_io_edit(key)
+        elif kind == "calibrate":
+            self.slot._post_calibrate()
+        event.stop()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        hit = self._hit_at(event.screen_x, event.screen_y)
+        if hit is None:
+            self.slot._set_io_hover(None)
+            return
+        kind, key, delta, _start, _end = hit
+        hover = (key, delta) if kind == "param" else kind
+        self.slot._set_io_hover(hover)
+        event.stop()
+
+    def on_leave(self, _event: Leave) -> None:
+        self.slot._set_io_hover(None)
+
 
 class ChainSlotRow(Horizontal):
-    """Slot frame with its actions rendered in the lower-right border hint."""
+    """Slot frame with independent content, I/O, and action regions."""
 
     def __init__(self, index: int) -> None:
         self.index = index
         self.slot: ChainSlotWidget | None = None
+        self.io_widget: ChainSlotIOWidget | None = None
         super().__init__(classes="chain-slot-row",
                          id=f"chain-slot-row-{index}")
 
     def bind_slot(self, slot: ChainSlotWidget) -> None:
         self.slot = slot
+        slot.bind_row(self)
         self.refresh_hint()
+
+    def bind_io_widget(self, widget: ChainSlotIOWidget) -> None:
+        self.io_widget = widget
 
     def _hint_actions(self) -> list[tuple[str, Callable[[], None]]]:
         slot = self.slot
@@ -1236,17 +1527,48 @@ class ChainSlotRow(Horizontal):
         message.set_sender(self.slot)
         self.slot.post_message(message)
 
+    def _focus_slot_now(self) -> None:
+        slot = self.slot
+        if slot is None:
+            return
+        app = getattr(slot, "app", None)
+        if app is not None:
+            app.set_focus(slot)
+        else:
+            slot.focus()
+
     def refresh_hint(self) -> None:
         set_border_hint_layout(
             self, "", [token for token, _action in self._hint_actions()])
 
     def handle_hint_click(self, event: MouseEvent) -> bool:
-        return border_hint_click(self, event, self._hint_actions())
+        slot = self.slot
+        if slot is None:
+            return False
+        # A border click can blur the Slot before Click is dispatched. Restore
+        # focus first so the visible hint and its hit map stay in sync.
+        self._focus_slot_now()
+        hit = border_hint_hit(self, event.screen_x, event.screen_y)
+        if hit is None:
+            return False
+        label, offset = hit
+        for token, action in self._hint_actions():
+            span = hint_span(label, token)
+            if span is None or not span[0] <= offset < span[1]:
+                continue
+            event.stop()
+            action()
+            return True
+        return False
 
     def on_mount(self) -> None:
+        if self.slot is not None:
+            self.slot._update_border()
         self.refresh_hint()
 
     def on_resize(self, _event) -> None:
+        if self.slot is not None:
+            self.slot._update_border()
         self.refresh_hint()
 
     def on_click(self, event: MouseEvent) -> None:
@@ -1260,6 +1582,8 @@ class ChainSlotRow(Horizontal):
                 [token for token, _action in self._hint_actions()]))
 
     def on_leave(self, _event: Leave) -> None:
+        if self.slot is not None:
+            self.slot._set_io_hover(None)
         set_border_hint_hover(self, None)
 
 
@@ -1690,7 +2014,11 @@ class ChainPanel(Vertical):
                     self._slot_widgets[snapshot.index] = slot
                     self._slot_rows[snapshot.index] = row
                     row.bind_slot(slot)
-                    yield slot
+                    with Horizontal(classes="chain-slot-main"):
+                        yield slot
+                        io_widget = ChainSlotIOWidget(slot)
+                        row.bind_io_widget(io_widget)
+                        yield io_widget
                     with Horizontal(classes="chain-slot-actions"):
                         yield ChainSlotAction(slot, -1)
                         yield ChainSlotAction(slot, +1)
@@ -3721,6 +4049,47 @@ class DetailPane(Vertical):
             slot_label=tone.get("gear") if tone else None,
             origin="slot",
             focus_table=focus_table)
+        if self._slot_pack_needs_remote_models(tone, models):
+            self._start_slot_pack_remote_load(int(tone["id"]))
+
+    @staticmethod
+    def _slot_pack_needs_remote_models(tone: dict,
+                                        models: list[dict]) -> bool:
+        """Detect a partial local pack from the server's model count.
+
+        ``library.get_tone`` only contains rows with a local file.  The
+        persisted ``models_count`` is the complete TONE3000 pack size, so a
+        smaller local set means the slot view needs a remote metadata merge.
+        Older/imported test rows without that count keep the synchronous local
+        fallback instead of causing an unsolicited network request.
+        """
+        if tone.get("id") is None or tone.get("models_count") is None:
+            return False
+        try:
+            total = int(tone["models_count"])
+        except (TypeError, ValueError):
+            return False
+        if total <= 0:
+            return False
+        downloaded = sum(1 for model in models if model.get("local_path"))
+        return downloaded < total
+
+    def _start_slot_pack_remote_load(self, tone_id: int) -> None:
+        """Hydrate a partial local Slot pack without taking table focus."""
+        if (not self._pack_mode or self._pack_slot_index is None
+                or int((self._pack_tone or {}).get("id") or 0) != tone_id):
+            return
+        # A Slot pack is still a local chain context, but its complete row set
+        # is remote-backed. This lets the existing install/uninstall paths
+        # operate on mixed downloaded and not-downloaded rows.
+        self._pack_remote = True
+        self._pack_loading = True
+        self._pack_error = False
+        self._pack_progress_status = "loading…"
+        self._update_pack_hint()
+        self.run_worker(
+            partial(self._fetch_remote_models, tone_id, self._view_generation),
+            name="remote-slot-pack", exclusive=True)
 
     def show_slot_empty(self, slot_index: int, *, target: bool = True) -> None:
         """Show an Empty Slot without retaining the previous pack context."""

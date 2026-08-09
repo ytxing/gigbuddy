@@ -172,6 +172,51 @@ def test_quality_reset_default_is_one():
     assert CHAIN_PARAMETER_DEFAULTS["quality"] == 1.0
 
 
+def test_slot_renderer_reserves_two_digit_io_values():
+    pytest.importorskip("textual", reason="T05 renderer smoke needs Textual")
+    from rich.text import Text
+
+    from tui.panels import ChainSlotIOWidget, ChainSlotWidget
+
+    state = ChainState(_chain(["amp.nam"], slots=[{
+        "path": "amp.nam", "input_gain_db": 9.0, "output_gain_db": -12.0,
+    }]))
+    widget = ChainSlotWidget(0, state.slot(0), title="Tone", gear="amp")
+
+    assert widget._format_io_value("input_gain_db") == "+09.0"
+    assert widget._format_io_value("output_gain_db") == "-12.0"
+    io = ChainSlotIOWidget(widget)
+    lines = [Text.from_markup(line).plain
+             for line in io.render().splitlines()]
+    assert lines == [
+        "input  [-] +09.0 [+]",
+        "output [-] -12.0 [+] [CAL]",
+    ]
+    assert [Text.from_markup(line).cell_len for line in lines] == [20, 26]
+
+
+def test_slot_io_hit_map_keeps_two_rows_and_button_columns():
+    pytest.importorskip("textual", reason="T05 renderer smoke needs Textual")
+    from tui.panels import ChainSlotIOWidget, ChainSlotWidget
+
+    state = ChainState(_chain(["amp.nam"]))
+    slot = ChainSlotWidget(0, state.slot(0), title="Tone", gear="amp")
+    io = ChainSlotIOWidget(slot)
+
+    # The standalone widget owns its coordinate system: input and output
+    # controls share the same columns, while CAL is only on output's row.
+    assert io._hit_at_offset(slot.IO_LABEL_WIDTH, 0)[:3] == (
+        "param", "input_gain_db", -1.0)
+    plus_start = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH + slot.IO_GAP
+                  + slot.IO_VALUE_WIDTH + slot.IO_GAP)
+    assert io._hit_at_offset(plus_start, 1)[:3] == (
+        "param", "output_gain_db", 1.0)
+    cal_start = plus_start + slot.IO_BUTTON_WIDTH + slot.IO_GAP
+    assert io._hit_at_offset(cal_start + 2, 1)[:3] == (
+        "calibrate", None, 0.0)
+    assert io._hit_at_offset(cal_start + 2, 0) is None
+
+
 @pytest.mark.parametrize(
     ("gear", "label"),
     [
@@ -281,6 +326,49 @@ def test_dynamic_panel_routes_focus_bypass_reorder_delete_and_add(
             assert panel.state.target_index == 1
 
     asyncio.run(scenario())
+
+
+def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("textual", reason="dynamic I/O smoke needs Textual")
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel, ChainSlotIOWidget
+
+    current = {"chain": _chain([str(tmp_path / "a.nam")], revision=1)}
+    monkeypatch.setattr("tui.app.live.read_chain",
+                        lambda: dict(current["chain"]))
+    monkeypatch.setattr("tui.app.live.last_chain_write_fingerprint",
+                        lambda: None)
+
+    def write_chain(chain: dict, **_kwargs):
+        current["chain"] = dict(chain)
+        current["chain"]["revision"] = int(chain.get("revision", 0)) + 1
+
+    monkeypatch.setattr("tui.app.live.write_chain", write_chain)
+    monkeypatch.setattr("tui.app.live.request_output_calibration",
+                        lambda _index: 4.5)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(ChainPanel)
+            io = panel.query_one(ChainSlotIOWidget)
+
+            slot = panel.slot_widgets[0]
+            plus_x = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH + slot.IO_GAP
+                      + slot.IO_VALUE_WIDTH + slot.IO_GAP + 1)
+            await pilot.click(io, offset=(plus_x, 0))
+            await pilot.pause()
+            assert panel.state.slot(0).input_gain_db == pytest.approx(1.0)
+
+            await pilot.click(io, offset=(23, 1))
+            await pilot.pause(0.15)
+            assert panel.state.slot(0).output_gain_db == pytest.approx(4.5)
+
+    asyncio.run(scenario())
+
 
 def test_dynamic_panel_tab_order_has_single_params_stop(monkeypatch, tmp_path):
     """v0.1.1 契约：ChainParams 是整个参数行的单一焦点站（无每参数 overlay）。"""

@@ -63,6 +63,33 @@ def test_slot_count_round_trips_with_order_and_duplicates(tmp_path, count):
     assert all(Path(slot["path"]).name == "amp.nam" for slot in got["slots"])
 
 
+def test_slot_gain_fields_validate_and_default_zero_stays_legacy_shaped(tmp_path):
+    root = _root(tmp_path)
+    got = chain_protocol.normalize_chain({
+        "slots": [{"path": "data/tones/amp.nam",
+                   "input_gain_db": 3.5, "output_gain_db": -12.0}],
+    }, root=root)
+    assert got["slots"][0]["input_gain_db"] == 3.5
+    assert got["slots"][0]["output_gain_db"] == -12.0
+
+    chain_file = root / "data" / "live_chain.json"
+    chain_protocol.write_chain_file(chain_file, got, root=root)
+    assert json.loads(chain_file.read_text())["slots"] == [{
+        "path": "data/tones/amp.nam",
+        "input_gain_db": 3.5,
+        "output_gain_db": -12.0,
+    }]
+
+    for key, value in (("input_gain_db", -24.1),
+                       ("output_gain_db", 24.1),
+                       ("input_gain_db", True)):
+        with pytest.raises(chain_protocol.ChainProtocolError):
+            chain_protocol.normalize_chain(
+                {"slots": [{"path": "data/tones/amp.nam", key: value}]},
+                root=root,
+            )
+
+
 @pytest.mark.parametrize(
     "legacy", [{"model": None, "ir": None},
                 {"model": "data/tones/amp.nam"},

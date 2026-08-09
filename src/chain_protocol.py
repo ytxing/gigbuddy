@@ -33,6 +33,9 @@ DEFAULTS = {
     "mute": False,
     "revision": 0,
 }
+SLOT_GAIN_DEFAULT_DB = 0.0
+SLOT_GAIN_MIN_DB = -24.0
+SLOT_GAIN_MAX_DB = 24.0
 PLAY_STATES = {"playing", "paused", "stopped"}
 SUPPORTED_EXTENSIONS = {".nam", ".wav"}
 
@@ -200,7 +203,7 @@ def normalize_chain(candidate: Any, *, root: Path = PROJECT_ROOT,
                 raw_slots.append({"path": legacy})
     if not isinstance(raw_slots, list) or len(raw_slots) > 6:
         raise ChainProtocolError("slots must contain between 0 and 6 items")
-    slots: list[dict[str, str | None]] = []
+    slots: list[dict[str, Any]] = []
     for index, item in enumerate(raw_slots):
         if not isinstance(item, dict):
             raise ChainProtocolError(f"slot {index} must be an object")
@@ -208,7 +211,20 @@ def normalize_chain(candidate: Any, *, root: Path = PROJECT_ROOT,
             raise ChainProtocolError(f"slot {index} must contain path")
         path = item["path"]
         extra = {key: value for key, value in item.items()
-                 if key not in {"path", "candidate"}}
+                 if key not in {"path", "candidate", "input_gain_db",
+                                "output_gain_db"}}
+        input_gain_db = _number(
+            item.get("input_gain_db", SLOT_GAIN_DEFAULT_DB),
+            f"slot {index}.input_gain_db", SLOT_GAIN_MIN_DB,
+            SLOT_GAIN_MAX_DB)
+        output_gain_db = _number(
+            item.get("output_gain_db", SLOT_GAIN_DEFAULT_DB),
+            f"slot {index}.output_gain_db", SLOT_GAIN_MIN_DB,
+            SLOT_GAIN_MAX_DB)
+        if input_gain_db != SLOT_GAIN_DEFAULT_DB:
+            extra["input_gain_db"] = input_gain_db
+        if output_gain_db != SLOT_GAIN_DEFAULT_DB:
+            extra["output_gain_db"] = output_gain_db
         candidate_path = item.get("candidate")
         if candidate_path is not None:
             if path is not None:
@@ -259,10 +275,16 @@ def _serializable_chain(chain: dict[str, Any], *, root: Path) -> dict[str, Any]:
     result["slots"] = []
     for slot in normalized["slots"]:
         path = slot["path"]
-        entry: dict[str, str | None] = {
+        entry: dict[str, Any] = {
             "path": None if path is None else
             str(Path(path).resolve().relative_to(root)),
         }
+        input_gain_db = slot.get("input_gain_db", SLOT_GAIN_DEFAULT_DB)
+        output_gain_db = slot.get("output_gain_db", SLOT_GAIN_DEFAULT_DB)
+        if input_gain_db != SLOT_GAIN_DEFAULT_DB:
+            entry["input_gain_db"] = input_gain_db
+        if output_gain_db != SLOT_GAIN_DEFAULT_DB:
+            entry["output_gain_db"] = output_gain_db
         candidate = slot.get("candidate")
         if candidate is not None:
             # Bypassed slots persist their recovery candidate so the UI can

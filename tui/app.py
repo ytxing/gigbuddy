@@ -634,8 +634,11 @@ class GigBuddyApp(App):
         display: none;
     }
     /* Remote download states are a persistent list legend, not a result row. */
+    #tone-login-button {
+        height: 1; min-width: 24; width: auto; margin: 0 1; padding: 0 1;
+    }
     #tone-status {
-        display: none; dock: bottom; height: 1; padding: 0 1;
+        dock: bottom; height: 1; padding: 0 1;
         color: $text-muted; content-align: left middle;
     }
     #lib-status { color: $text-muted; padding: 0 1; }
@@ -715,6 +718,9 @@ class GigBuddyApp(App):
         border: round $surface-lighten-2;
         border-title-color: $text-muted;
     }
+    ChainPanel .chain-slot-main {
+        width: 1fr; height: 2; layout: horizontal;
+    }
     ChainPanel .chain-slot {
         width: 1fr; height: 2; padding: 0 1;
         background: transparent; border: none;
@@ -724,6 +730,11 @@ class GigBuddyApp(App):
     ChainPanel .chain-slot-row:focus-within {
         border: round $accent;
         border-title-color: $accent;
+    }
+    ChainPanel .chain-slot-io {
+        width: 26; min-width: 26; max-width: 26; height: 2;
+        padding: 0; color: $text;
+        background: transparent;
     }
     ChainPanel .chain-slot-actions {
         width: 11; height: 4; layout: vertical; padding: 0 1;
@@ -1039,6 +1050,7 @@ class GigBuddyApp(App):
             int, str, float, bool, bool] | None = None
         self._param_hold_worker_active = False
         self._param_hold_last_commit_at = 0.0
+        self._calibration_generation = 0
         for guitar_theme in GUITAR_AMP_THEMES:
             self.register_theme(guitar_theme)
         self.register_theme(COMPAT_DARK_THEME)
@@ -1403,6 +1415,7 @@ class GigBuddyApp(App):
             # touching widgets after the app has been unmounted.
             self._param_hold_generation += 1
             self._param_hold_pending = None
+        self._calibration_generation += 1
         if self._header_status_timer is not None:
             self._header_status_timer.stop()
             self._header_status_timer = None
@@ -2311,6 +2324,81 @@ class GigBuddyApp(App):
             lambda state: state.load_file(index, next_path),
             f"Slot {index + 1:02d} → {live.short_name(next_path)}")
 
+    def _adjust_slot_gain(self, index: int, key: str, delta: float) -> None:
+        if key not in {"input_gain_db", "output_gain_db"}:
+            self.notify("Unknown Slot parameter", severity="warning")
+            return
+        label = "Input" if key == "input_gain_db" else "Output"
+        direction = "+" if delta >= 0 else "-"
+        self._commit_slot_mutation(
+            lambda state: state.adjust_slot_gain(index, key, delta),
+            f"Slot {index + 1:02d} {label} {direction}{abs(delta):g} dB",
+            failure_note=f"Slot {index + 1:02d} {label} is already at its limit")
+
+    def _calibrate_slot_output(self, index: int) -> None:
+        panel = self.query_one(ChainPanel)
+        try:
+            snapshot = panel.state.slot(index)
+        except ChainStateError as exc:
+            self.notify(str(exc), severity="warning")
+            return
+        path = snapshot.path
+        if not path or Path(path).suffix.casefold() != ".nam":
+            self.notify("CAL is available only for an active NAM Slot",
+                        severity="warning")
+            return
+        self._calibration_generation += 1
+        generation = self._calibration_generation
+        threading.Thread(
+            target=self._calibrate_slot_worker,
+            args=(generation, index, path),
+            name="slot-output-calibration", daemon=True).start()
+        self.notify(f"Calibrating Slot {index + 1:02d}…")
+
+    def _calibrate_slot_worker(self, generation: int, index: int,
+                               expected_path: str) -> None:
+        try:
+            value = live.request_output_calibration(index)
+        except Exception as exc:
+            try:
+                self.call_from_thread(
+                    self._slot_calibration_failed, generation, str(exc))
+            except Exception:
+                pass
+            return
+        try:
+            self.call_from_thread(
+                self._apply_slot_calibration, generation, index,
+                expected_path, value)
+        except Exception:
+            pass
+
+    def _slot_calibration_failed(self, generation: int, error: str) -> None:
+        if generation != self._calibration_generation:
+            return
+        self.notify(f"Calibration failed: {error}", severity="error")
+
+    def _apply_slot_calibration(self, generation: int, index: int,
+                                expected_path: str, value: float) -> None:
+        if generation != self._calibration_generation:
+            return
+        panel = self.query_one(ChainPanel)
+        try:
+            snapshot = panel.state.slot(index)
+        except ChainStateError as exc:
+            self.notify(str(exc), severity="warning")
+            return
+        if snapshot.path != expected_path:
+            self.notify("Calibration discarded: Slot changed while waiting",
+                        severity="warning")
+            return
+        if abs(snapshot.output_gain_db - value) < 0.005:
+            self.notify(f"Slot {index + 1:02d} output is already calibrated")
+            return
+        self._commit_slot_mutation(
+            lambda state: state.set_slot_gain(index, "output_gain_db", value),
+            f"Calibrated Slot {index + 1:02d} output to {value:+.1f} dB")
+
     def on_add_slot_button_requested(self, _event) -> None:
         self._add_slot()
 
@@ -2333,6 +2421,14 @@ class GigBuddyApp(App):
     def on_chain_slot_widget_move_requested(
             self, event: ChainSlotWidget.MoveRequested) -> None:
         self._move_slot(event.index, event.direction)
+
+    def on_chain_slot_widget_param_requested(
+            self, event: ChainSlotWidget.ParamRequested) -> None:
+        self._adjust_slot_gain(event.index, event.key, event.delta)
+
+    def on_chain_slot_widget_calibrate_requested(
+            self, event: ChainSlotWidget.CalibrateRequested) -> None:
+        self._calibrate_slot_output(event.index)
 
     def on_clear_slots_confirm_confirmed(
             self, _event: ClearSlotsConfirm.Confirmed) -> None:

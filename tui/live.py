@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 import hashlib
+import math
 import os
 import sys
 import tempfile
@@ -294,6 +295,51 @@ def request_runtime_prepare(chain: dict, transaction_id: str, *,
         time.sleep(poll_interval)
     raise TimeoutError(
         f"timed out waiting for managed prepare transaction {transaction_id}")
+
+
+def request_output_calibration(slot_index: int, *, timeout: float = 2.0,
+                               poll_interval: float = 0.02) -> float:
+    """Ask the managed engine for one active NAM Slot's output trim."""
+    if isinstance(slot_index, bool) or not isinstance(slot_index, int):
+        raise ValueError("Slot calibration requires an integer index")
+    if slot_index < 0 or slot_index >= 6:
+        raise ValueError("Slot calibration index is out of range")
+    session_id = wait_for_engine_ready(
+        timeout=timeout, poll_interval=poll_interval)
+    request_id = uuid.uuid4().hex
+    _write_json_atomic(CONTROL_FILE, {
+        "operation": "calibrate_output",
+        "request_id": request_id,
+        "slot_index": slot_index,
+    })
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            response = json.loads(CONTROL_REPLY_FILE.read_text())
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+            response = None
+        if isinstance(response, dict):
+            if response.get("request_id") != request_id:
+                time.sleep(poll_interval)
+                continue
+            if response.get("session_id") != session_id:
+                time.sleep(poll_interval)
+                continue
+            if response.get("status") == "calibrated":
+                value = response.get("output_gain_db")
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                        or not chain_protocol.SLOT_GAIN_MIN_DB <= value
+                        <= chain_protocol.SLOT_GAIN_MAX_DB):
+                    raise RuntimeError("engine returned an invalid output recommendation")
+                return float(value)
+            if response.get("status") == "rejected":
+                raise RuntimeError(
+                    f"output calibration failed: "
+                    f"{response.get('error') or 'request rejected'}")
+        time.sleep(poll_interval)
+    raise TimeoutError(
+        f"timed out waiting for output calibration Slot {slot_index + 1:02d}")
 
 
 def wait_for_engine_ready(*, timeout: float = 2.0,

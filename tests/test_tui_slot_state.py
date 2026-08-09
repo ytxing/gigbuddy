@@ -75,10 +75,42 @@ def test_target_follows_reorder_and_delete_prefers_new_position():
     state.delete_slot(0)
     assert state.target_index == 0
     assert state.slot(0).path == "c"
-
     state.delete_slot(0)
     assert state.slot_count == 0
     assert state.target_index is None
+
+
+def test_slot_gains_follow_reorder_and_survive_bypass():
+    state = _state("a.nam", "b.wav")
+    state.set_slot_gain(0, "input_gain_db", 3.5)
+    state.set_slot_gain(0, "output_gain_db", -2.0)
+    state.focus_slot(0)
+
+    assert state.move_slot(0, 1) is True
+    assert state.slot(1).input_gain_db == 3.5
+    assert state.slot(1).output_gain_db == -2.0
+    assert state.toggle_bypass(1) is True
+    assert state.slot(1).status is SlotStatus.BYPASS
+    assert state.to_chain()["slots"][1] == {
+        "path": None,
+        "candidate": "a.nam",
+        "input_gain_db": 3.5,
+        "output_gain_db": -2.0,
+    }
+
+    with pytest.raises(ChainStateError):
+        state.set_slot_gain(1, "output_gain_db", 24.1)
+
+
+def test_apply_candidate_refreshes_gains_when_paths_are_unchanged():
+    state = _state("a.nam")
+    state.apply_candidate({
+        "slots": [{"path": "a.nam", "input_gain_db": 2.5,
+                    "output_gain_db": -1.5}],
+    })
+
+    assert state.slot(0).input_gain_db == 2.5
+    assert state.slot(0).output_gain_db == -1.5
 
 
 def test_last_target_delete_falls_back_to_previous_slot():

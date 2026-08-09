@@ -27,6 +27,9 @@ from typing import Any, Protocol
 
 
 MAX_SLOTS = 6
+SLOT_GAIN_DEFAULT_DB = 0.0
+SLOT_GAIN_MIN_DB = -24.0
+SLOT_GAIN_MAX_DB = 24.0
 _UNSET = object()
 
 
@@ -65,6 +68,8 @@ class SlotSnapshot:
     path: str | None
     candidate: str | None
     status: SlotStatus
+    input_gain_db: float = SLOT_GAIN_DEFAULT_DB
+    output_gain_db: float = SLOT_GAIN_DEFAULT_DB
     overlay: SlotOverlay | None = None
     error: str | None = None
     operation_id: int | str | None = None
@@ -146,6 +151,8 @@ class ManagedCommitAdapter(Protocol):
 class _Slot:
     path: str | None
     candidate: str | None = None
+    input_gain_db: float = SLOT_GAIN_DEFAULT_DB
+    output_gain_db: float = SLOT_GAIN_DEFAULT_DB
     overlay: SlotOverlay | None = None
     error: str | None = None
     operation_id: int | str | None = None
@@ -177,9 +184,18 @@ def _slots_from_chain(chain: Mapping[str, Any],
     """
     raw_slots = chain.get("slots") or []
     return [
-        _Slot(path, candidate=(raw_slots[index].get("candidate")
-                               if index < len(raw_slots) else None)
-              if carry_candidates else None)
+        _Slot(
+            path,
+            candidate=(raw_slots[index].get("candidate")
+                       if index < len(raw_slots) else None)
+            if carry_candidates else None,
+            input_gain_db=float(
+                raw_slots[index].get("input_gain_db", SLOT_GAIN_DEFAULT_DB)
+                if index < len(raw_slots) else SLOT_GAIN_DEFAULT_DB),
+            output_gain_db=float(
+                raw_slots[index].get("output_gain_db", SLOT_GAIN_DEFAULT_DB)
+                if index < len(raw_slots) else SLOT_GAIN_DEFAULT_DB),
+        )
         for index, path in enumerate(paths)
     ]
 
@@ -222,6 +238,20 @@ def _validate_chain_shape(chain: Mapping[str, Any]) -> None:
     a malformed poll cannot turn the last valid state into an Empty chain.
     """
     _slot_paths(chain)
+    raw_slots = chain.get("slots") or []
+    for index, item in enumerate(raw_slots):
+        if not isinstance(item, Mapping):
+            continue
+        for key in ("input_gain_db", "output_gain_db"):
+            if key not in item:
+                continue
+            value = item[key]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or not SLOT_GAIN_MIN_DB <= value <= SLOT_GAIN_MAX_DB):
+                raise ChainStateError(
+                    f"slot {index}.{key} must be between "
+                    f"{SLOT_GAIN_MIN_DB} and {SLOT_GAIN_MAX_DB}")
     ranges = {"gain": (0.0, 10.0), "master": (0.0, 10.0), "quality": (0.0, 1.0)}
     for key, (lower, upper) in ranges.items():
         if key not in chain:
@@ -308,6 +338,14 @@ def _chain_with_slots(chain: Mapping[str, Any], paths: Sequence[str | None]) -> 
                 # Bypassed slots keep their recovery candidate so the UI can
                 # show BYPASS (with the model name) instead of an empty slot.
                 slot["candidate"] = candidate
+            input_gain_db = raw_slots[index].get(
+                "input_gain_db", SLOT_GAIN_DEFAULT_DB)
+            output_gain_db = raw_slots[index].get(
+                "output_gain_db", SLOT_GAIN_DEFAULT_DB)
+            if input_gain_db != SLOT_GAIN_DEFAULT_DB:
+                slot["input_gain_db"] = input_gain_db
+            if output_gain_db != SLOT_GAIN_DEFAULT_DB:
+                slot["output_gain_db"] = output_gain_db
         normalized.append(slot)
     output["slots"] = normalized
     return output
@@ -424,6 +462,10 @@ class ChainState:
         slots: list[dict[str, object]] = []
         for slot in self._slots:
             entry: dict[str, object] = {"path": slot.path}
+            if slot.input_gain_db != SLOT_GAIN_DEFAULT_DB:
+                entry["input_gain_db"] = slot.input_gain_db
+            if slot.output_gain_db != SLOT_GAIN_DEFAULT_DB:
+                entry["output_gain_db"] = slot.output_gain_db
             if slot.candidate is not None:
                 entry["candidate"] = slot.candidate
             slots.append(entry)
@@ -477,6 +519,8 @@ class ChainState:
             index=index,
             path=deleted.path,
             candidate=deleted.candidate,
+            input_gain_db=deleted.input_gain_db,
+            output_gain_db=deleted.output_gain_db,
             status=deleted.status,
             overlay=deleted.overlay,
             error=deleted.error,
@@ -567,6 +611,41 @@ class ChainState:
             raise ChainStateError("add or select a target slot")
         return self.load_file(index, path)
 
+    def set_slot_gain(self, index: int, key: str, value: float) -> bool:
+        """Set one Slot trim in dB and report whether the value changed."""
+        index = self._check_index(index)
+        if key not in {"input_gain_db", "output_gain_db"}:
+            raise ChainStateError(f"unknown Slot gain: {key}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ChainStateError(f"Slot {key} must be a number")
+        if not math.isfinite(value):
+            raise ChainStateError(f"Slot {key} must be finite")
+        if not SLOT_GAIN_MIN_DB <= value <= SLOT_GAIN_MAX_DB:
+            raise ChainStateError(
+                f"Slot {key} must be between {SLOT_GAIN_MIN_DB} and "
+                f"{SLOT_GAIN_MAX_DB}")
+        value = round(float(value), 2)
+        slot = self._slots[index]
+        if getattr(slot, key) == value:
+            return False
+        self._mark_local_mutation()
+        setattr(slot, key, value)
+        return True
+
+    def adjust_slot_gain(self, index: int, key: str, delta: float) -> bool:
+        """Adjust one Slot trim in dB without exceeding the protocol range."""
+        index = self._check_index(index)
+        if key not in {"input_gain_db", "output_gain_db"}:
+            raise ChainStateError(f"unknown Slot gain: {key}")
+        current = float(getattr(self._slots[index], key))
+        if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+            raise ChainStateError("Slot gain delta must be a number")
+        if not math.isfinite(delta):
+            raise ChainStateError("Slot gain delta must be finite")
+        value = max(SLOT_GAIN_MIN_DB, min(SLOT_GAIN_MAX_DB,
+                                           current + float(delta)))
+        return self.set_slot_gain(index, key, value)
+
     def toggle_target_bypass(self) -> bool:
         index = self.target_index
         if index is None:
@@ -655,6 +734,11 @@ class ChainState:
                 if target_index is not None and target_index < len(self._slots)
                 else None
             )
+        else:
+            incoming_slots = _slots_from_chain(incoming, paths)
+            for current, candidate in zip(self._slots, incoming_slots):
+                current.input_gain_db = candidate.input_gain_db
+                current.output_gain_db = candidate.output_gain_db
         self._chain = _chain_with_slots(
             incoming, [slot.path for slot in self._slots])
         self._chain_error = None
@@ -863,6 +947,8 @@ class ChainState:
             index=index,
             path=slot.path,
             candidate=slot.candidate,
+            input_gain_db=slot.input_gain_db,
+            output_gain_db=slot.output_gain_db,
             status=slot.status,
             overlay=slot.overlay,
             error=slot.error,
