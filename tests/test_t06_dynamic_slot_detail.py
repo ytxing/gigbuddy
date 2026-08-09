@@ -1,6 +1,7 @@
 """Narrow T06 coverage for canonical Slot-aware DetailPane behavior."""
 
 import asyncio
+import time
 from pathlib import Path
 
 from tui.app import GigBuddyApp
@@ -103,6 +104,92 @@ def test_slot_focus_opens_slot_pack_and_tracks_three_states(monkeypatch, tmp_pat
     run(scenario())
 
 
+def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
+        monkeypatch, tmp_path):
+    first = str(tmp_path / "first.nam")
+    local_model = {
+        "id": 101, "tone_id": 10, "name": "first.nam",
+        "local_path": first, "architecture": "SlimmableContainer",
+    }
+    tone = {
+        "id": 10, "title": "Slot Tone", "gear": "amp",
+        "username": "creator", "models_count": 2,
+        "models": [local_model],
+    }
+    remote_models = [
+        {"id": 101, "tone_id": 10, "name": "first.nam",
+         "architecture": "SlimmableContainer"},
+        {"id": 102, "tone_id": 10, "name": "second.nam",
+         "architecture": "SlimmableContainer"},
+    ]
+    current = {"chain": _chain([first])}
+    monkeypatch.setattr("tui.app.live.read_chain",
+                        lambda: dict(current["chain"]))
+    monkeypatch.setattr("tui.app.live.last_chain_write_fingerprint",
+                        lambda: None)
+    monkeypatch.setattr("tui.app.library.local_models_by_tone",
+                        lambda _path: [dict(local_model)])
+    monkeypatch.setattr("tui.panels.library.local_models_by_tone",
+                        lambda _path: [dict(local_model)])
+    monkeypatch.setattr("tui.app.library.get_tone", lambda _tone_id: tone)
+    monkeypatch.setattr("tui.panels.library.get_tone", lambda _tone_id: tone)
+    def slow_models(_tone_id, a2_only=False):
+        time.sleep(0.15)
+        return remote_models
+
+    monkeypatch.setattr("tui.panels.tone3000.models", slow_models)
+    calls = {}
+
+    def fake_import(tone_id, _progress, **kwargs):
+        calls["import"] = (tone_id, kwargs.get("model_ids"))
+        return {"id": tone_id}
+
+    monkeypatch.setattr("tui.panels.library.import_tone", fake_import)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            panel.slot_widgets[0].focus()
+            detail = app.query_one(DetailPane)
+            for _ in range(20):
+                if detail._pack_remote:
+                    break
+                await pilot.pause(0.05)
+            assert detail._pack_remote
+            detail._pack_table.focus()
+            await pilot.pause()
+
+            # Textual may move focus to the chain target while a focused table
+            # is cleared and rebuilt. The remote refresh must restore the
+            # user's Pack focus after that transient fallback.
+            clear = detail._pack_table.clear
+
+            def clear_and_fallback(*args, **kwargs):
+                result = clear(*args, **kwargs)
+                panel.slot_widgets[0].focus()
+                return result
+
+            monkeypatch.setattr(detail._pack_table, "clear",
+                                clear_and_fallback)
+            await pilot.pause(0.4)
+            assert app.focused is detail._pack_table
+            assert [row.key.value for row in detail._pack_table.ordered_rows] == [
+                "m101", "m102"
+            ]
+            assert "(not downloaded)" in str(
+                detail._pack_table.get_cell("m102", "file"))
+
+            detail._pack_table.focus()
+            detail._pack_table.move_cursor(row=1, animate=False)
+            await pilot.press("i")
+            await pilot.pause(0.3)
+            assert calls["import"] == (10, [102])
+
+    run(scenario())
+
+
 def test_managed_file_poll_promotes_own_write_before_reconcile(monkeypatch, tmp_path):
     current, first, _second, _models, _tone = _patch_canonical_chain(
         monkeypatch, tmp_path)
@@ -184,6 +271,7 @@ def test_slot_pack_loads_by_index_and_esc_restores_slot_focus(
             assert current["chain"]["slots"][0]["path"] == second
             assert detail._pack_slot_index == 0
             assert table.get_cell("m102", "sel") == "[bold $success]▶[/]"
+            assert app.focused is table
 
             await pilot.press("escape")
             await pilot.pause()

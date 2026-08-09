@@ -215,6 +215,20 @@ def test_engine_ready_accepts_prepare_reply_for_the_same_session(tmp_path, monke
     assert live.wait_for_engine_ready(timeout=0.02, poll_interval=0.001) == "session-1"
 
 
+def test_engine_ready_accepts_calibration_reply_for_the_same_session(
+        tmp_path, monkeypatch):
+    reply_file = tmp_path / "control.reply.json"
+    monkeypatch.setattr(live, "CONTROL_REPLY_FILE", reply_file)
+    reply_file.write_text(json.dumps({
+        "status": "calibrated",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "output_gain_db": 4.5,
+    }))
+
+    assert live.wait_for_engine_ready(timeout=0.02, poll_interval=0.001) == "session-1"
+
+
 def test_managed_adapter_rejects_a_stale_ui_chain_base(chain_file):
     write_chain_file(chain_file, revision=2)
 

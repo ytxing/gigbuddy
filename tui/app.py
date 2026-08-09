@@ -2547,7 +2547,11 @@ class GigBuddyApp(App):
     def _calibrate_slot_worker(self, generation: int, index: int,
                                expected_path: str) -> None:
         try:
-            value = live.request_output_calibration(index)
+            # Calibration and managed prepare share one control/reply sidecar.
+            # Serialize the request so a concurrent mutation cannot replace
+            # the reply before this worker consumes it.
+            with self._managed_transaction_lock:
+                value = live.request_output_calibration(index)
         except Exception as exc:
             try:
                 self.call_from_thread(

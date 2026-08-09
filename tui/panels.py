@@ -4220,15 +4220,22 @@ class DetailPane(Vertical):
         self._pack_loading = False
         self._pack_error = False
         self._pack_progress_status = ""
+        # Rebuilding a focused DataTable may make Textual fall back to the
+        # chain target. Capture the user's current Pack position immediately
+        # before replacing rows, then restore it after the rebuild.
+        table_has_focus = self._pack_table.has_focus
+        anchor = (self._capture_pack_anchor()
+                  if table_has_focus
+                  else self._pack_refresh_anchor)
+        keep_focus = table_has_focus or self._pack_refresh_focus
         self._fill_pack_rows(ms)
         first = next(iter(self._pack_rows.values()), None)
         self._set_marquee(self._marquee_content(
             self._current_tone or {}, first.get("id") if first else None))
         self.refresh_pack_active(live.read_chain())
-        anchor = self._pack_refresh_anchor
-        keep_focus = self._pack_refresh_focus
         self._restore_pack_anchor(anchor)
         self._pack_refresh_anchor = None
+        self._pack_refresh_focus = False
         if keep_focus:
             self._pack_table.focus()
         self._attempt_auto_load_first()

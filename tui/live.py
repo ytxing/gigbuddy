@@ -352,7 +352,9 @@ def wait_for_engine_ready(*, timeout: float = 2.0,
         except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
             response = None
         if (isinstance(response, dict)
-                and response.get("status") in {"ready", "prepared", "rejected"}
+                and response.get("status") in {
+                    "ready", "prepared", "rejected", "calibrated"
+                }
                 and isinstance(response.get("session_id"), str)
                 and response["session_id"]):
             # The engine emits ``ready`` once per process, then replaces the
