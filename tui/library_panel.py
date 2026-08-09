@@ -240,7 +240,7 @@ class LibraryTable(ClickSelectTable):
         marker = {
             "all": ("✓ ", "bold $success"),
             "partial": ("◐ ", "bold $warning"),
-            "none": ("○ ", "dim"),
+            "none": ("◯ ", "dim"),
         }.get(tone.get("download_state"), ("", None))
         return detail, marker[1], marker[0]
 
@@ -2441,7 +2441,7 @@ class LibraryPanel(Vertical):
         if matched_model_ids:
             title = f"{title} · model #{', #'.join(str(i) for i in matched_model_ids)}"
         state = t.get("download_state")
-        marker_plain = {"all": "✓ ", "partial": "◐ ", "none": "○ "}.get(state, "")
+        marker_plain = {"all": "✓ ", "partial": "◐ ", "none": "◯ "}.get(state, "")
         # 先拼完整标题（含 model 后缀）再截断，marker 宽度一并计入：
         # 总宽不超过列宽，尾部 … 与后缀不会被表格渲染裁剪掉。列宽随表格
         # 缩放自适应（LibraryTable._title_cell_limit），此处同步使用。
