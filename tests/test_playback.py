@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import library  # noqa: E402
 import tone3000  # noqa: E402
 from tui import live  # noqa: E402
+from tui.app import GigBuddyApp  # noqa: E402
 from tui.input_screen import InputSourceScreen  # noqa: E402
 
 
@@ -66,6 +67,47 @@ def test_read_levels_extended_returns_playback_state():
     assert live.read_levels() == (0.0, 0.0, "stopped", 0.0)
     live.LEVEL_FILE.unlink()
     assert live.read_levels() == (0.0, 0.0, "stopped", 0.0)
+
+
+def test_managed_playback_does_not_write_when_engine_is_down(monkeypatch):
+    original = {
+        "slots": [],
+        "input": {
+            "source": "file",
+            "file": "data/dry_inputs/mayer.wav",
+            "state": "stopped",
+            "loop": True,
+        },
+    }
+    writes = []
+    notices = []
+    monkeypatch.setattr(live, "read_chain", lambda: json.loads(json.dumps(original)))
+    app = SimpleNamespace(
+        _spawn_engine=True,
+        _managed_engine_active=lambda: False,
+        notify=lambda message, **kwargs: notices.append((message, kwargs)),
+        _commit_external_chain=lambda cfg: writes.append(cfg),
+    )
+
+    GigBuddyApp._playback_edit(
+        app, lambda inp: inp.__setitem__("state", live.PLAY_PLAYING))
+
+    assert writes == []
+    assert any("engine" in message.lower() for message, _ in notices)
+
+
+def test_managed_levels_ignore_stale_telemetry_when_engine_is_down(monkeypatch):
+    monkeypatch.setattr(
+        live, "read_levels",
+        lambda: (0.25, 0.4, live.PLAY_PLAYING, 8.0),
+    )
+    app = SimpleNamespace(
+        _spawn_engine=True,
+        _managed_engine_active=lambda: False,
+    )
+
+    assert GigBuddyApp._audio_levels(app) == (
+        0.0, 0.0, live.PLAY_STOPPED, 0.0)
 
 
 def test_preset_load_keeps_current_input_source(tmp_path):

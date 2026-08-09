@@ -1523,7 +1523,8 @@ class GigBuddyApp(App):
             # Control/reply files are process-local session state. Remove only
             # these exact sidecars so a restarted engine cannot consume a
             # request from the previous process or inherit its ready marker.
-            for sidecar in (live.CONTROL_FILE, live.CONTROL_REPLY_FILE):
+            for sidecar in (live.CONTROL_FILE, live.CONTROL_REPLY_FILE,
+                            live.LEVEL_FILE):
                 try:
                     sidecar.unlink()
                 except FileNotFoundError:
@@ -1610,6 +1611,19 @@ class GigBuddyApp(App):
             self._engine_log_handle.close()
             self._engine_log_handle = None
 
+    def _audio_levels(self) -> tuple[float, float, str, float]:
+        """Read telemetry only while this app's managed engine is alive.
+
+        ``level.json`` is a shared sidecar and can outlive a crashed engine.
+        Treating its last sample as current makes the UI display microphone
+        levels and playback state from a previous session, even though no
+        audio callback is running.
+        """
+        if (getattr(self, "_spawn_engine", False)
+                and not self._managed_engine_active()):
+            return 0.0, 0.0, live.PLAY_STOPPED, 0.0
+        return live.read_levels()
+
     def on_device_changed(self, event: DeviceChanged) -> None:
         """Interface changes restart only the isolated realtime engine."""
         if event.kind == "mute":
@@ -1692,7 +1706,7 @@ class GigBuddyApp(App):
         except NoMatches:
             return
         self._ensure_engine()   # restart after crash / start after picking a tone
-        in_lvl, out_lvl, play_state, play_pos = live.read_levels()
+        in_lvl, out_lvl, play_state, play_pos = self._audio_levels()
         runtime_revision, runtime_status = live.read_runtime_status()
         meter.levels = (in_lvl, out_lvl)
         runtime_report = (runtime_revision, runtime_status)
@@ -2102,6 +2116,11 @@ class GigBuddyApp(App):
 
     def _playback_edit(self, edit) -> None:
         """播放控制公共路径：读链 → 改 input → 写回 → 刷 INPUT 行"""
+        if (getattr(self, "_spawn_engine", False)
+                and not self._managed_engine_active()):
+            self.notify("Audio engine unavailable — playback unchanged",
+                        severity="error")
+            return
         cfg = live.read_chain()
         if not cfg:
             return
