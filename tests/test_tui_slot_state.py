@@ -139,6 +139,8 @@ def test_exact_managed_poll_rehydrates_a_persisted_candidate():
     state.toggle_bypass(0)
     state.mark_managed_write("old-write", 4)
 
+    # Simulate the race window: an earlier poll already discarded the local
+    # candidate, then the delayed UI callback identifies the same write.
     state.reconcile(
         {"slots": [{"path": None}], "revision": 4},
         fingerprint="external-write", revision=4)

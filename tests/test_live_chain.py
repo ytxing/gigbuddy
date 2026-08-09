@@ -241,6 +241,7 @@ def test_managed_adapter_accepts_candidate_rehydrated_from_own_poll(
         live.read_chain(), fingerprint="own-write", revision=6) is False
     assert state.slot(0).status is SlotStatus.BYPASS
 
+    # This is the constructor that raised in the reported preset-load trace.
     _ManagedChainAdapter(object(), expected_chain=state.to_chain())
 
 

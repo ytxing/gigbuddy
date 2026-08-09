@@ -126,6 +126,8 @@ def test_managed_file_poll_promotes_own_write_before_reconcile(monkeypatch, tmp_
             incoming["revision"] = 2
             current["chain"] = incoming
 
+            # The file is visible before the background commit callback. The
+            # panel must recognize it as this process's write and keep BYPASS.
             panel.watch_chain(incoming)
             assert panel.state.slot(0).status is SlotStatus.BYPASS
             assert panel.state.slot(0).candidate == first
