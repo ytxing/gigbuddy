@@ -357,6 +357,10 @@ class LibraryTable(ClickSelectTable):
         if getattr(event, "chain", 1) >= 2:
             self.action_select_cursor()
             event.stop()
+            return
+        # A normal row click only moves the table cursor; do not let it bubble
+        # into the app-level chain hit-test.
+        event.stop()
 
     def action_select_cursor(self) -> None:
         """Enter/双击：提示行（加载中/失败）→ 重试当前视图；正常行 → 选择。

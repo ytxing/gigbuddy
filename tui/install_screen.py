@@ -62,6 +62,10 @@ class PackPickTable(ClickSelectTable):
         if getattr(event, "chain", 1) >= 2:
             self.action_select_cursor()
             event.stop()
+            return
+        # Keep ordinary table clicks from reaching the app-level coordinate
+        # router after ClickSelectTable moved the cursor.
+        event.stop()
 
 
 class PackInstallScreen(GigBuddyModal):

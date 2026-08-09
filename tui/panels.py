@@ -2374,6 +2374,11 @@ class PackFileTable(ClickSelectTable):
         if getattr(event, "chain", 1) >= 2:
             self.action_select_cursor()
             event.stop()
+            return
+        # ClickSelectTable already moved the cursor in its _on_click handler.
+        # Keep an ordinary Pack click inside the table so GigBuddyApp's global
+        # coordinate router cannot reinterpret it as a Chain Slot click.
+        event.stop()
 
 
 

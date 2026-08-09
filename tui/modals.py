@@ -316,6 +316,9 @@ class ClickSelectTree(Tree):
                 event.prevent_default()
                 if getattr(event, "chain", 1) >= 2:
                     await self.run_action("select_cursor")
+            # Keep handled tree-row clicks inside the tree. Otherwise the
+            # app-level coordinate router can reinterpret the same click.
+            event.stop()
 
 
 class ModalBox(Vertical):

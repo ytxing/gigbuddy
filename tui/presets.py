@@ -195,6 +195,9 @@ class PresetTable(ClickSelectTable):
         elif getattr(event, "chain", 1) >= 2:
             self.action_select_cursor()
             event.stop()
+        else:
+            # Keep ordinary row clicks inside the table after the cursor move.
+            event.stop()
 
 
 class PresetSearchInput(Input):
