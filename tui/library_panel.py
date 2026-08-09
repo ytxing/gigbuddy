@@ -2458,7 +2458,7 @@ class LibraryPanel(Vertical):
             title, gear_markup(t.get("gear"), colors=theme_colors(self.app)),
             self._author_label(t.get("username")),
             str(t.get("downloads_count") or 0), str(t.get("favorites_count") or 0),
-            _uploaded(t), tone_format(t) or "—", _arch(t), files,
+            _uploaded(t), tone_format(t) or "—", files, _arch(t),
         ]
 
     def _tone_for_key(self, key: str | None) -> dict | None:
