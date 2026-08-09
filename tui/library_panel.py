@@ -1892,9 +1892,7 @@ class LibraryPanel(Vertical):
             if key[2] == "favorites":
                 status.content = "most favorited · enter detail"
             else:
-                status.content = (
-                    f"{self._tone_status_hint(self._search_spec)}"
-                    " · ✓ downloaded")
+                status.content = self._tone_status_hint(self._search_spec)
         if silent:
             return
         self._update_tone_subtitle()
@@ -2046,8 +2044,7 @@ class LibraryPanel(Vertical):
             self._save_tone_cache(key)
         if silent:
             return  # prefetch done: cache filled, UI chrome untouched
-        status.content = (
-            f"{self._tone_status_hint(spec)} · ✓ downloaded")
+        status.content = self._tone_status_hint(spec)
         self._update_tone_subtitle()
         if not append and not table.row_count:
             # 空结果：没有可显示的 tone，此时才清 detail（不再是搜索瞬间）
