@@ -2568,7 +2568,7 @@ class LibraryPanel(Vertical):
                 (all_label, self.toggle_all_local),
                 (("space" if short else "space select"),
                  self.toggle_local_selection),
-                (("d del" if short else "d uninstall"),
+                (("u del" if short else "u uninstall"),
                  self.uninstall_local_selection),
             ])
             if self._local_selected:
