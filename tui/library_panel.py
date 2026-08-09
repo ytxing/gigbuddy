@@ -425,7 +425,7 @@ CREATOR_SORT_CHOICES = [("Most Tones", "tones"), ("Most Downloads", "downloads")
                         ("Most Favorites", "favorites"), ("Most Models", "models")]
 REMOTE_PAGE_SIZE = 40
 LOCAL_PAGE_SIZE = 200
-CREATOR_PAGE_SIZE = 100
+CREATOR_PAGE_SIZE = 10
 LOAD_AHEAD_ROWS = 5
 TITLE_CELL_LIMIT = 40
 # TONE3000 结果按 (query, TYPE, SORT) 组合缓存（REQ-010）：
@@ -2308,35 +2308,33 @@ class LibraryPanel(Vertical):
                     text=spec.text or None,
                     usernames=self._effective_authors(spec) or None)
             except library.tone3000.AuthenticationRequiredError:
-                if not self._tone_alive(generation, request_id) or silent:
+                if not self._tone_alive(generation, request_id):
                     return
-                self._show_tone_auth_required(table)
+                self._show_tone_auth_required(table, silent=silent)
                 return
             except Exception as e:
-                if not self._tone_alive(generation, request_id) or silent:
+                if not self._tone_alive(generation, request_id):
                     return
                 self._tone_loading = False
+                if silent:
+                    return
                 self._update_tone_subtitle(error=True)
                 self._show_status_if_empty(
                     table, self._network_error("Favorites", e))
                 return
             if not self._tone_alive(generation, request_id):
                 return
-            try:
-                hits = await asyncio.to_thread(library.mark_download_state, hits)
-            except library.tone3000.AuthenticationRequiredError:
-                if not self._tone_alive(generation, request_id) or silent:
+            # The public favorites rows are usable without the optional local
+            # download-state probe.  Keep startup prefetch deterministic, but
+            # let an active view render before probing each installed tone.
+            if silent:
+                try:
+                    hits = await asyncio.to_thread(
+                        library.mark_download_state, hits)
+                except Exception:
+                    if self._tone_alive(generation, request_id):
+                        self._tone_loading = False
                     return
-                self._show_tone_auth_required(table)
-                return
-            except Exception as e:
-                if not self._tone_alive(generation, request_id) or silent:
-                    return
-                self._tone_loading = False
-                self._update_tone_subtitle(error=True)
-                self._show_status_if_empty(
-                    table, self._network_error("Favorites", e))
-                return
             if not self._tone_alive(generation, request_id):
                 return
             self._tone_loading = False
@@ -2363,6 +2361,15 @@ class LibraryPanel(Vertical):
             self._restore_view_anchor("pane-tone")
             self._publish_highlight(table)
             self._focus_if_pane_active(table)
+            try:
+                updated = await asyncio.to_thread(
+                    library.mark_download_state,
+                    [dict(tone) for tone in hits])
+            except Exception:
+                return
+            if not self._tone_alive(generation, request_id):
+                return
+            self._apply_download_state_updates(updated)
         else:
             order = self._selected_order()
             await self._show_search(self._query or "", order_by=order,
@@ -2586,7 +2593,7 @@ class LibraryPanel(Vertical):
             if username and username not in self._creator_tones:
                 self._creator_tones[username] = [creator]
                 new_creators.append((username, [creator]))
-        self._creator_has_more = len(hits) == CREATOR_PAGE_SIZE
+        self._creator_has_more = len(hits) >= CREATOR_PAGE_SIZE
         if append:
             start_rank = existing_count + 1
             for offset, (name, tones_) in enumerate(new_creators):

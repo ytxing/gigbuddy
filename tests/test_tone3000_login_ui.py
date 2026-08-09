@@ -3,7 +3,7 @@
 import asyncio
 import threading
 
-from textual.widgets import Button, DataTable
+from textual.widgets import Button, DataTable, Select
 
 from tui.app import GigBuddyApp
 from tui.library_panel import LibraryPanel
@@ -140,7 +140,8 @@ def test_tone_rows_render_before_download_state_probe(monkeypatch, tmp_path):
                  "favorites_count": 0, "a2_models_count": 1}]
 
     def slow_mark(rows):
-        probe_started.set()
+        if rows:
+            probe_started.set()
         release_probe.wait(2)
         return [{**row, "download_state": "all", "downloaded": 1}
                 for row in rows]
@@ -163,5 +164,85 @@ def test_tone_rows_render_before_download_state_probe(monkeypatch, tmp_path):
             release_probe.set()
             await pilot.pause(0.3)
             assert "✓" in str(table.get_cell("remote:7", "title"))
+
+    run(scenario())
+
+
+def test_favorite_rows_render_before_download_state_probe(monkeypatch, tmp_path):
+    """The favorites view uses the same non-blocking enrichment boundary."""
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
+    release_probe = threading.Event()
+    probe_started = threading.Event()
+
+    tone = {"id": 8, "title": "Visible favorite", "gear": "amp",
+            "username": "tester", "downloads_count": 2,
+            "favorites_count": 3, "a2_models_count": 1}
+
+    def slow_mark(rows):
+        if rows:
+            probe_started.set()
+        release_probe.wait(2)
+        return [{**row, "download_state": "all", "downloaded": 1}
+                for row in rows]
+
+    monkeypatch.setattr(library.tone3000, "search", lambda *_a, **_k: [])
+    monkeypatch.setattr(library.tone3000, "top_favorites",
+                        lambda *_a, **_k: [dict(tone)])
+    monkeypatch.setattr(library.tone3000, "top_creators",
+                        lambda **_kwargs: [])
+    monkeypatch.setattr(library, "mark_download_state", slow_mark)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.1)
+            panel = app.query_one(LibraryPanel)
+            panel.activate_view_tab("pane-tone")
+            await pilot.pause(0.1)
+            app.query_one("#sort-filter", Select).value = "favorites"
+            await pilot.pause(0.3)
+            table = app.query_one("#lib-table-tone", DataTable)
+            assert probe_started.is_set()
+            assert table.ordered_rows[0].key.value == "remote:8"
+            assert not panel._tone_loading
+            release_probe.set()
+            await pilot.pause(0.3)
+            assert "✓" in str(table.get_cell("remote:8", "title"))
+
+    run(scenario())
+
+
+def test_creator_initial_load_uses_one_official_page(monkeypatch, tmp_path):
+    """The TUI must not compose ten official pages before first render."""
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
+    calls = []
+    rows = [{"id": f"user:{i}", "username": f"creator{i}",
+             "public_tones_count": 10 - i, "downloads_count": i,
+             "favorites_count": 0, "public_models_count": 1}
+            for i in range(10)]
+
+    def top_creators(**kwargs):
+        calls.append(kwargs)
+        return [dict(row) for row in rows]
+
+    monkeypatch.setattr(library.tone3000, "top_creators", top_creators)
+    monkeypatch.setattr(library.tone3000, "search", lambda *_a, **_k: [])
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.1)
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
+            await pilot.pause(0.4)
+            panel = app.query_one(LibraryPanel)
+            table = app.query_one("#lib-table-creators", DataTable)
+            assert calls
+            assert all(call["page_size"] == 10 for call in calls)
+            assert table.row_count == 10
+            assert panel._creator_has_more
 
     run(scenario())
