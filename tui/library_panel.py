@@ -315,7 +315,7 @@ class LibraryTable(ClickSelectTable):
         Binding("r", "retry_search", "retry", show=False),
         Binding("space", "toggle_selected", "select", show=False),
         Binding("a", "toggle_all", "all/none", show=False),
-        Binding("d", "delete_selected", "uninstall", show=False),
+        Binding("u", "delete_selected", "uninstall", show=False),
     ]
 
     def on_focus(self, event) -> None:
