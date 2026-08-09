@@ -1398,7 +1398,7 @@ class LibraryPanel(Vertical):
         if not tones:
             self._status_row(
                 table,
-                "[bold $state-idle]○[/] no local tones — switch to TONE3000 "
+                "no local tones — switch to TONE3000 "
                 "to search and import")
         self._update_local_selection_status()
         self._restore_view_anchor("pane-local")
@@ -1564,7 +1564,7 @@ class LibraryPanel(Vertical):
         elif not has_row("__status__"):
             self._status_row(
                 table,
-                "[bold $state-idle]○[/] no local tones — switch to TONE3000 "
+                "no local tones — switch to TONE3000 "
                 "to search and import")
         state["selection_keys"] = tuple(
             f"local:{tone_id}" for tone_id in sorted(self._local_selected)
@@ -2442,9 +2442,9 @@ class LibraryPanel(Vertical):
         # 缩放自适应（LibraryTable._title_cell_limit），此处同步使用。
         limit = getattr(table or self._table(), "_title_cell_limit", 54)
         title = _clip(title, max(limit - cell_len(marker_plain), 1))
-        marker_markup = {"all": "[bold $success]✓[/] ",
-                         "partial": "[bold $warning]◐[/] ",
-                         "none": "[dim]○[/] "}.get(state, "")
+        marker_markup = (
+            "[bold $success]✓[/] "
+            if state in ("all", "partial") else "")
         title = f"{marker_markup}{escape(title)}"
         # Files 只数可用模型（A2 + Custom + IR）；A1（WaveNet）已从产品
         # 过滤，算进总数会让下载状态永远显示 partial。

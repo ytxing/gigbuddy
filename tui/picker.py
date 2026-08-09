@@ -226,11 +226,10 @@ class TonePickerScreen(GigBuddyModal):
         for t in rows:
             state = t.get("download_state")
             mark_style = {"all": "bold $success",
-                          "partial": "bold $warning",
-                          "none": "bold $state-idle"}.get(state)
+                          "partial": "bold $success",
+                          "none": None}.get(state)
             mark = (f"[{resolve_rich_style(mark_style, self.app.theme_variables)}]"
-                    f"{'✓' if state == 'all' else '◐' if state == 'partial' else '○'}[/] "
-                    if mark_style else "")
+                    f"✓[/] " if mark_style else "")
             title = _escape(t.get("title") or "")
             tree.root.add_leaf(
                 f"{mark}{title}  [dim]dl={t.get('downloads_count', 0)} "
