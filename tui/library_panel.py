@@ -2,8 +2,8 @@
 
 Row keys encode the source ("local:<id>" / "remote:<id>"). Selecting a local row
 enters the canonical DetailPane flow; remote rows enter its PACK view.
-TONE3000 hits are tagged with their local download state (✓ all / ◐ partial /
-○ none) by comparing model ids against the local library.
+TONE3000 hits are tagged with their local download state (✓ when anything is
+downloaded, blank otherwise) by comparing model ids against the local library.
 """
 import asyncio
 from functools import partial
