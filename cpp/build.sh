@@ -46,14 +46,22 @@ REALTIME_SRCS=(
   "$NAM_CORE/linear.cpp" "$NAM_CORE/lstm.cpp" "$NAM_CORE/ring_buffer.cpp" "$NAM_CORE/util.cpp"
   "$NAM_CORE/wavenet/a2_fast.cpp" "$NAM_CORE/wavenet/model.cpp" "$NAM_CORE/wavenet/slimmable.cpp"
 )
-# PortAudio：install.sh 源码编译的 v19.7.0（$ROOT/.local），不依赖 Homebrew。
+# PortAudio：安装版优先使用 install.sh 编译的 $ROOT/.local；开发 checkout
+# 在删除安装目录后允许使用本机 Homebrew 只完成本地重建，不改变安装脚本的
+# 自包含发布路径。
 LOCAL_PREFIX="$ROOT/.local"
 if [[ -f "$LOCAL_PREFIX/lib/libportaudio.2.dylib" ]]; then
     PA_INC="$LOCAL_PREFIX/include"
     PA_LIB="$LOCAL_PREFIX/lib"
     PA_RPATH="-Wl,-rpath,$LOCAL_PREFIX/lib"
+elif command -v brew >/dev/null 2>&1 \
+    && BREW_PREFIX="$(brew --prefix portaudio 2>/dev/null)" \
+    && [[ -f "$BREW_PREFIX/lib/libportaudio.2.dylib" ]]; then
+    PA_INC="$BREW_PREFIX/include"
+    PA_LIB="$BREW_PREFIX/lib"
+    PA_RPATH="-Wl,-rpath,$BREW_PREFIX/lib"
 else
-    echo "PortAudio not found. Run ./install.sh (builds v19.7.0 from source)." >&2
+    echo "PortAudio not found. Run ./install.sh or install portaudio for a local build." >&2
     exit 1
 fi
 clang++ -O3 -std=c++20 "${MACROS[@]}" "${INCS[@]}" -I"$PA_INC" \

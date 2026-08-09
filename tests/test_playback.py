@@ -96,6 +96,56 @@ def test_managed_playback_does_not_write_when_engine_is_down(monkeypatch):
     assert any("engine" in message.lower() for message, _ in notices)
 
 
+def test_managed_playback_queues_edit_against_latest_chain(monkeypatch):
+    original = {
+        "slots": [],
+        "input": {
+            "source": "file",
+            "file": "data/dry_inputs/mayer.wav",
+            "state": "stopped",
+            "loop": True,
+        },
+    }
+    jobs = []
+    monkeypatch.setattr(live, "read_chain", lambda: json.loads(json.dumps(original)))
+    app = SimpleNamespace(
+        _spawn_engine=True,
+        _managed_engine_active=lambda: True,
+        _enqueue_managed_mutation=lambda mutation, note, **kwargs: (
+            jobs.append((mutation, kwargs)) or True),
+        query_one=lambda _widget: SimpleNamespace(_legacy_mode=False),
+        notify=lambda *args, **kwargs: None,
+    )
+
+    GigBuddyApp._playback_edit(
+        app, lambda inp: inp.__setitem__(
+            "state", live.PLAY_PLAYING if inp.get("state") != live.PLAY_PLAYING
+            else live.PLAY_PAUSED))
+
+    assert len(jobs) == 1
+    mutation, _ = jobs[0]
+
+    class FakeState:
+        def __init__(self):
+            self.chain = json.loads(json.dumps(original))
+
+        def to_chain(self):
+            return json.loads(json.dumps(self.chain))
+
+        def apply_candidate(self, candidate):
+            self.chain = candidate
+
+    state = FakeState()
+    mutation(state)
+    assert state.chain["input"]["state"] == live.PLAY_PLAYING
+
+    # The worker must evaluate a toggle from its latest state, not the stale
+    # snapshot captured when the key event was received.
+    state.chain["input"]["state"] = live.PLAY_PLAYING
+    mutation(state)
+    assert state.chain["input"]["state"] == live.PLAY_PAUSED
+
+
 def test_managed_levels_ignore_stale_telemetry_when_engine_is_down(monkeypatch):
     monkeypatch.setattr(
         live, "read_levels",

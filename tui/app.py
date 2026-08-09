@@ -2128,6 +2128,31 @@ class GigBuddyApp(App):
         if inp.get("source") != "file":
             self.notify("Instrument input active — click the INPUT row to pick a dry file")
             return
+        managed_playback = self._managed_engine_active()
+        if managed_playback:
+            try:
+                managed_playback = not self.query_one(ChainPanel)._legacy_mode
+            except (AttributeError, NoMatches):
+                # Unit seams without a mounted panel still exercise the
+                # managed writer; the real App always has ChainPanel here.
+                pass
+        if managed_playback:
+            def mutation(state: ChainState):
+                latest = state.to_chain()
+                latest_input = live.chain_input(latest)
+                if latest_input.get("source") != "file":
+                    return False
+                edit(latest_input)
+                latest["input"] = latest_input
+                return state.apply_candidate(latest)
+
+            queued = self._enqueue_managed_mutation(
+                mutation, "", failure_note="Dry playback unchanged",
+                on_success=lambda _persisted, _target: setattr(
+                    self, "_playback_op_ts", time.monotonic()))
+            if not queued:
+                self.notify("Managed engine is no longer active", severity="error")
+            return
         edit(inp)
         cfg["input"] = inp
         persisted = self._commit_external_chain(cfg)
