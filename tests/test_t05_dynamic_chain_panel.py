@@ -545,6 +545,18 @@ def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
             await pilot.pause()
             assert panel.state.slot(0).input_gain_db == pytest.approx(1.0)
 
+            io = panel.query_one(ChainSlotIOWidget)
+            slot = panel.slot_widgets[0]
+            value_x = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH
+                       + slot.IO_GAP + 1)
+            await pilot.click(io, offset=(value_x, 0))
+            await pilot.pause()
+            assert slot._io_editing == "input_gain_db"
+            await pilot.double_click(io, offset=(value_x, 0))
+            await pilot.pause()
+            assert panel.state.slot(0).input_gain_db == pytest.approx(0.0)
+            assert slot._io_editing is None
+
             await pilot.click(io, offset=(23, 1))
             await pilot.pause(0.15)
             assert panel.state.slot(0).output_gain_db == pytest.approx(4.5)

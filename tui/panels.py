@@ -1191,6 +1191,12 @@ class ChainSlotWidget(Static):
         message.set_sender(self)
         self.post_message(message)
 
+    def _reset_io_value(self, key: str) -> None:
+        self._cancel_io_edit()
+        delta = round(-self._io_value(key), 2)
+        if delta:
+            self._post_param(key, delta)
+
     def _post_calibrate(self) -> None:
         message = self.CalibrateRequested(self.index)
         message.set_sender(self)
@@ -1298,6 +1304,15 @@ class ChainSlotWidget(Static):
 
     def set_snapshot(self, snapshot: SlotSnapshot, *, title: str | None,
                      gear: str | None, quality_unsupported: bool = False) -> None:
+        previous = self.snapshot
+        editing_key = self._io_editing
+        editing_value = (self._io_value(editing_key)
+                         if editing_key is not None else None)
+        same_slot = (
+            previous.path == snapshot.path
+            and previous.candidate == snapshot.candidate
+            and previous.status == snapshot.status
+        )
         self.snapshot = snapshot
         self.title = title
         self.gear = gear
@@ -1305,8 +1320,11 @@ class ChainSlotWidget(Static):
         self.filename = live.short_name(snapshot.path or snapshot.candidate or "")
         self._offset = 0
         self._io_hover = None
-        self._io_editing = None
-        self._io_edit_text = ""
+        if (editing_key is not None
+                and (not same_slot
+                     or self._io_value(editing_key) != editing_value)):
+            self._io_editing = None
+            self._io_edit_text = ""
         self._update_border()
         self._refresh_row_hint()
         self._refresh_io_widget()
@@ -1466,7 +1484,10 @@ class ChainSlotIOWidget(Static):
         if kind == "param" and key is not None:
             self.slot._post_param(key, delta)
         elif kind == "value" and key is not None:
-            self.slot._begin_io_edit(key)
+            if getattr(event, "chain", 1) >= 2:
+                self.slot._reset_io_value(key)
+            else:
+                self.slot._begin_io_edit(key)
         elif kind == "calibrate":
             self.slot._post_calibrate()
         event.stop()
