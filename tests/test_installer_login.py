@@ -1,6 +1,7 @@
 """Tests for the install-time TONE3000 login gate."""
 
 import io
+from pathlib import Path
 
 import tone3000
 
@@ -66,3 +67,11 @@ def test_missing_terminal_requires_explicit_skip(monkeypatch):
 
     assert result == installer_login.NO_INTERACTIVE_TERMINAL
     assert "--skip-presets" in error.getvalue()
+
+
+def test_installers_check_login_before_creating_runtime_environment():
+    repo_root = Path(__file__).resolve().parents[1]
+    for relative_path in ("scripts/install.sh", "install.sh"):
+        script = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert script.index("Checking TONE3000 login") < script.index(
+            "Creating Python environment")

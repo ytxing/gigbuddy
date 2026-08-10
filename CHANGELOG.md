@@ -6,6 +6,8 @@
 
 - The user-level installer keeps the TONE3000 login prompt visible instead of
   clearing it when the animated banner resumes.
+- The login gate now runs immediately after the checkout is ready, before uv,
+  the Python environment, dependency installation, or starter downloads.
 - A missing interactive terminal no longer masquerades as an intentional
   `n` response: installation stops unless `--skip-presets` is explicitly
   provided.

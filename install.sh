@@ -41,6 +41,31 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+# TONE3000 登录只依赖仓库内的标准库代码；先完成 OAuth，再创建环境和
+# 下载其余安装资源。显式 --skip-presets 才跳过这一步。
+LOGIN_PYTHON="${GIGBUDDY_LOGIN_PYTHON:-${PYTHON_BIN:-python3}}"
+bootstrap_args=()
+if [[ "$SKIP_PRESETS" -eq 0 ]]; then
+    command -v "$LOGIN_PYTHON" >/dev/null 2>&1 || {
+        echo "Python is required for the TONE3000 login check: $LOGIN_PYTHON" >&2
+        exit 1
+    }
+    stage "Checking TONE3000 login"
+    login_status=0
+    if PYTHONPATH="$ROOT/src" "$LOGIN_PYTHON" \
+        "$ROOT/scripts/ensure_tone3000_login.py"; then
+        :
+    else
+        login_status=$?
+        if [[ "$login_status" -eq 10 ]]; then
+            bootstrap_args=(--skip-presets)
+        else
+            echo "TONE3000 login is required; pass --skip-presets explicitly to install without starter assets." >&2
+            exit "$login_status"
+        fi
+    fi
+fi
+
 # 统一用 uv 管理 Python 环境：系统有 Python 3.12 用它，没有则自动下载；
 # 系统 Python 有无都不影响——uv 全权托管（新手零配置）。
 UV_BIN="${GIGBUDDY_UV:-uv}"
@@ -60,7 +85,6 @@ fi
 stage "Installing Python dependencies"
 "$UV_BIN" pip install --python "$VENV_PYTHON" -r "$ROOT/requirements.txt"
 
-bootstrap_args=()
 if [[ "$SKIP_PRESETS" -eq 1 ]]; then
     bootstrap_args+=(--skip-presets)
 fi
@@ -68,23 +92,6 @@ if [[ "$SKIP_DRY_INPUTS" -eq 1 ]]; then
     bootstrap_args+=(--skip-dry-inputs)
 else
     bootstrap_args+=(--dry-inputs "$DRY_INPUTS")
-fi
-
-if [[ "$SKIP_PRESETS" -eq 0 ]]; then
-    stage "Checking TONE3000 login"
-    login_status=0
-    if PYTHONPATH="$ROOT/src" "$VENV_PYTHON" \
-        "$ROOT/scripts/ensure_tone3000_login.py"; then
-        :
-    else
-        login_status=$?
-        if [[ "$login_status" -eq 10 ]]; then
-            bootstrap_args+=(--skip-presets)
-        else
-            echo "TONE3000 login is required; pass --skip-presets explicitly to install without starter assets." >&2
-            exit "$login_status"
-        fi
-    fi
 fi
 
 stage "Preparing local database, starter presets, and dry inputs"

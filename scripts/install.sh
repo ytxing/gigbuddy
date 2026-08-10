@@ -392,6 +392,34 @@ printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
   printf 'HAD_THIRDPARTY=%s\n' "$([[ -d "$INSTALL_ROOT/third_party" ]] && printf 1 || printf 0)"
 } >> "$ROLLBACK_FILE"
 
+bootstrap_args=()
+if [[ "$SKIP_PRESETS" == 1 ]]; then
+  bootstrap_args+=(--skip-presets)
+fi
+if [[ "$SKIP_DRY_INPUTS" == 1 ]]; then
+  bootstrap_args+=(--skip-dry-inputs)
+else
+  bootstrap_args+=(--dry-inputs "$DRY_INPUTS")
+fi
+
+if [[ "$SKIP_PRESETS" != 1 ]]; then
+  announce_visible_step "Checking TONE3000 login"
+  login_status=0
+  if env PYTHONPATH="$INSTALL_ROOT/src" \
+      "$PYTHON_BIN" \
+      "$INSTALL_ROOT/scripts/ensure_tone3000_login.py"; then
+    :
+  else
+    login_status=$?
+    if [[ "$login_status" == 10 ]]; then
+      SKIP_PRESETS=1
+      bootstrap_args+=(--skip-presets)
+    else
+      die "TONE3000 login is required; pass --skip-presets explicitly to skip starter presets"
+    fi
+  fi
+fi
+
 step "Creating Python environment (uv)"
 UV_BIN="${GIGBUDDY_UV:-uv}"
 if ! command -v "$UV_BIN" >/dev/null 2>&1; then
@@ -407,34 +435,6 @@ fi
 step "Installing Python dependencies"
 run_quiet "$UV_BIN" pip install --python "$INSTALL_ROOT/.venv/bin/python" \
   -r "$INSTALL_ROOT/requirements.txt"
-
-bootstrap_args=()
-if [[ "$SKIP_PRESETS" == 1 ]]; then
-  bootstrap_args+=(--skip-presets)
-fi
-if [[ "$SKIP_DRY_INPUTS" == 1 ]]; then
-  bootstrap_args+=(--skip-dry-inputs)
-else
-  bootstrap_args+=(--dry-inputs "$DRY_INPUTS")
-fi
-
-if [[ "$SKIP_PRESETS" != 1 ]]; then
-  announce_visible_step "Checking TONE3000 login"
-  login_status=0
-  if env PYTHONPATH="$INSTALL_ROOT/src" \
-      "$INSTALL_ROOT/.venv/bin/python" \
-      "$INSTALL_ROOT/scripts/ensure_tone3000_login.py"; then
-    :
-  else
-    login_status=$?
-    if [[ "$login_status" == 10 ]]; then
-      SKIP_PRESETS=1
-      bootstrap_args+=(--skip-presets)
-    else
-      die "TONE3000 login is required; pass --skip-presets explicitly to skip starter presets"
-    fi
-  fi
-fi
 
 step "Downloading starter presets and dry inputs (this can take a while; please be patient)"
 run_quiet env PYTHONPATH="$INSTALL_ROOT/src" \
