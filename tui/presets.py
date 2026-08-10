@@ -288,7 +288,7 @@ class PresetPanel(Vertical):
             id="preset-search-bar",
         )
         table = PresetTable(id="preset-table", cursor_type="row")
-        table.add_column("St", key="pick", width=4)
+        table.add_column("St", key="pick", width=5)
         table.add_column("Preset", key="name")
         table.add_column("Slots", key="slots")
         table.add_column("NOTE", key="note")

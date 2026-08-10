@@ -72,8 +72,8 @@ def test_preset_and_local_active_markers_are_compact_and_cursor_stable(
 
             presets = app.query_one("#preset-table", DataTable)
             local = app.query_one("#lib-table-local", DataTable)
-            assert presets.columns["pick"].width == 4
-            assert local.columns["pick"].width == 4
+            assert presets.columns["pick"].width == 5
+            assert local.columns["pick"].width == 5
 
             preset_key = next(
                 row.key.value for row in presets.ordered_rows

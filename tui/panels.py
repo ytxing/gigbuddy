@@ -2297,7 +2297,7 @@ class PackFileTable(ClickSelectTable):
     def __init__(self) -> None:
         super().__init__(id="detail-pack-table", cursor_type="row")
         self.pack_kind = "amp"  # the chain slot this pack was opened from
-        self.add_column("St", key="sel", width=4)
+        self.add_column("St", key="sel", width=5)
         self.add_column("Arch", key="arch", width=6)
         # REQ-019：不再显示 TONE id 列
         self.add_column("File", key="file")

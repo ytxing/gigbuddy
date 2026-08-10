@@ -470,7 +470,7 @@ class LibraryPanel(Vertical):
                     selectable: bool = False) -> LibraryTable:
         table = LibraryTable(id=table_id, cursor_type="row")
         if selectable:
-            table.add_column("St", key="pick", width=4)
+            table.add_column("St", key="pick", width=5)
         if rank:
             table.add_column("Rank", key="rank", width=5)
         # 54 = 表格可用宽 - 2 侧 padding：单元格内容（含 marker）不超过它，

@@ -278,7 +278,7 @@ def test_local_table_box_style_and_mouse_toggle(monkeypatch, tmp_path):
             await pilot.pause(0.3)
             table = app.query_one("#lib-table-local")
             assert str(table.get_cell("local:10", "pick")) == "\\[ ]"
-            assert table.columns["pick"].width == 4
+            assert table.columns["pick"].width == 5
             # 单击 P 列 → 勾选
             await pilot.click(table, offset=(1, 1))
             await pilot.pause(0.25)
