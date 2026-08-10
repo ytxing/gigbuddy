@@ -1,6 +1,7 @@
 """Tests for the install-time TONE3000 login gate."""
 
 import io
+from types import SimpleNamespace
 from pathlib import Path
 
 import tone3000
@@ -67,6 +68,29 @@ def test_missing_terminal_requires_explicit_skip(monkeypatch):
 
     assert result == installer_login.NO_INTERACTIVE_TERMINAL
     assert "--skip-presets" in error.getvalue()
+
+
+def test_prompt_stream_opens_terminal_for_reading(monkeypatch):
+    stream = io.StringIO("\n")
+    calls = []
+
+    def fake_open(path, mode, *, encoding):
+        calls.append((path, mode, encoding))
+        if mode != "r":
+            raise OSError("the terminal is not seekable")
+        return stream
+
+    monkeypatch.setattr(
+        installer_login, "sys", SimpleNamespace(
+            stdin=SimpleNamespace(isatty=lambda: False),
+        ),
+    )
+    monkeypatch.setattr(installer_login, "open", fake_open, raising=False)
+
+    result = installer_login._prompt_stream()
+
+    assert result == (stream, True)
+    assert calls == [("/dev/tty", "r", "utf-8")]
 
 
 def test_installers_check_login_before_creating_runtime_environment():

@@ -32,7 +32,9 @@ def _prompt_stream() -> tuple[TextIO | None, bool]:
     if sys.stdin.isatty():
         return sys.stdin, False
     try:
-        return open("/dev/tty", "r+", encoding="utf-8"), True
+        # The terminal is only used for reading the login decision. Opening it
+        # read/write makes Python reject macOS's non-seekable tty stream.
+        return open("/dev/tty", "r", encoding="utf-8"), True
     except OSError:
         return None, False
 
