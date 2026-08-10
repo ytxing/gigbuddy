@@ -50,3 +50,19 @@ def test_accepting_login_runs_oauth(monkeypatch):
 
     assert result == 0
     assert calls == [True]
+
+
+def test_missing_terminal_requires_explicit_skip(monkeypatch):
+    error = io.StringIO()
+    monkeypatch.setattr(
+        tone3000, "access_token",
+        lambda: (_ for _ in ()).throw(
+            tone3000.AuthenticationRequiredError("login required")),
+    )
+    monkeypatch.setattr(installer_login, "_prompt_stream",
+                        lambda: (None, False))
+
+    result = installer_login.ensure_login(output=io.StringIO(), error=error)
+
+    assert result == installer_login.NO_INTERACTIVE_TERMINAL
+    assert "--skip-presets" in error.getvalue()

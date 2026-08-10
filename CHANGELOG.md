@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.2 - 2026-08-10
+
+### Fixed
+
+- The user-level installer keeps the TONE3000 login prompt visible instead of
+  clearing it when the animated banner resumes.
+- A missing interactive terminal no longer masquerades as an intentional
+  `n` response: installation stops unless `--skip-presets` is explicitly
+  provided.
+- The checkout installer reports the same explicit `--skip-presets` guidance
+  when starter assets cannot be installed without an interactive login.
+
 ## 1.1.1 - 2026-08-10
 
 ### Fixed

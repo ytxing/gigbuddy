@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.1.1}"
+REPO_REF="${GIGBUDDY_REF:-v1.1.2}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
@@ -318,6 +318,17 @@ run_quiet() {
   return 1
 }
 
+announce_visible_step() {
+  local message="$1"
+  local had_banner=0
+  [[ -n "${BANNER_PID:-}" ]] && had_banner=1
+  step "$message"
+  if [[ "$had_banner" == 1 ]]; then
+    stop_banner
+    printf '==> %s\n' "$message"
+  fi
+}
+
 is_gigbuddy_checkout() {
   if [[ -f "$INSTALL_ROOT/.gigbuddy-install" ]] &&
      grep -qx 'GigBuddy' "$INSTALL_ROOT/.gigbuddy-install"; then
@@ -408,8 +419,7 @@ else
 fi
 
 if [[ "$SKIP_PRESETS" != 1 ]]; then
-  step "Checking TONE3000 login"
-  stop_banner
+  announce_visible_step "Checking TONE3000 login"
   login_status=0
   if env PYTHONPATH="$INSTALL_ROOT/src" \
       "$INSTALL_ROOT/.venv/bin/python" \
@@ -421,10 +431,9 @@ if [[ "$SKIP_PRESETS" != 1 ]]; then
       SKIP_PRESETS=1
       bootstrap_args+=(--skip-presets)
     else
-      die "TONE3000 login failed"
+      die "TONE3000 login is required; pass --skip-presets explicitly to skip starter presets"
     fi
   fi
-  start_banner
 fi
 
 step "Downloading starter presets and dry inputs (this can take a while; please be patient)"
@@ -434,6 +443,7 @@ run_quiet env PYTHONPATH="$INSTALL_ROOT/src" \
 
 # 引擎依赖与编译（逻辑与根 install.sh 同步维护）
 if [[ -d "$INSTALL_ROOT/cpp" ]]; then
+  start_banner
   if [[ ! -d "$INSTALL_ROOT/third_party/NeuralAudio" ]]; then
     step "Fetching engine dependencies (NeuralAudio + NAM)"
     run_quiet git clone --recurse-submodules \

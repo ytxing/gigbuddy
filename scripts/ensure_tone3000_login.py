@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Ensure a TONE3000 session exists before an installer bootstrap.
 
-Exit status 10 means the user declined or no interactive terminal was
-available; installers should continue without starter presets in that case.
+Exit status 10 means the user declined; installers should continue without
+starter presets in that case. A missing interactive terminal is an error so
+non-interactive installs cannot silently skip the login check.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import tone3000
 
 
 SKIP_STARTER_PRESETS = 10
+NO_INTERACTIVE_TERMINAL = 11
 
 
 def _has_usable_login(token_fn: Callable[[], str]) -> bool:
@@ -56,12 +58,12 @@ def ensure_login(*, input_stream: TextIO | None = None,
         stream, owned_stream = _prompt_stream()
     if stream is None:
         print(
-            "No interactive terminal is available; continuing without "
-            "starter presets. Run `gigbuddy tone login` and `gigbuddy "
-            "preset bootstrap` later.",
+            "No interactive terminal is available for TONE3000 login. "
+            "Run this installer from a terminal, or pass --skip-presets "
+            "explicitly to install without starter presets.",
             file=error,
         )
-        return SKIP_STARTER_PRESETS
+        return NO_INTERACTIVE_TERMINAL
 
     try:
         print("No TONE3000 login was found.", file=output)

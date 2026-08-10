@@ -81,7 +81,7 @@ if [[ "$SKIP_PRESETS" -eq 0 ]]; then
         if [[ "$login_status" -eq 10 ]]; then
             bootstrap_args+=(--skip-presets)
         else
-            echo "TONE3000 login failed; starter assets were not downloaded." >&2
+            echo "TONE3000 login is required; pass --skip-presets explicitly to install without starter assets." >&2
             exit "$login_status"
         fi
     fi
