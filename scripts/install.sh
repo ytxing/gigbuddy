@@ -2,11 +2,37 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.1.0}"
+REPO_REF="${GIGBUDDY_REF:-v1.1.1}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
 PYTHON_BIN="${GIGBUDDY_PYTHON:-python3}"
+SKIP_PRESETS=0
+SKIP_DRY_INPUTS=0
+DRY_INPUTS="all"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/install.sh [options]
+
+Options:
+  --skip-presets      skip TONE3000 starter model downloads and presets
+  --skip-dry-inputs   skip official dry-input downloads
+  --starter-dry       download only the ten common starter dry inputs
+  -h, --help          show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-presets) SKIP_PRESETS=1 ;;
+    --skip-dry-inputs) SKIP_DRY_INPUTS=1 ;;
+    --starter-dry) DRY_INPUTS="starter" ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
 
 ROLLBACK_FILE="$(mktemp -t gigbuddy-rollback.XXXXXX)"
 
@@ -371,9 +397,40 @@ step "Installing Python dependencies"
 run_quiet "$UV_BIN" pip install --python "$INSTALL_ROOT/.venv/bin/python" \
   -r "$INSTALL_ROOT/requirements.txt"
 
+bootstrap_args=()
+if [[ "$SKIP_PRESETS" == 1 ]]; then
+  bootstrap_args+=(--skip-presets)
+fi
+if [[ "$SKIP_DRY_INPUTS" == 1 ]]; then
+  bootstrap_args+=(--skip-dry-inputs)
+else
+  bootstrap_args+=(--dry-inputs "$DRY_INPUTS")
+fi
+
+if [[ "$SKIP_PRESETS" != 1 ]]; then
+  step "Checking TONE3000 login"
+  stop_banner
+  login_status=0
+  if env PYTHONPATH="$INSTALL_ROOT/src" \
+      "$INSTALL_ROOT/.venv/bin/python" \
+      "$INSTALL_ROOT/scripts/ensure_tone3000_login.py"; then
+    :
+  else
+    login_status=$?
+    if [[ "$login_status" == 10 ]]; then
+      SKIP_PRESETS=1
+      bootstrap_args+=(--skip-presets)
+    else
+      die "TONE3000 login failed"
+    fi
+  fi
+  start_banner
+fi
+
 step "Downloading starter presets and dry inputs (this can take a while; please be patient)"
 run_quiet env PYTHONPATH="$INSTALL_ROOT/src" \
-  "$INSTALL_ROOT/.venv/bin/python" "$INSTALL_ROOT/scripts/bootstrap.py"
+  "$INSTALL_ROOT/.venv/bin/python" "$INSTALL_ROOT/scripts/bootstrap.py" \
+  "${bootstrap_args[@]}"
 
 # 引擎依赖与编译（逻辑与根 install.sh 同步维护）
 if [[ -d "$INSTALL_ROOT/cpp" ]]; then

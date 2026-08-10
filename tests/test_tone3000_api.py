@@ -39,7 +39,8 @@ def test_authorization_url_uses_s256_pkce(monkeypatch):
     }
 
 
-def test_login_validates_callback_and_persists_tokens(monkeypatch, tmp_path):
+def test_login_validates_callback_and_persists_tokens(monkeypatch, tmp_path,
+                                                     capsys):
     monkeypatch.setenv("TONE3000_CLIENT_ID", "t3k_pub_test")
     token_file = tmp_path / "tokens.json"
     monkeypatch.setattr(tone3000, "TOKEN_FILE", token_file)
@@ -93,6 +94,7 @@ def test_login_validates_callback_and_persists_tokens(monkeypatch, tmp_path):
     assert captured["code_verifier"]
     assert token_file.exists()
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    assert auth_url["value"] in capsys.readouterr().out
 
 
 def test_login_reports_callback_authorization_error(monkeypatch, tmp_path):

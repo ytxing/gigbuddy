@@ -45,7 +45,7 @@ def test_uninstall_keep_data_removes_runtime_only(tmp_path):
     assert (install_root / ".gigbuddy-install").exists()
     assert not (install_root / "app.py").exists()
     assert not (home / ".local" / "bin" / "gigbuddy").is_symlink()
-    assert (home / ".config" / "gigbuddy" / "tone3000_tokens.json").exists()
+    assert not (home / ".config" / "gigbuddy" / "tone3000_tokens.json").exists()
     assert "local data kept" in result.stdout
 
 

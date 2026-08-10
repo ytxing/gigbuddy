@@ -11,12 +11,12 @@
 
 *Find a sound. Shape it. Play it now.*
 
-*v1.1.0 · 2026-08-10*
+*v1.1.1 · 2026-08-10*
 
 One line from the terminal — downloads, installs, and initializes everything:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.1/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
@@ -127,22 +127,24 @@ skip the prompt. To remove a user-level install, run the matching uninstall
 script:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.1/scripts/uninstall.sh | bash
 ```
 
 The standalone uninstaller removes the local install, generated runtime files,
 and the persisted TONE3000 session. Use `--keep-data` when you want to remove
-the runtime while keeping downloaded tones, local data, and the login session:
+the runtime while keeping downloaded tones and local data; the login session is
+still removed:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.1/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 From a fresh checkout:
 
 ```
 # Creates the Python environment, local library, starter presets,
-# official dry inputs, and the realtime engine.
+# official dry inputs, and the realtime engine. If no TONE3000 session is
+# found, the installer asks whether to log in and opens the system browser.
 ./install.sh
 
 # Optional: browse the TUI without compiling the native engine.
@@ -156,6 +158,12 @@ The default install prepares the exact models used by the built-in preset
 catalog and all 34 official TONE3000 dry-input WAV files. It is safe to rerun:
 existing database rows and non-empty files are reused. `--starter-dry` keeps the
 first download to ten common guitar samples.
+
+The user-level installer performs the same login check before its bootstrap.
+Press `Y` or Enter to sign in, or `n` to continue without starter models; the
+installer prints the OAuth URL even when it opens the browser automatically.
+After logging in later, run `gigbuddy preset bootstrap` to add the starter
+presets and models.
 
 To inspect the interface without an audio backend, launch with:
 
@@ -352,7 +360,7 @@ integration.
 
 ## Dependencies
 
-Pinned versions (v1.1.0). Update `requirements.txt` and the NeuralAudio commit
+Pinned versions (v1.1.1). Update `requirements.txt` and the NeuralAudio commit
 in `install.sh` together when bumping.
 
 **Python runtime** (`requirements.txt`):

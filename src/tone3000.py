@@ -395,13 +395,17 @@ def login(*, timeout: float = 300, open_browser: bool = True,
         ) from exc
     server.timeout = min(1.0, max(float(timeout), 0.05))
     deadline = time.monotonic() + max(float(timeout), 0.05)
+    print("TONE3000 login URL (copy this if the browser does not open):",
+          flush=True)
+    print(url, flush=True)
     if open_browser:
         try:
             opened = webbrowser.open(url)
         except Exception:
             opened = False
         if not opened:
-            print(f"Open this URL to sign in:\n{url}")
+            print("The browser did not open automatically; copy the URL above.",
+                  flush=True)
     try:
         while time.monotonic() < deadline and not result:
             server.handle_request()

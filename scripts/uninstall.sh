@@ -142,7 +142,7 @@ if [[ -d "$INSTALL_ROOT/data" ]]; then
 fi
 
 REMOVE_SESSION=0
-if [[ "$KEEP_DATA" != 1 && -f "$TOKEN_FILE" ]]; then
+if [[ -f "$TOKEN_FILE" ]]; then
   REMOVE_SESSION=1
 fi
 
@@ -179,6 +179,7 @@ fi
 
 if [[ "$REMOVE_SESSION" == 1 ]]; then
   rm -f -- "$TOKEN_FILE"
+  printf 'TONE3000 login session removed.\n'
 fi
 
 if [[ "$DELETE_DATA" == 1 ]]; then

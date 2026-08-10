@@ -9,12 +9,12 @@
 
 *找到音色 · 即刻演奏*
 
-*v1.1.0 · 2026-08-10*
+*v1.1.1 · 2026-08-10*
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.1/scripts/install.sh | bash
 ```
 
 ![GigBuddy 安装](docs/screenshots/gigbuddy.gif)
@@ -118,21 +118,22 @@ AUDIO 面板把电平、静音、设备、缓冲、采样率、延迟控制在�
 可跳过询问。卸载同样一行完成：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.1/scripts/uninstall.sh | bash
 ```
 
 独立卸载脚本会删除本地安装、生成的运行时文件和持久化的 TONE3000 会话。
-如果只想删除运行时、保留下载的音色、本地数据和登录状态，可使用
-`--keep-data` 参数：
+如果只想删除运行时、保留下载的音色和本地数据，可使用 `--keep-data`
+参数；登录会话仍会被删除：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.1/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 从源码检出开始：
 
 ```
 # 创建 Python 环境、本地音色库、内置 preset、官方干音与实时引擎。
+# 如果没有 TONE3000 登录记录，安装时会询问是否登录并打开系统浏览器。
 ./install.sh
 
 # 暂不编译引擎、仅浏览界面时，可加该参数。
@@ -145,6 +146,11 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/unins
 默认安装会准备内置 preset 目录所需的全部模型，以及 34 个官方 TONE3000
 干音 WAV。重复运行安全：已有数据库记录与非空文件会直接复用。
 `--starter-dry` 只下载前十个常用吉他样本。
+
+用户目录安装器也会在 bootstrap 前做同样的登录检查。按 `Y` 或回车会登录，
+按 `n` 可以先完成不含 starter 模型的基础安装；安装器即使自动打开浏览器，
+也会把 OAuth 地址打印出来。之后登录可运行 `gigbuddy preset bootstrap`，
+补齐 starter preset 和模型。
 
 不接音频后端、仅查看界面：
 
@@ -317,7 +323,7 @@ TONE3000 的 API 政策与 endpoint 范围可能变化。OAuth 流程、免费�
 
 ## 依赖
 
-版本固定（v1.1.0）。升级时需同步更新 `requirements.txt` 与 `install.sh`
+版本固定（v1.1.1）。升级时需同步更新 `requirements.txt` 与 `install.sh`
 中的 NeuralAudio commit。
 
 **Python 运行时**（`requirements.txt`）：

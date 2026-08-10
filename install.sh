@@ -70,6 +70,23 @@ else
     bootstrap_args+=(--dry-inputs "$DRY_INPUTS")
 fi
 
+if [[ "$SKIP_PRESETS" -eq 0 ]]; then
+    stage "Checking TONE3000 login"
+    login_status=0
+    if PYTHONPATH="$ROOT/src" "$VENV_PYTHON" \
+        "$ROOT/scripts/ensure_tone3000_login.py"; then
+        :
+    else
+        login_status=$?
+        if [[ "$login_status" -eq 10 ]]; then
+            bootstrap_args+=(--skip-presets)
+        else
+            echo "TONE3000 login failed; starter assets were not downloaded." >&2
+            exit "$login_status"
+        fi
+    fi
+fi
+
 stage "Preparing local database, starter presets, and dry inputs"
 stage "  (downloading 30 starter models — this can be a bit slow; please be patient)"
 PYTHONPATH="$ROOT/src" "$VENV_PYTHON" "$ROOT/scripts/bootstrap.py" \

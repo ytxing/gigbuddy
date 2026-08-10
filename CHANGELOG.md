@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1 - 2026-08-10
+
+### Fixed
+
+- Installers check for a local TONE3000 session before downloading starter
+  models, offer an interactive `Y/n` login prompt, and print the OAuth URL
+  while opening the normal system-browser flow.
+- Declining login, or installing without a terminal, now skips authenticated
+  starter models while allowing public dry-input setup to continue.
+- Both uninstall paths remove the persisted TONE3000 session even when
+  `--keep-data` preserves downloaded tones and local data.
+
 ## 1.1.0 - 2026-08-10
 
 ### Added
