@@ -16,6 +16,14 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def test_oauth_callback_page_links_to_tone3000_website():
+    page = tone3000._CALLBACK_PAGE
+
+    assert 'href="https://www.tone3000.com"' in page
+    assert 'target="_blank"' in page
+    assert 'rel="noopener noreferrer"' in page
+
+
 def test_auth_failure_is_left_aligned_and_offers_login(monkeypatch):
     def requires_login(*_args, **_kwargs):
         raise tone3000.AuthenticationRequiredError("login required")

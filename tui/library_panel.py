@@ -1552,6 +1552,7 @@ class LibraryPanel(Vertical):
             has_files=True,
             offset=0,
             sort_by=self._view_states["pane-local"].get("sort", "title"))
+        self._attach_local_download_counts(tones)
         self._local_has_more = len(tones) == page_limit
         if preserve_pages and tones:
             self._local_page = min(
@@ -1888,6 +1889,9 @@ class LibraryPanel(Vertical):
         finally:
             if self._local_alive(generation, request_id):
                 self._local_loading = False
+        if not self._local_alive(generation, request_id):
+            return
+        await asyncio.to_thread(self._attach_local_download_counts, tones)
         if not self._local_alive(generation, request_id):
             return
         table = self.query_one("#lib-table-local", DataTable)
@@ -2730,6 +2734,23 @@ class LibraryPanel(Vertical):
             *self._row_cells(tone, table),
         ]
 
+    @staticmethod
+    def _attach_local_download_counts(tones: list[dict]) -> list[dict]:
+        """Attach local model counts without querying TONE3000."""
+        if not tones:
+            return tones
+        try:
+            local_by_tone = library.downloaded_model_ids_by_tone()
+        except Exception:
+            return tones
+        for tone in tones:
+            try:
+                tone_id = int(tone["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            tone["downloaded"] = len(local_by_tone.get(tone_id, ()))
+        return tones
+
     def _row_cells(self, t: dict, table: DataTable | None = None) -> list[str]:
         title = str(t.get("title") or "")
         matched_model_ids = t.get("matched_model_ids") or ()
@@ -2751,6 +2772,18 @@ class LibraryPanel(Vertical):
         total = ((t.get("a2_models_count") or 0)
                  + (t.get("custom_models_count") or 0)
                  + (t.get("irs_count") or 0))
+        models = t.get("models")
+        if isinstance(models, (list, tuple)):
+            usable_models = [
+                model for model in models
+                if isinstance(model, dict)
+                and not library.tone3000._is_a1_model(model)
+            ]
+            if not total:
+                total = len(usable_models)
+            if t.get("downloaded") is None:
+                t["downloaded"] = sum(
+                    bool(model.get("local_path")) for model in usable_models)
         files = str(total)
         if t.get("downloaded") is not None and total:
             files = f"{t['downloaded']}/{total}"

@@ -112,6 +112,9 @@ _CALLBACK_PAGE = """<!DOCTYPE html>
   .powered-by svg {
     display: block; width: min(210px, 38vw); height: auto;
   }
+  .powered-by a {
+    display: block; color: inherit; line-height: 0;
+  }
   .logo-viewport {
     width: 100%; overflow-x: auto; overflow-y: hidden;
     display: flex; justify-content: safe center;
@@ -166,9 +169,12 @@ _CALLBACK_PAGE = """<!DOCTYPE html>
 </head>
 <body>
 <main class="callback-content">
-<div class="powered-by" role="img" aria-label="Powered by TONE3000">
+<div class="powered-by">
 <span>Powered by</span>
+<a href="https://www.tone3000.com" target="_blank"
+   rel="noopener noreferrer" aria-label="Open TONE3000 website">
 """ + _TONE3000_LOGO_SVG + """
+</a>
 </div>
 <div class="logo-viewport">
 <pre class="logo" role="img" aria-label="GigBuddy">""" + "\n".join(_CALLBACK_ART) + """</pre>
