@@ -77,14 +77,16 @@ rollback_install() {
 
 step() {
   printf '==> %s\n' "$1" >> "${INSTALL_LOG:?}"
+  printf '==> %s\n' "$1" >>"${STATUS_FILE:?}"
   if [[ -n "${BANNER_PID:-}" ]]; then
-    printf '==> %s\n' "$1" >>"${STATUS_FILE:?}"
+    :
   else
     printf '==> %s\n' "$1"
   fi
 }
 
 BANNER_PID=""
+BANNER_STARTED=0
 
 stop_banner() {
   if [[ -n "$BANNER_PID" ]]; then
@@ -97,10 +99,21 @@ stop_banner() {
   fi
 }
 
+print_saved_status() {
+  [[ -s "${STATUS_FILE:?}" ]] || return 0
+  while IFS= read -r status_line; do
+    printf '%s\n' "$status_line"
+  done <"$STATUS_FILE"
+}
+
 start_banner() {
+  [[ "$BANNER_STARTED" == 0 ]] || return 0
+  BANNER_STARTED=1
+  local screen_controlled=0
   if [[ -t 1 && "${GIGBUDDY_VERBOSE:-0}" != "1" && -n "${TERM:-}" && "$TERM" != "dumb" ]] \
      && command -v python3 >/dev/null 2>&1; then
     # 动画进程独占终端；安装主流程只通过状态文件更新步骤文字。
+    screen_controlled=1
     printf '\033[2J\033[H'
     local lines cols tty_size
     tty_size=$(stty size </dev/tty 2>/dev/null || true)
@@ -208,6 +221,7 @@ PY
         if ! kill -0 "$BANNER_PID" 2>/dev/null; then
           BANNER_PID=""
           print_static_banner "${banner_lines[@]}"
+          print_saved_status
         fi
         return
       fi
@@ -249,6 +263,11 @@ PY
   fi
   if (( ${#static_lines[@]} >= 3 )); then
     print_static_banner "${static_lines[@]}"
+    print_saved_status
+  elif [[ "$screen_controlled" == 1 ]]; then
+    # The terminal was cleared, but its dimensions cannot fit a banner.
+    # Restore the pre-banner steps instead of leaving a blank screen.
+    print_saved_status
   fi
 }
 
@@ -325,6 +344,41 @@ announce_visible_step() {
     stop_banner
     printf '==> %s\n' "$message"
   fi
+}
+
+confirm_install_start() {
+  local answer=""
+  printf '\n'
+  printf 'Login checks are complete. GigBuddy is ready to install.\n'
+  printf 'Continue with the installation? [Y/n] '
+
+  if [[ -t 0 ]]; then
+    if ! IFS= read -r answer; then
+      return 1
+    fi
+  elif [[ -r /dev/tty ]]; then
+    if ! IFS= read -r answer </dev/tty; then
+      return 1
+    fi
+  else
+    printf '\nNo interactive terminal is available for the installation confirmation.\n' >&2
+    printf 'Run the installer from a terminal and try again.\n' >&2
+    return 2
+  fi
+
+  case "${answer:-}" in
+    n|N|no|NO|No|nO)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+cancel_install() {
+  stop_banner
+  rollback_install
+  printf 'GigBuddy installation cancelled.\n'
+  exit 0
 }
 
 is_gigbuddy_checkout() {
@@ -406,16 +460,28 @@ if [[ "$SKIP_PRESETS" != 1 ]]; then
   if env PYTHONPATH="$INSTALL_ROOT/src" \
       "$PYTHON_BIN" \
       "$INSTALL_ROOT/scripts/ensure_tone3000_login.py"; then
-    :
+    step "TONE3000 login ready"
   else
     login_status=$?
     if [[ "$login_status" == 10 ]]; then
       SKIP_PRESETS=1
       bootstrap_args+=(--skip-presets)
+      step "Skipping starter presets"
     else
       die "TONE3000 login is required; pass --skip-presets explicitly to skip starter presets"
     fi
   fi
+fi
+
+confirm_status=0
+if confirm_install_start; then
+  :
+else
+  confirm_status=$?
+  if [[ "$confirm_status" == 1 ]]; then
+    cancel_install
+  fi
+  die "interactive confirmation is required before installation"
 fi
 
 # All user decisions are complete before the animated banner starts. In

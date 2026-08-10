@@ -80,3 +80,8 @@ def test_installers_check_login_before_creating_runtime_environment():
         encoding="utf-8")
     assert user_installer.index("Checking TONE3000 login") < user_installer.index(
         "\nstart_banner\n")
+    assert user_installer.index("if confirm_install_start; then") < user_installer.index(
+        "\nstart_banner\n")
+    assert "Continue with the installation? [Y/n]" in user_installer
+    assert "printf '==> %s\\n' \"$1\" >>\"${STATUS_FILE:?}\"" in user_installer
+    assert "BANNER_STARTED=0" in user_installer
