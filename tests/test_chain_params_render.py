@@ -47,16 +47,15 @@ def test_chain_params_is_single_focus_stop_without_overlays(
             await pilot.pause()
             assert app.focused is params
 
-            # Inspect the composed screen row: 3-space separators, three
-            # parameters, no overlay duplicate (GGAIN/MMASTER/QQUALITY were
-            # the old overlay misalignment).
+            # Inspect the composed screen row: bracketed key buttons, fixed
+            # signed values, and no overlay duplicate.
             screen_row = app.screen._compositor.render_strips()[
                 params.region.y].text
             visible = screen_row[
                 params.content_region.x:params.content_region.right]
             assert visible.startswith(
-                "GAIN   1.00 g · G   MASTER   1.00 m · M   "
-                "QUALITY   1.00 q · Q")
+                "gain  [g] +01.00 [G]   master  [m] +01.00 [M]   "
+                "quality  [q] +01.00 [Q]")
             assert all(
                 duplicate not in visible
                 for duplicate in ("GGAIN", "MMASTER", "QQUALITY"))
@@ -139,10 +138,15 @@ def test_value_edit_commits_and_escape_cancels(monkeypatch, tmp_path):
             params = app.query_one(ChainPanel).params
             _index, start, end = params._value_spans[0]
             value_x = params.content_region.x + (start + end) // 2
+            assert "$surface-lighten-1" in params._parameter_markup(0, 10)
 
             await pilot.click(offset=(value_x, params.region.y))
             await pilot.pause()
             assert params._editing == 0
+            assert "▌" in params._parameter_markup(0, None)
+            params._cursor_visible = False
+            assert "▌" not in params._parameter_markup(0, None)
+            params._cursor_visible = True
             await pilot.press("backspace", "backspace", "7")
             await pilot.press("enter")
             await pilot.pause(0.2)
@@ -157,12 +161,18 @@ def test_value_edit_commits_and_escape_cancels(monkeypatch, tmp_path):
             assert params._editing is None
             assert live.read_chain().get("gain") == 1.7
 
+            # A direct double-click from the normal display resets the value
+            # instead of leaving the first click in edit mode.
+            await pilot.double_click(offset=(value_x, params.region.y))
+            await pilot.pause(0.2)
+            assert params._editing is None
+            assert live.read_chain().get("gain") == 0.0
+
     run(scenario())
 
 
-def test_click_token_dot_and_blank_do_not_move_focus(monkeypatch, tmp_path):
-    """Clicking any non-value part of the row never steals focus; the dot
-    restores the default value (REQ-027)."""
+def test_click_tokens_and_blank_do_not_move_focus(monkeypatch, tmp_path):
+    """Key buttons step without stealing focus; blank space is inert."""
 
     _patch_chain(monkeypatch, tmp_path)
 
@@ -175,32 +185,24 @@ def test_click_token_dot_and_blank_do_not_move_focus(monkeypatch, tmp_path):
             app.set_focus(panel)
             await pilot.pause()
 
-            # Bump gain with the keyboard so the dot reset is observable.
+            # Bump gain with the keyboard so the mouse step is observable.
             await pilot.press("G")
             await pilot.pause(0.2)
             assert live.read_chain().get("gain") == 1.05
 
-            # dot (content x 14): resets gain to its default (1.0),
-            # focus stays on the panel.
-            dot_x = params.content_region.x + 14
-            await pilot.click(offset=(dot_x, params.region.y))
-            await pilot.pause(0.2)
-            assert app.focused is panel
-            assert live.read_chain().get("gain") == 1.0
-
-            # g token (content x 12): mouse step down (0.05), no focus move.
-            token_x = params.content_region.x + 12
+            # [g] button: mouse step down (0.05), no focus move.
+            token_x = params.content_region.x + params._spans[0][1]
             await pilot.click(offset=(token_x, params.region.y))
             await pilot.pause()
             assert app.focused is panel
             assert params._editing is None
-            assert live.read_chain().get("gain") == 0.95
+            assert live.read_chain().get("gain") == 1.0
 
             # blank right edge: no focus move, no state change.
             blank_x = params.content_region.right - 2
             await pilot.click(offset=(blank_x, params.region.y))
             await pilot.pause()
             assert app.focused is panel
-            assert live.read_chain().get("gain") == 0.95
+            assert live.read_chain().get("gain") == 1.0
 
     run(scenario())

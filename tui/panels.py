@@ -485,8 +485,8 @@ class NodeSwitchButton(Static):
 class ChainParams(Static):
     """Plain-text chain controls with clickable keyboard-hint keys.
 
-    Each hint is a lowercase/uppercase pair split by a dot (g·G): the two
-    halves highlight and click independently — lowercase steps down, uppercase
+    Each parameter has a lowercase/uppercase button pair ([g] / [G]): the
+    buttons highlight and click independently — lowercase steps down, uppercase
     steps up — so the hover shows exactly the key that will fire.
 
     Mouse interaction applies one base step immediately, then repeats with a
@@ -536,9 +536,15 @@ class ChainParams(Static):
     HOLD_STAGE_INTERVALS = (0.12, 0.08, 0.06)
     HOLD_TICK = 0.025
 
-    # 手动填写限制：小数 ≤ 2 位（与 signed_fixed 显示一致）、总长 ≤ 8 字符
+    PARAM_BUTTON_WIDTH = 3
+    PARAM_VALUE_WIDTH = 7  # six value cells plus one blinking-cursor cell
+    PARAM_LABEL_GAP = 2
+    PARAM_GAP = 1
+    PARAM_VALUE_END_GAP = 0
+
+    # 手动填写限制：小数 ≤ 2 位，保留固定数值列和光标列
     EDIT_MAX_DECIMALS = 2
-    EDIT_MAX_LENGTH = 8
+    EDIT_MAX_LENGTH = PARAM_VALUE_WIDTH - 1
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -570,13 +576,13 @@ class ChainParams(Static):
 
     def set_values(self, gain: float, master: float, quality: float) -> None:
         controls = [
-            ("GAIN", signed_fixed(gain), "g · G",
+            ("gain", self._format_value(gain), "g · G",
              lambda step: self.app.action_bump_gain(-step),
              lambda step: self.app.action_bump_gain(+step)),
-            ("MASTER", signed_fixed(master), "m · M",
+            ("master", self._format_value(master), "m · M",
              lambda step: self.app.action_bump_master(-step),
              lambda step: self.app.action_bump_master(+step)),
-            ("QUALITY", signed_fixed(quality), "q · Q",
+            ("quality", self._format_value(quality), "q · Q",
              lambda step: self.app.action_bump_quality(-step),
              lambda step: self.app.action_bump_quality(+step)),
         ]
@@ -584,7 +590,7 @@ class ChainParams(Static):
             hold_index = self._param_keys.index(self._hold_key)
             label, _value, hint, decrease, increase = controls[hold_index]
             controls[hold_index] = (
-                label, signed_fixed(self._hold_value), hint,
+                label, self._format_value(self._hold_value), hint,
                 decrease, increase)
         self._controls = controls
         self._rebuild_hit_regions()
@@ -593,66 +599,71 @@ class ChainParams(Static):
         self._hover_index = self._press_span if self._long_press_active else None
         self._refresh_hint(self._hover_index)
 
+    @staticmethod
+    def _format_value(value: float) -> str:
+        """Render a signed, two-decimal value with two integer columns."""
+        return f"{float(value):+06.2f}"
+
     def _rebuild_hit_regions(self) -> None:
         """Recalculate hit spans after a value changes width."""
-        # (token, start, end, action) — one span per key half, so the dot
-        # separates the two click targets instead of merging them.  action
-        # takes the step size (always positive); the sign is baked in.
+        # (token, start, end, action) — one span per bracketed key button.
+        # action takes the step size (always positive); the sign is baked in.
         self._spans: list[tuple[str, int, int, Callable[[float], None]]] = []
-        # 数值区域（单击进编辑）：(参数下标, start, end)，value 文本含
-        # signed_fixed 的符号空格，整段可点。
+        # 数值区域（单击进编辑）：(参数下标, start, end)，整段固定宽度可点。
         self._value_spans: list[tuple[int, int, int]] = []
-        # 分隔点（点击恢复该参数默认值，REQ-027）：(参数下标, start, end)
-        self._dot_spans: list[tuple[int, int, int]] = []
         offset = 0
         for index, (label, value, hint, decrease, increase) in enumerate(
                 self._controls):
             if index:
                 offset += 3
-            prefix = f"{label}  {value} "
-            value_start = offset + len(label) + 2
-            self._value_spans.append((index, value_start, value_start + len(value)))
-            offset += len(prefix)
             lo, hi = (part.strip() for part in hint.split("·"))
-            self._spans.append((lo, offset, offset + len(lo), decrease))
-            offset += len(lo)  # " · " 分隔符
-            self._dot_spans.append((index, offset + 1, offset + 2))
-            offset += 3
-            self._spans.append((hi, offset, offset + len(hi), increase))
-            offset += len(hi)
+            button_start = offset + len(label) + self.PARAM_LABEL_GAP
+            self._spans.append((
+                lo, button_start, button_start + self.PARAM_BUTTON_WIDTH,
+                decrease))
+            value_start = (button_start + self.PARAM_BUTTON_WIDTH
+                           + self.PARAM_GAP)
+            value_end = value_start + self.PARAM_VALUE_WIDTH
+            self._value_spans.append((index, value_start, value_end))
+            high_start = value_end + self.PARAM_VALUE_END_GAP
+            self._spans.append((
+                hi, high_start, high_start + self.PARAM_BUTTON_WIDTH,
+                increase))
+            offset = high_start + self.PARAM_BUTTON_WIDTH
 
     def _parameter_markup(self, index: int, hovered: int | None) -> str:
         """Render one fixed-width parameter segment."""
         label, value, hint, _decrease, _increase = self._controls[index]
         if self._editing == index:
             cursor = "▌" if self._cursor_visible else " "
-            value_part = (
-                f"[b]{label}[/]  [b $background on $accent]"
-                f"{self._edit_text}[/][b $accent on $background]"
-                f"{cursor}[/] [dim]"
-            )
+            edit_display = (self._edit_text + cursor).ljust(
+                self.PARAM_VALUE_WIDTH)
+            value_part = f"[b $background on $accent]{_escape(edit_display)}[/]"
         else:
-            value_style = "$background on $accent" if (
-                hovered is not None and hovered >= 10
-                and hovered - 10 == index) else "$accent"
-            value_part = (
-                f"[b]{label}[/]  [b {value_style}]{value}[/] [dim]"
-            )
+            value_style = (
+                "$text on $surface-lighten-1"
+                if hovered == 10 + index else "$accent")
+            value_display = value.ljust(self.PARAM_VALUE_WIDTH)
+            value_part = f"[b {value_style}]{_escape(value_display)}[/]"
         lo, hi = (part.strip() for part in hint.split("·"))
+        lo_text = _escape(f"[{lo}]")
+        hi_text = _escape(f"[{hi}]")
         lo_part = (
-            f"[b $background on $accent]{lo}[/]"
+            f"[b $text on $surface-lighten-1]{lo_text}[/]"
             if hovered == index * 2 else lo
         )
-        dot_part = (
-            " [b $background on $accent]·[/] "
-            if hovered is not None and hovered >= 20
-            and hovered - 20 == index else " · "
-        )
         hi_part = (
-            f"[b $background on $accent]{hi}[/]"
+            f"[b $text on $surface-lighten-1]{hi_text}[/]"
             if hovered == index * 2 + 1 else hi
         )
-        return f"{value_part}{lo_part}{dot_part}{hi_part}[/]"
+        if hovered != index * 2:
+            lo_part = f"[b $accent]{lo_text}[/]"
+        if hovered != index * 2 + 1:
+            hi_part = f"[b $accent]{hi_text}[/]"
+        return (f"[b]{_escape(label)}[/]"
+                f"{' ' * self.PARAM_LABEL_GAP}{lo_part}"
+                f"{' ' * self.PARAM_GAP}{value_part}"
+                f"{' ' * self.PARAM_VALUE_END_GAP}{hi_part}")
 
     def _refresh_hint(self, hovered: int | None = None) -> None:
         """Rebuild the whole line, highlighting only the hovered key half.
@@ -688,8 +699,6 @@ class ChainParams(Static):
         "master": (0.0, 10.0),
         "quality": (0.0, 1.0),
     }
-    PARAM_DEFAULTS = live.CHAIN_PARAMETER_DEFAULTS
-
     def _value_at(self, x: int) -> int | None:
         """局部列 x 命中的数值区域（返回 10+参数下标，供 hover 编码）"""
         return next(
@@ -698,23 +707,20 @@ class ChainParams(Static):
              if start <= x < end),
             None)
 
-    def _dot_at(self, x: int) -> int | None:
-        """局部列 x 命中的分隔点（返回 20+参数下标，供 hover 编码）"""
-        return next(
-            (20 + index for index, start, end
-             in getattr(self, "_dot_spans", [])
-             if start <= x < end),
-            None)
-
     def _begin_edit(self, index: int) -> None:
         """进入编辑态：预填当前显示值，聚焦本 widget 接收键盘。"""
         self._editing = index
-        self._edit_text = self._controls[index][1]  # signed_fixed 显示值
+        self._edit_text = self._controls[index][1]
         self._cursor_visible = True
         if self._cursor_timer is None:
             self._cursor_timer = self.set_interval(0.5, self._toggle_cursor)
         self._refresh_hint()
         self.focus()
+
+    def _reset_edit_value(self, index: int) -> None:
+        """Double-click a value to set that chain parameter to zero."""
+        self._exit_edit()
+        self.app._set_chain_param(self._param_keys[index], 0.0)
 
     def _toggle_cursor(self) -> None:
         """0.5s 闪烁：光标 ▌/空格占位切换（占位保持行宽，token 不位移）。"""
@@ -918,6 +924,12 @@ class ChainParams(Static):
     def on_mouse_down(self, event: MouseDown) -> None:
         x = max(0, event.x - 1)  # chain-params has one cell of left padding
         if self._editing is not None:
+            if self._value_at(x) is not None:
+                # Keep the edit alive until Click exposes its chain count; a
+                # double-click must reach on_click before the edit is closed.
+                self._press_cancelled = False
+                event.stop()
+                return
             # 编辑态中按下任何位置：先取消编辑（不应用），并复用
             # _press_cancelled 让随后的合成 click 不步进
             self._exit_edit()
@@ -962,24 +974,25 @@ class ChainParams(Static):
             self._press_cancelled = False
             event.stop()
             return
-        if self._editing is not None:
-            # 编辑中点击：取消编辑（不应用）
-            self._exit_edit()
-            event.stop()
-            return
         x = max(0, event.x - 1)  # chain-params has one cell of left padding
-        # 分隔点：恢复参数默认值（REQ-027，走同一条写链路径）
-        dot_hit = self._dot_at(x)
-        if dot_hit is not None:
+        if self._editing is not None:
+            value_hit = self._value_at(x)
+            if (value_hit is not None
+                    and getattr(event, "chain", 1) >= 2):
+                self._reset_edit_value(value_hit - 10)
+            else:
+                # 编辑中单击其他位置：取消编辑（不应用）
+                self._exit_edit()
             event.stop()
-            key = self._param_keys[dot_hit - 20]
-            self.app._set_chain_param(key, self.PARAM_DEFAULTS[key])
             return
         # 数值区域：进入手动编辑
         value_hit = self._value_at(x)
         if value_hit is not None:
             event.stop()
-            self._begin_edit(value_hit - 10)
+            if getattr(event, "chain", 1) >= 2:
+                self._reset_edit_value(value_hit - 10)
+            else:
+                self._begin_edit(value_hit - 10)
             return
         span = self._span_at(x)
         if span is not None:
@@ -998,8 +1011,6 @@ class ChainParams(Static):
         hovered = self._span_at(x)
         if hovered is None:
             hovered = self._value_at(x)  # 值区域 → 10+参数下标（可编辑提示）
-        if hovered is None:
-            hovered = self._dot_at(x)  # 分隔点 → 20+参数下标（恢复默认提示）
         if hovered == self._hover_index:
             return
         self._hover_index = hovered
