@@ -43,8 +43,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from . import live  # noqa: E402
-from .chain_state import (ChainState, ChainStateError, SlotStatus,
-                          CommitReceipt, PreparedCommit, chain_fingerprint)  # noqa: E402
+from .chain_state import (ChainState, ChainStateError, SLOT_GAIN_MAX_DB,
+                          SLOT_GAIN_MIN_DB, SlotStatus, CommitReceipt,
+                          PreparedCommit, chain_fingerprint)  # noqa: E402
 import library  # noqa: E402
 import chain_protocol  # noqa: E402
 from .input_screen import InputSourceScreen  # noqa: E402
@@ -545,7 +546,8 @@ def _parse_devices(output: str) -> tuple[list[str], list[str]]:
 
 class GigBuddyApp(App):
     TITLE = "GigBuddy"
-    SUB_TITLE = "Your one-stop NAM tone manager"
+    DEFAULT_SUB_TITLE = "Your one-stop NAM tone manager"
+    SUB_TITLE = DEFAULT_SUB_TITLE
 
     CSS = """
     Screen { layout: vertical; background: $background; }
@@ -651,7 +653,7 @@ class GigBuddyApp(App):
         color: $background; text-style: bold;
     }
     #tone-status {
-        dock: bottom; height: 1; padding: 0 1;
+        display: none; dock: bottom; height: 1; padding: 0 1;
         color: $text-muted; content-align: left middle;
     }
     #lib-status { color: $text-muted; padding: 0 1; }
@@ -1060,7 +1062,7 @@ class GigBuddyApp(App):
         self._param_hold_lock = threading.Lock()
         self._param_hold_generation = 0
         self._param_hold_pending: tuple[
-            int, str, float, bool, bool] | None = None
+            int, int | None, str, float, bool, bool] | None = None
         self._param_hold_worker_active = False
         self._param_hold_last_commit_at = 0.0
         # All managed chain writes share one file/runtime critical section.
@@ -1300,7 +1302,24 @@ class GigBuddyApp(App):
         self._device_request_generation += 1
         self.run_worker(partial(self._load_devices,
                                 self._device_request_generation), name="devices")
+        self.refresh_tone3000_identity()
         self._update_unsupported_size()
+
+    def refresh_tone3000_identity(self) -> None:
+        """Refresh the personalized subtitle without blocking the TUI."""
+        self.run_worker(
+            self._load_tone3000_identity(), name="tone3000-identity",
+            exclusive=True)
+
+    async def _load_tone3000_identity(self) -> None:
+        try:
+            profile = await asyncio.to_thread(library.tone3000.current_user)
+        except Exception:
+            return
+        username = str(profile.get("username") or "").strip()
+        if username:
+            self.sub_title = (
+                f"{username}'s one-stop NAM tone manager")
 
     def on_resize(self, _event) -> None:
         self._update_unsupported_size()
@@ -1916,32 +1935,46 @@ class GigBuddyApp(App):
         self._publish_mutation(
             "chain-param", (f"chain:{key}",), cfg.get("revision"))
 
-    def begin_chain_param_hold(self, key: str) -> tuple[int, float]:
-        """Start a mouse hold and return its generation plus current value."""
-        if key not in live.CHAIN_PARAMETER_DEFAULTS:
+    def begin_chain_param_hold(
+            self, key: str, *, slot_index: int | None = None
+    ) -> tuple[int, float]:
+        """Start a global or Slot parameter hold and return its value."""
+        if slot_index is None and key not in live.CHAIN_PARAMETER_DEFAULTS:
             raise ValueError(f"unknown chain parameter: {key}")
+        if slot_index is not None and key not in {
+                "input_gain_db", "output_gain_db"}:
+            raise ValueError(f"unknown Slot parameter: {key}")
         with self._param_hold_lock:
             self._param_hold_generation += 1
             generation = self._param_hold_generation
             self._param_hold_pending = None
         cfg = live.read_chain()
-        value = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+        if slot_index is None:
+            value = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+        else:
+            value = float(getattr(ChainState(cfg).slot(slot_index), key))
         return generation, value
 
     def queue_chain_param_hold(self, generation: int, key: str,
-                               value: float, *, force: bool = False) -> None:
+                               value: float, *, force: bool = False,
+                               slot_index: int | None = None) -> None:
         """Coalesce a hold value and keep at most one commit worker active."""
-        if key not in live.CHAIN_PARAMETER_DEFAULTS:
+        if slot_index is None and key not in live.CHAIN_PARAMETER_DEFAULTS:
             return
-        lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
+        if slot_index is not None and key not in {
+                "input_gain_db", "output_gain_db"}:
+            return
+        lo, hi = ((SLOT_GAIN_MIN_DB, SLOT_GAIN_MAX_DB)
+                  if slot_index is not None else
+                  ((0.0, 1.0) if key == "quality" else (0.0, 10.0)))
         value = round(max(lo, min(hi, float(value))), 2)
         start_worker = False
         with self._param_hold_lock:
             if generation != self._param_hold_generation:
                 return
-            # generation, key, value, force, final
+            # generation, slot index, key, value, force, final
             self._param_hold_pending = (
-                generation, key, value, force, False)
+                generation, slot_index, key, value, force, False)
             if not self._param_hold_worker_active:
                 self._param_hold_worker_active = True
                 start_worker = True
@@ -1951,18 +1984,24 @@ class GigBuddyApp(App):
                 name="chain-param-hold", daemon=True).start()
 
     def end_chain_param_hold(self, generation: int, key: str,
-                             value: float) -> None:
+                             value: float, *, slot_index: int | None = None
+                             ) -> None:
         """Queue the final hold value without waiting on the UI thread."""
-        if key not in live.CHAIN_PARAMETER_DEFAULTS:
+        if slot_index is None and key not in live.CHAIN_PARAMETER_DEFAULTS:
             return
-        lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
+        if slot_index is not None and key not in {
+                "input_gain_db", "output_gain_db"}:
+            return
+        lo, hi = ((SLOT_GAIN_MIN_DB, SLOT_GAIN_MAX_DB)
+                  if slot_index is not None else
+                  ((0.0, 1.0) if key == "quality" else (0.0, 10.0)))
         value = round(max(lo, min(hi, float(value))), 2)
         start_worker = False
         with self._param_hold_lock:
             if generation != self._param_hold_generation:
                 return
             self._param_hold_pending = (
-                generation, key, value, True, True)
+                generation, slot_index, key, value, True, True)
             if not self._param_hold_worker_active:
                 self._param_hold_worker_active = True
                 start_worker = True
@@ -1983,7 +2022,7 @@ class GigBuddyApp(App):
                     return
                 self._param_hold_pending = None
 
-            generation, key, value, force, final = pending
+            generation, slot_index, key, value, force, final = pending
             if not force and last_commit_at:
                 remaining = (
                     self.PARAM_HOLD_COMMIT_INTERVAL
@@ -1996,14 +2035,16 @@ class GigBuddyApp(App):
                     newer = self._param_hold_pending
                     if newer is not None:
                         self._param_hold_pending = None
-                        generation, key, value, force, final = newer
+                        generation, slot_index, key, value, force, final = newer
 
             try:
-                persisted = self._commit_chain_param_hold(key, value)
+                persisted = self._commit_chain_param_hold(
+                    key, value, slot_index=slot_index)
             except Exception as exc:
                 try:
                     self.call_from_thread(
-                        self._param_hold_failed, generation, str(exc))
+                        self._param_hold_failed, generation, slot_index,
+                        str(exc))
                 except Exception:
                     pass
                 with self._param_hold_lock:
@@ -2018,21 +2059,35 @@ class GigBuddyApp(App):
             try:
                 self.call_from_thread(
                     self._param_hold_committed,
-                    generation, key, value, final, persisted)
+                    generation, slot_index, key, value, final, persisted)
             except Exception:
                 pass
 
-    def _commit_chain_param_hold(self, key: str, value: float) -> dict | None:
-        """Commit one absolute parameter value from the hold worker."""
+    def _commit_chain_param_hold(
+            self, key: str, value: float, *, slot_index: int | None = None
+    ) -> dict | None:
+        """Commit one absolute global or Slot parameter value."""
         with self._managed_transaction_lock:
             base_chain, base_fingerprint = live.read_chain_snapshot()
-            cfg = dict(base_chain)
-            lo, hi = ((0.0, 1.0) if key == "quality" else (0.0, 10.0))
-            value = round(max(lo, min(hi, value)), 2)
-            previous = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
-            if value == previous:
-                return None
-            cfg[key] = value
+            if slot_index is None:
+                cfg = dict(base_chain)
+                lo, hi = ((0.0, 1.0) if key == "quality"
+                          else (0.0, 10.0))
+                value = round(max(lo, min(hi, value)), 2)
+                previous = float(
+                    cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
+                if value == previous:
+                    return None
+                cfg[key] = value
+            else:
+                lo, hi = SLOT_GAIN_MIN_DB, SLOT_GAIN_MAX_DB
+                value = round(max(lo, min(hi, value)), 2)
+                state = ChainState(base_chain)
+                previous = float(getattr(state.slot(slot_index), key))
+                if value == previous:
+                    return None
+                state.set_slot_gain(slot_index, key, value)
+                cfg = state.to_chain()
             if self._managed_engine_active():
                 # The adapter's expected chain is the file state read before
                 # the candidate edit. Passing the already-mutated cfg makes
@@ -2052,29 +2107,51 @@ class GigBuddyApp(App):
                 return persisted
             return live.read_chain() or cfg
 
-    def _param_hold_committed(self, generation: int, key: str,
-                              value: float, final: bool,
+    def _param_hold_committed(self, generation: int, slot_index: int | None,
+                              key: str, value: float, final: bool,
                               persisted: dict | None) -> None:
         """Publish a completed hold write without refreshing every pane per tick."""
         if generation != self._param_hold_generation:
             return
         if persisted is not None:
             try:
+                if slot_index is not None:
+                    # The hold worker owns a separate ChainState snapshot. Copy
+                    # its committed Slot trim into the live UI state before
+                    # the non-structural publisher adopts the chain-level
+                    # fields; adopt_managed_chain intentionally preserves the
+                    # existing Slot objects.
+                    panel = self.query_one(ChainPanel)
+                    panel.state.apply_candidate(persisted)
                 committed = self._publish_chain_write(persisted)
             except Exception as exc:
-                self._param_hold_failed(generation, str(exc))
+                self._param_hold_failed(generation, slot_index, str(exc))
                 return
             if final:
-                self._publish_mutation(
-                    "chain-param", (f"chain:{key}",),
-                    committed.get("revision"))
+                if slot_index is None:
+                    self._publish_mutation(
+                        "chain-param", (f"chain:{key}",),
+                        committed.get("revision"))
+                else:
+                    label = ("Input" if key == "input_gain_db"
+                             else "Output")
+                    self._publish_slot_commit(
+                        committed, slot_index,
+                        f"Slot {slot_index + 1:02d} {label} set to "
+                        f"{value:+.1f} dB")
         try:
             panel = self.query_one(ChainPanel)
-            panel.params._hold_commit_ack(generation, final=final)
+            if slot_index is None:
+                panel.params._hold_commit_ack(generation, final=final)
+            else:
+                widget = panel._slot_widgets.get(slot_index)
+                if widget is not None:
+                    widget._io_hold_commit_ack(generation, final=final)
         except Exception:
             pass
 
-    def _param_hold_failed(self, generation: int, error: str) -> None:
+    def _param_hold_failed(self, generation: int, slot_index: int | None,
+                           error: str) -> None:
         """Stop a failed hold and restore the last persisted display value."""
         if generation != self._param_hold_generation:
             return
@@ -2082,7 +2159,12 @@ class GigBuddyApp(App):
             self._param_hold_pending = None
         try:
             panel = self.query_one(ChainPanel)
-            panel.params.abort_param_hold(generation)
+            if slot_index is None:
+                panel.params.abort_param_hold(generation)
+            else:
+                widget = panel._slot_widgets.get(slot_index)
+                if widget is not None:
+                    widget.abort_io_hold(generation)
             cfg = live.read_chain()
             if cfg:
                 self._publish_chain_write(cfg)

@@ -644,6 +644,13 @@ def _response_object(response) -> dict | None:
     return None
 
 
+def current_user() -> dict:
+    """Return the profile belonging to the active OAuth credentials."""
+    profile = _response_object(_request_json(
+        f"{API}/user", authenticated=True))
+    return dict(profile) if isinstance(profile, dict) else {}
+
+
 def _canonical_creator(row: dict) -> dict:
     """Keep the creator aggregate names used by the existing TUI."""
     result = dict(row)

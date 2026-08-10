@@ -200,6 +200,19 @@ def test_authenticated_request_refreshes_once_after_401(monkeypatch):
     assert seen == ["Bearer stale", "Bearer fresh"]
 
 
+def test_current_user_unwraps_authenticated_profile(monkeypatch):
+    seen = []
+
+    def request(url, **kwargs):
+        seen.append((url, kwargs))
+        return {"data": {"id": 7, "username": "alice"}}
+
+    monkeypatch.setattr(tone3000, "_request_json", request)
+
+    assert tone3000.current_user() == {"id": 7, "username": "alice"}
+    assert seen == [(f"{tone3000.API}/user", {"authenticated": True})]
+
+
 def test_environment_token_never_falls_back_to_disk_token_after_401(
         monkeypatch, tmp_path):
     monkeypatch.setenv("TONE3000_ACCESS_TOKEN", "environment-token")

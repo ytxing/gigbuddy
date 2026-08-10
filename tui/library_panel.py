@@ -481,9 +481,9 @@ class LibraryPanel(Vertical):
         table.add_column("DL", key="downloads")
         table.add_column("Fav", key="favorites")
         table.add_column("Up", key="uploaded")
-        table.add_column("Format", key="format", width=8)
         table.add_column("Files", key="files")
         table.add_column("Arch", key="arch")
+        table.add_column("Fmt", key="format", width=5)
         return table
 
     @staticmethod
@@ -1575,7 +1575,7 @@ class LibraryPanel(Vertical):
     @staticmethod
     def _update_remote_row(table: DataTable, row_key: str, cells: list[str]) -> None:
         columns = ("title", "type", "author", "downloads", "favorites",
-                   "uploaded", "format", "arch", "files")
+                   "uploaded", "files", "arch", "format")
         for column, value in zip(columns, cells):
             try:
                 table.update_cell(row_key, column, value, update_width=False)
@@ -1584,7 +1584,7 @@ class LibraryPanel(Vertical):
 
     def _update_local_row(self, table: DataTable, tone: dict) -> None:
         columns = ("pick", "title", "type", "author", "downloads", "favorites",
-                   "uploaded", "format", "arch", "files")
+                   "uploaded", "files", "arch", "format")
         cells = [
             self._local_status_cell(int(tone["id"])),
             *self._row_cells(tone),
@@ -2300,6 +2300,10 @@ class LibraryPanel(Vertical):
             return
         finally:
             button.disabled = False
+        refresh_identity = getattr(
+            self.app, "refresh_tone3000_identity", None)
+        if callable(refresh_identity):
+            refresh_identity()
         if creator_view:
             self._clear_creator_auth_required()
             self._creator_cache = None
@@ -2754,7 +2758,7 @@ class LibraryPanel(Vertical):
             title, gear_markup(t.get("gear"), colors=theme_colors(self.app)),
             self._author_label(t.get("username")),
             str(t.get("downloads_count") or 0), str(t.get("favorites_count") or 0),
-            _uploaded(t), tone_format(t) or "—", files, _arch(t),
+            _uploaded(t), files, _arch(t), tone_format(t) or "—",
         ]
 
     def _tone_for_key(self, key: str | None) -> dict | None:

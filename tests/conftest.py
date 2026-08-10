@@ -14,6 +14,14 @@ from tui.presets import PresetPanel  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def isolated_tone3000_credentials(monkeypatch, tmp_path):
+    """Never let UI tests discover a developer's real TONE3000 session."""
+    monkeypatch.delenv("TONE3000_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(
+        tone3000, "TOKEN_FILE", tmp_path / "tone3000_tokens.json")
+
+
+@pytest.fixture(autouse=True)
 def no_live_creator_leaderboard(monkeypatch):
     """Tests opt into creator rows explicitly; never hit the live leaderboard."""
     monkeypatch.setattr(tone3000, "top_creators", lambda **_kwargs: [])

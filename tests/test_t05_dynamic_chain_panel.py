@@ -365,13 +365,13 @@ def test_slot_renderer_reserves_two_digit_io_values():
     }]))
     widget = ChainSlotWidget(0, state.slot(0), title="Tone", gear="amp")
 
-    assert widget._format_io_value("input_gain_db") == "+09.0"
+    assert widget._format_io_value("input_gain_db") == " 09.0"
     assert widget._format_io_value("output_gain_db") == "-12.0"
     io = ChainSlotIOWidget(widget)
     lines = [Text.from_markup(line).plain
              for line in io.render().splitlines()]
     assert lines == [
-        "input  [-] +09.0 [+]",
+        "input  [-]  09.0 [+]",
         "output [-] -12.0 [+] [CAL]",
     ]
     assert [Text.from_markup(line).cell_len for line in lines] == [20, 26]
@@ -388,11 +388,11 @@ def test_slot_io_hit_map_keeps_two_rows_and_button_columns():
     # The standalone widget owns its coordinate system: input and output
     # controls share the same columns, while CAL is only on output's row.
     assert io._hit_at_offset(slot.IO_LABEL_WIDTH, 0)[:3] == (
-        "param", "input_gain_db", -1.0)
+        "param", "input_gain_db", -0.5)
     plus_start = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH + slot.IO_GAP
                   + slot.IO_VALUE_WIDTH + slot.IO_GAP)
     assert io._hit_at_offset(plus_start, 1)[:3] == (
-        "param", "output_gain_db", 1.0)
+        "param", "output_gain_db", 0.5)
     cal_start = plus_start + slot.IO_BUTTON_WIDTH + slot.IO_GAP
     assert io._hit_at_offset(cal_start + 2, 1)[:3] == (
         "calibrate", None, 0.0)
@@ -408,10 +408,12 @@ def test_slot_io_hover_uses_light_feedback_for_buttons_and_values():
     io = ChainSlotIOWidget(slot)
 
     slot._io_hover = ("input_gain_db", -slot.IO_STEP_DB)
-    assert "$text on $surface-lighten-1" in io.render()
+    assert "$accent on $surface-lighten-1" in io.render()
 
     slot._io_hover = ("input_gain_db", "value")
-    assert "$text on $surface-lighten-1" in io.render()
+    rendered = io.render()
+    assert "not bold $text on $surface-lighten-1" in rendered
+    assert "[b $text" not in rendered
 
 
 @pytest.mark.parametrize(
@@ -554,11 +556,14 @@ def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
             io = panel.query_one(ChainSlotIOWidget)
 
             slot = panel.slot_widgets[0]
+            # Keep this single-click test independent from the real hold
+            # threshold when the full Textual suite is under load.
+            slot.IO_HOLD_INITIAL_DELAY = 10.0
             plus_x = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH + slot.IO_GAP
                       + slot.IO_VALUE_WIDTH + slot.IO_GAP + 1)
             await pilot.click(io, offset=(plus_x, 0))
             await pilot.pause()
-            assert panel.state.slot(0).input_gain_db == pytest.approx(1.0)
+            assert panel.state.slot(0).input_gain_db == pytest.approx(0.5)
 
             io = panel.query_one(ChainSlotIOWidget)
             slot = panel.slot_widgets[0]
@@ -567,6 +572,10 @@ def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
             await pilot.click(io, offset=(value_x, 0))
             await pilot.pause()
             assert slot._io_editing == "input_gain_db"
+            assert "▌" in slot._format_io_value("input_gain_db")
+            slot._io_cursor_visible = False
+            assert "▌" not in slot._format_io_value("input_gain_db")
+            slot._io_cursor_visible = True
             await pilot.double_click(io, offset=(value_x, 0))
             await pilot.pause()
             assert panel.state.slot(0).input_gain_db == pytest.approx(0.0)
@@ -575,6 +584,63 @@ def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
             await pilot.click(io, offset=(23, 1))
             await pilot.pause(0.15)
             assert panel.state.slot(0).output_gain_db == pytest.approx(4.5)
+
+    asyncio.run(scenario())
+
+
+def test_dynamic_panel_io_button_hold_repeats_and_coalesces(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("textual", reason="dynamic I/O hold smoke needs Textual")
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel, ChainSlotIOWidget
+
+    current = {"chain": _chain([str(tmp_path / "a.nam")], revision=1)}
+    writes = []
+    monkeypatch.setattr("tui.app.live.read_chain",
+                        lambda: dict(current["chain"]))
+    monkeypatch.setattr("tui.app.live.read_chain_snapshot",
+                        lambda: (dict(current["chain"]), None))
+    monkeypatch.setattr("tui.app.live.last_chain_write_fingerprint",
+                        lambda: None)
+
+    def write_chain(chain: dict, **_kwargs):
+        writes.append(dict(chain))
+        current["chain"] = dict(chain)
+        current["chain"]["revision"] = int(chain.get("revision", 0)) + 1
+
+    monkeypatch.setattr("tui.app.live.write_chain", write_chain)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(ChainPanel)
+            io = panel.query_one(ChainSlotIOWidget)
+            slot = panel.slot_widgets[0]
+            # The repeat tick is driven explicitly below; prevent a real
+            # timer callback from racing before the test reaches that point.
+            slot.IO_HOLD_INITIAL_DELAY = 10.0
+            plus_x = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH
+                      + slot.IO_GAP + slot.IO_VALUE_WIDTH
+                      + slot.IO_GAP + 1)
+
+            await pilot.mouse_down(io, offset=(plus_x, 0))
+            # Drive one repeat tick directly. Textual's virtual pause can
+            # execute a variable number of interval callbacks under the
+            # complete suite, while the hold state machine itself is stable.
+            if slot._io_repeat_timer is not None:
+                slot._io_repeat_timer.stop()
+                slot._io_repeat_timer = None
+            slot._io_next_repeat_at = 0.0
+            slot._repeat_io_hold()
+            await pilot.mouse_up(io, offset=(plus_x, 0))
+            await pilot.pause(0.6)
+
+            value = panel.state.slot(0).input_gain_db
+            assert value == pytest.approx(1.0)
+            assert slot._io_hold_generation is None
+            assert writes
 
     asyncio.run(scenario())
 

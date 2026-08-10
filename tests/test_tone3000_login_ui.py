@@ -105,6 +105,12 @@ def test_login_button_reloads_current_tone_view(monkeypatch):
     monkeypatch.setattr(library.tone3000, "login",
                         lambda: calls.__setitem__("login", calls["login"] + 1)
                         or {"access_token": "access"})
+    def current_user():
+        if calls["login"] == 0:
+            raise tone3000.AuthenticationRequiredError("login required")
+        return {"id": 1, "username": "tester"}
+
+    monkeypatch.setattr(library.tone3000, "current_user", current_user)
     monkeypatch.setattr(library, "mark_download_state", lambda rows: rows)
     monkeypatch.setattr(library.tone3000, "verify_username", lambda _name: None)
 
@@ -122,6 +128,8 @@ def test_login_button_reloads_current_tone_view(monkeypatch):
             assert calls["login"] == 1
             assert not button.display
             assert table.ordered_rows[0].key.value == "remote:7"
+            assert app.sub_title == (
+                "tester's one-stop NAM tone manager")
 
     run(scenario())
 

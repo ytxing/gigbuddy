@@ -30,7 +30,9 @@ import tone3000  # noqa: E402
 
 from . import live  # noqa: E402
 from .chain_state import (MAX_SLOTS, ChainState, ChainStateError,
-                          SlotOverlay, SlotSnapshot, SlotStatus,
+                          SLOT_GAIN_DEFAULT_DB, SLOT_GAIN_MAX_DB,
+                          SLOT_GAIN_MIN_DB, SlotOverlay, SlotSnapshot,
+                          SlotStatus,
                           chain_fingerprint)  # noqa: E402
 from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
                       resolve_rich_style)  # noqa: E402
@@ -647,28 +649,28 @@ class ChainParams(Static):
             else:
                 edit_display = self._edit_text[:self.PARAM_VALUE_WIDTH].ljust(
                     self.PARAM_VALUE_WIDTH)
-            value_part = f"[b $background on $accent]{_escape(edit_display)}[/]"
+            value_part = f"[not bold $text on $surface-lighten-1]{_escape(edit_display)}[/]"
         else:
             value_style = (
-                "$text on $surface-lighten-1"
-                if hovered == 10 + index else "$text")
+                "not bold $text on $surface-lighten-1"
+                if hovered == 10 + index else "not bold $text")
             value_display = value.ljust(self.PARAM_VALUE_WIDTH)
-            value_part = f"[b {value_style}]{_escape(value_display)}[/]"
+            value_part = f"[{value_style}]{_escape(value_display)}[/]"
         lo, hi = (part.strip() for part in hint.split("·"))
         lo_text = _escape(f"[{lo}]")
         hi_text = _escape(f"[{hi}]")
         lo_part = (
-            f"[b $text on $surface-lighten-1]{lo_text}[/]"
+            f"[b $accent on $surface-lighten-1]{lo_text}[/]"
             if hovered == index * 2 else lo
         )
         hi_part = (
-            f"[b $text on $surface-lighten-1]{hi_text}[/]"
+            f"[b $accent on $surface-lighten-1]{hi_text}[/]"
             if hovered == index * 2 + 1 else hi
         )
         if hovered != index * 2:
-            lo_part = f"[b $text]{lo_text}[/]"
+            lo_part = f"[b $accent]{lo_text}[/]"
         if hovered != index * 2 + 1:
-            hi_part = f"[b $text]{hi_text}[/]"
+            hi_part = f"[b $accent]{hi_text}[/]"
         return (f"[b]{_escape(label)}[/]"
                 f"{' ' * self.PARAM_LABEL_GAP}{lo_part}"
                 f"{' ' * self.PARAM_GAP}{value_part}"
@@ -727,9 +729,10 @@ class ChainParams(Static):
         self.focus()
 
     def _reset_edit_value(self, index: int) -> None:
-        """Double-click a value to set that chain parameter to zero."""
+        """Double-click a value to restore its protocol default."""
         self._exit_edit()
-        self.app._set_chain_param(self._param_keys[index], 0.0)
+        key = self._param_keys[index]
+        self.app._set_chain_param(key, live.CHAIN_PARAMETER_DEFAULTS[key])
 
     def _toggle_cursor(self) -> None:
         """0.5s 闪烁：光标 ▌/空格占位切换（占位保持行宽，token 不位移）。"""
@@ -1048,12 +1051,18 @@ class ChainSlotWidget(Static):
     can_focus = True
     ALLOW_SELECT = False
 
-    IO_STEP_DB = 1.0
+    IO_STEP_DB = 0.5
+    IO_KEY_STEP_DB = 1.0
     IO_VALUE_WIDTH = 5
     IO_LABEL_WIDTH = 7
     IO_BUTTON_WIDTH = 3
     IO_GAP = 1
     IO_CAL_WIDTH = 5
+    IO_HOLD_INITIAL_DELAY = 0.20
+    IO_HOLD_STAGE_ONE_END = 0.60
+    IO_HOLD_STAGE_TWO_END = 1.20
+    IO_HOLD_STAGE_INTERVALS = (0.12, 0.08, 0.06)
+    IO_HOLD_TICK = 0.025
     IO_PARAM_KEYS = ("input_gain_db", "output_gain_db")
 
     class SwitchRequested(Message):
@@ -1120,6 +1129,16 @@ class ChainSlotWidget(Static):
         self._io_hover: tuple[str, object] | str | None = None
         self._io_editing: str | None = None
         self._io_edit_text = ""
+        self._io_cursor_visible = True
+        self._io_cursor_timer = None
+        self._io_hold_generation: int | None = None
+        self._io_hold_key: str | None = None
+        self._io_hold_value: float | None = None
+        self._io_hold_direction = 0
+        self._io_hold_started_at = 0.0
+        self._io_next_repeat_at = 0.0
+        self._io_hold_end_sent = False
+        self._io_repeat_timer = None
         self._slot_row = None
         self._io_widget = None
         super().__init__(classes="chain-slot")
@@ -1158,27 +1177,42 @@ class ChainSlotWidget(Static):
 
     def _format_io_value(self, key: str) -> str:
         if self._io_editing == key:
-            return self._io_edit_text.rjust(self.IO_VALUE_WIDTH)
-        return f"{self._io_value(key):+05.1f}"
+            text = self._io_edit_text
+            if self._io_cursor_visible:
+                if len(text) >= self.IO_VALUE_WIDTH:
+                    text = text[:self.IO_VALUE_WIDTH - 1] + "▌"
+                else:
+                    text += "▌"
+            return text.ljust(self.IO_VALUE_WIDTH)
+        if self._io_hold_key == key and self._io_hold_value is not None:
+            value = self._io_hold_value
+        else:
+            value = self._io_value(key)
+        # Keep the original five-cell signed layout without displaying a
+        # positive sign: positive values use a leading blank, negatives keep
+        # their minus sign, and both retain a zero-padded integer cell.
+        if value < 0:
+            return f"-{abs(value):04.1f}"
+        return f" {value:04.1f}"
 
     def _io_button(self, key: str, delta: float, text: str) -> str:
         content = _escape(text)
         if self._io_hover == (key, delta):
-            return f"[b $text on $surface-lighten-1]{content}[/]"
-        return f"[b $text]{content}[/]"
+            return f"[b $accent on $surface-lighten-1]{content}[/]"
+        return f"[b $accent]{content}[/]"
 
     def _io_value_markup(self, key: str) -> str:
         content = _escape(self._format_io_value(key))
         if self._io_editing == key:
-            return f"[b $background on $accent]{content}[/]"
+            return f"[not bold $text on $surface-lighten-1]{content}[/]"
         if self._io_hover == (key, "value"):
-            return f"[b $text on $surface-lighten-1]{content}[/]"
-        return f"[b $text]{content}[/]"
+            return f"[not bold $text on $surface-lighten-1]{content}[/]"
+        return f"[not bold $text]{content}[/]"
 
     def _io_calibrate_button(self) -> str:
         content = _escape("[CAL]")
         if self._io_hover == "calibrate":
-            return f"[b $background on $accent]{content}[/]"
+            return f"[b $accent on $surface-lighten-1]{content}[/]"
         return f"[b $accent]{content}[/]"
 
     def _io_line_markup(self, label: str, key: str, *, calibrate: bool = False) -> str:
@@ -1221,7 +1255,7 @@ class ChainSlotWidget(Static):
 
     def _reset_io_value(self, key: str) -> None:
         self._cancel_io_edit()
-        delta = round(-self._io_value(key), 2)
+        delta = round(SLOT_GAIN_DEFAULT_DB - self._io_value(key), 2)
         if delta:
             self._post_param(key, delta)
 
@@ -1231,17 +1265,33 @@ class ChainSlotWidget(Static):
         self.post_message(message)
 
     def _begin_io_edit(self, key: str) -> None:
-        current = f"{self._io_value(key):+05.1f}".strip()
+        current = self._format_io_value(key).strip()
         self._io_editing = key
         self._io_edit_text = current
+        self._io_cursor_visible = True
+        if self._io_cursor_timer is None:
+            self._io_cursor_timer = self.set_interval(
+                0.5, self._toggle_io_cursor)
         self._set_io_hover((key, "value"))
         self.focus()
+
+    def _toggle_io_cursor(self) -> None:
+        self._io_cursor_visible = not self._io_cursor_visible
+        if self._io_editing is not None:
+            self._refresh_io_widget()
+
+    def _stop_io_cursor(self) -> None:
+        if self._io_cursor_timer is not None:
+            self._io_cursor_timer.stop()
+            self._io_cursor_timer = None
+        self._io_cursor_visible = True
 
     def _cancel_io_edit(self) -> None:
         if self._io_editing is None:
             return
         self._io_editing = None
         self._io_edit_text = ""
+        self._stop_io_cursor()
         self._refresh_io_widget()
         self._update_border()
 
@@ -1250,6 +1300,7 @@ class ChainSlotWidget(Static):
         text = self._io_edit_text.strip()
         self._io_editing = None
         self._io_edit_text = ""
+        self._stop_io_cursor()
         if not text:
             self._refresh_io_widget()
             self._update_border()
@@ -1274,6 +1325,107 @@ class ChainSlotWidget(Static):
         if len(self._io_edit_text) >= self.IO_VALUE_WIDTH:
             return
         self._io_edit_text += char
+        self._io_cursor_visible = True
+        self._refresh_io_widget()
+
+    # ---- 鼠标点按/长按步进 ----
+
+    def _io_hold_interval(self, elapsed: float) -> float:
+        if elapsed < self.IO_HOLD_STAGE_ONE_END:
+            return self.IO_HOLD_STAGE_INTERVALS[0]
+        if elapsed < self.IO_HOLD_STAGE_TWO_END:
+            return self.IO_HOLD_STAGE_INTERVALS[1]
+        return self.IO_HOLD_STAGE_INTERVALS[2]
+
+    def _begin_io_hold(self, key: str, direction: int) -> None:
+        self._cancel_io_edit()
+        self._finish_io_hold()
+        generation, current = self.app.begin_chain_param_hold(
+            key, slot_index=self.index)
+        self._io_hold_generation = generation
+        self._io_hold_key = key
+        self._io_hold_value = current
+        self._io_hold_direction = direction
+        self._io_hold_started_at = time.monotonic()
+        self._io_next_repeat_at = (
+            self._io_hold_started_at + self.IO_HOLD_INITIAL_DELAY)
+        self._io_hold_end_sent = False
+        if self._apply_io_hold_step(force=True):
+            self._io_repeat_timer = self.set_interval(
+                self.IO_HOLD_TICK, self._repeat_io_hold)
+
+    def _set_io_hold_display(self, value: float) -> None:
+        self._io_hold_value = value
+        self._refresh_io_widget()
+
+    def _apply_io_hold_step(self, *, force: bool = False) -> bool:
+        if (self._io_hold_generation is None
+                or self._io_hold_key is None
+                or self._io_hold_value is None):
+            return False
+        value = round(max(
+            SLOT_GAIN_MIN_DB,
+            min(SLOT_GAIN_MAX_DB, self._io_hold_value
+                + self.IO_STEP_DB * self._io_hold_direction)), 2)
+        if value == self._io_hold_value:
+            self._finish_io_hold()
+            return False
+        self._set_io_hold_display(value)
+        self.app.queue_chain_param_hold(
+            self._io_hold_generation, self._io_hold_key, value,
+            force=force, slot_index=self.index)
+        return True
+
+    def _repeat_io_hold(self) -> None:
+        if (self._io_hold_generation is None
+                or self._io_hold_key is None):
+            return
+        now = time.monotonic()
+        if now < self._io_next_repeat_at:
+            return
+        if not self._apply_io_hold_step():
+            return
+        elapsed = now - self._io_hold_started_at
+        interval = self._io_hold_interval(elapsed)
+        self._io_next_repeat_at = max(
+            self._io_next_repeat_at + interval, now + self.IO_HOLD_TICK)
+
+    def _finish_io_hold(self) -> None:
+        timer = getattr(self, "_io_repeat_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._io_repeat_timer = None
+        if (self._io_hold_generation is not None
+                and self._io_hold_key is not None
+                and self._io_hold_value is not None
+                and not self._io_hold_end_sent):
+            self._io_hold_end_sent = True
+            self.app.end_chain_param_hold(
+                self._io_hold_generation, self._io_hold_key,
+                self._io_hold_value, slot_index=self.index)
+
+    def _io_hold_commit_ack(self, generation: int, *, final: bool) -> None:
+        if generation != self._io_hold_generation or not final:
+            return
+        self._io_hold_generation = None
+        self._io_hold_key = None
+        self._io_hold_value = None
+        self._io_hold_direction = 0
+        self._io_hold_end_sent = False
+        self._refresh_io_widget()
+
+    def abort_io_hold(self, generation: int) -> None:
+        if generation != self._io_hold_generation:
+            return
+        timer = getattr(self, "_io_repeat_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._io_repeat_timer = None
+        self._io_hold_generation = None
+        self._io_hold_key = None
+        self._io_hold_value = None
+        self._io_hold_direction = 0
+        self._io_hold_end_sent = False
         self._refresh_io_widget()
 
     def _update_border(self) -> None:
@@ -1310,6 +1462,7 @@ class ChainSlotWidget(Static):
         self.refresh()
 
     def on_blur(self, _event) -> None:
+        self._finish_io_hold()
         self._cancel_io_edit()
         self._offset = 0
         self._update_border()
@@ -1322,6 +1475,10 @@ class ChainSlotWidget(Static):
         self._refresh_row_hint()
         self._refresh_io_widget()
         self.refresh()
+
+    def on_unmount(self) -> None:
+        self._finish_io_hold()
+        self._stop_io_cursor()
 
     def set_target(self, value: bool) -> None:
         if getattr(self, "is_target", False) == value:
@@ -1353,6 +1510,7 @@ class ChainSlotWidget(Static):
                      or self._io_value(editing_key) != editing_value)):
             self._io_editing = None
             self._io_edit_text = ""
+            self._stop_io_cursor()
         self._update_border()
         self._refresh_row_hint()
         self._refresh_io_widget()
@@ -1415,16 +1573,16 @@ class ChainSlotWidget(Static):
         self.post_message(self.MoveRequested(self.index, +1))
 
     def action_input_down(self) -> None:
-        self._post_param("input_gain_db", -self.IO_STEP_DB)
+        self._post_param("input_gain_db", -self.IO_KEY_STEP_DB)
 
     def action_input_up(self) -> None:
-        self._post_param("input_gain_db", self.IO_STEP_DB)
+        self._post_param("input_gain_db", self.IO_KEY_STEP_DB)
 
     def action_output_down(self) -> None:
-        self._post_param("output_gain_db", -self.IO_STEP_DB)
+        self._post_param("output_gain_db", -self.IO_KEY_STEP_DB)
 
     def action_output_up(self) -> None:
-        self._post_param("output_gain_db", self.IO_STEP_DB)
+        self._post_param("output_gain_db", self.IO_KEY_STEP_DB)
 
     def on_key(self, event: Key) -> None:
         if self._io_editing is None:
@@ -1436,6 +1594,7 @@ class ChainSlotWidget(Static):
             self._apply_io_edit()
         elif event.key == "backspace":
             self._io_edit_text = self._io_edit_text[:-1]
+            self._io_cursor_visible = True
             self._refresh_io_widget()
             self._update_border()
         else:
@@ -1451,6 +1610,8 @@ class ChainSlotIOWidget(Static):
 
     def __init__(self, slot: ChainSlotWidget) -> None:
         self.slot = slot
+        self._press_hit: tuple[str, float] | None = None
+        self._click_suppressed = False
         super().__init__(classes="chain-slot-io")
         slot.bind_io_widget(self)
 
@@ -1504,6 +1665,10 @@ class ChainSlotIOWidget(Static):
         return self._hit_at_offset(offset_x, offset_y)
 
     def on_click(self, event: MouseEvent) -> None:
+        if self._click_suppressed:
+            self._click_suppressed = False
+            event.stop()
+            return
         hit = self._hit_at(event.screen_x, event.screen_y)
         if hit is None:
             return
@@ -1520,8 +1685,36 @@ class ChainSlotIOWidget(Static):
             self.slot._post_calibrate()
         event.stop()
 
+    def on_mouse_down(self, event: MouseDown) -> None:
+        hit = self._hit_at(event.screen_x, event.screen_y)
+        if hit is None or hit[0] != "param" or hit[1] is None:
+            return
+        _kind, key, delta, _start, _end = hit
+        self.slot.focus()
+        self._press_hit = (key, delta)
+        self._click_suppressed = False
+        self.slot._begin_io_hold(key, 1 if delta > 0 else -1)
+        self.slot._set_io_hover((key, delta))
+        self.capture_mouse()
+        event.stop()
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if self._press_hit is None:
+            return
+        self.slot._finish_io_hold()
+        self._press_hit = None
+        self._click_suppressed = True
+        self.release_mouse()
+        event.stop()
+
     def on_mouse_move(self, event: MouseMove) -> None:
         hit = self._hit_at(event.screen_x, event.screen_y)
+        if self._press_hit is not None:
+            if (hit is None or hit[0] != "param"
+                    or (hit[1], hit[2]) != self._press_hit):
+                self.slot._finish_io_hold()
+            else:
+                return
         if hit is None:
             self.slot._set_io_hover(None)
             return
@@ -1531,7 +1724,13 @@ class ChainSlotIOWidget(Static):
         event.stop()
 
     def on_leave(self, _event: Leave) -> None:
+        if self._press_hit is not None:
+            self.slot._finish_io_hold()
         self.slot._set_io_hover(None)
+
+    def on_unmount(self) -> None:
+        if self._press_hit is not None:
+            self.slot._finish_io_hold()
 
 
 class ChainSlotRow(Horizontal):

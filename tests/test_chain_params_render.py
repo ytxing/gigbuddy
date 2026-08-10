@@ -138,12 +138,16 @@ def test_value_edit_commits_and_escape_cancels(monkeypatch, tmp_path):
             params = app.query_one(ChainPanel).params
             _index, start, end = params._value_spans[0]
             value_x = params.content_region.x + (start + end) // 2
-            assert "$surface-lighten-1" in params._parameter_markup(0, 10)
+            markup = params._parameter_markup(0, 10)
+            assert "$text on $surface-lighten-1" in markup
+            assert "[b $text" not in markup
 
             await pilot.click(offset=(value_x, params.region.y))
             await pilot.pause()
             assert params._editing == 0
             assert "▌" in params._parameter_markup(0, None)
+            assert "not bold $text on $surface-lighten-1" in (
+                params._parameter_markup(0, None))
             params._cursor_visible = False
             assert "▌" not in params._parameter_markup(0, None)
             params._cursor_visible = True
@@ -166,7 +170,7 @@ def test_value_edit_commits_and_escape_cancels(monkeypatch, tmp_path):
             await pilot.double_click(offset=(value_x, params.region.y))
             await pilot.pause(0.2)
             assert params._editing is None
-            assert live.read_chain().get("gain") == 0.0
+            assert live.read_chain().get("gain") == 1.0
 
     run(scenario())
 

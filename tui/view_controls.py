@@ -376,6 +376,10 @@ class SearchBar(Horizontal):
                 id=self.type_id,
             )
 
+    def on_click(self, event: MouseEvent) -> None:
+        """Keep search-control clicks out of the app-level chain router."""
+        event.stop()
+
     def set_compact(self, compact: bool) -> None:
         self.set_class(compact, "search-bar--compact")
 

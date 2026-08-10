@@ -9,6 +9,7 @@ from textual.widgets._data_table import ColumnKey
 import library
 from tui.app import GigBuddyApp
 from tui.modals import set_border_hint_hover
+from tui.panels import ChainPanel
 from tui.view_controls import SearchBar, ViewTabStrip
 
 
@@ -71,6 +72,26 @@ def test_view_tabs_are_one_focus_stop_and_brackets_switch(monkeypatch, tmp_path)
             await pilot.press("[")
             await pilot.pause()
             assert app.query_one("TabbedContent").active == "pane-tone"
+
+    run(scenario())
+
+
+def test_clicking_library_search_stays_in_library(monkeypatch, tmp_path):
+    _patch_remote(monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.3)
+            search = app.query_one("#local-search")
+            chain = app.query_one(ChainPanel)
+
+            await pilot.click(search)
+            await pilot.pause()
+
+            assert app.focused is search
+            assert not any(ancestor is chain
+                           for ancestor in search.ancestors_with_self)
 
     run(scenario())
 

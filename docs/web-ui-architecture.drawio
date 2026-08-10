@@ -1,0 +1,121 @@
+<mxfile host="app.diagrams.net" modified="2026-08-09T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
+  <diagram id="gigbuddy-web-architecture" name="Web UI Architecture">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1300" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="client" value="浏览器端" style="swimlane;html=1;rounded=0;horizontal=0;startSize=36;fillColor=#f7f9fb;strokeColor=#8999a5;fontColor=#1b2a33;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="30" y="170" width="300" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="webui" value="Web UI&lt;br&gt;React + Vite + TypeScript&lt;br&gt;shadcn/ui · TanStack · dnd-kit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;strokeWidth=2;fontColor=#33200f;" vertex="1" parent="client">
+          <mxGeometry x="24" y="65" width="252" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="rest" value="HTTP REST&lt;br&gt;查询 · Chain 编辑 · Preset · 导入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;fontColor=#33200f;" vertex="1" parent="client">
+          <mxGeometry x="24" y="205" width="252" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="socket" value="WebSocket&lt;br&gt;电平 · runtime ack · 任务进度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;fontColor=#33200f;" vertex="1" parent="client">
+          <mxGeometry x="24" y="330" width="252" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="browsernote" value="首版：浏览器控制 Mac&lt;br&gt;声音仍从 Mac 音频设备输出" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fffbe6;strokeColor=#b99f3b;fontColor=#4b3b0c;" vertex="1" parent="client">
+          <mxGeometry x="24" y="430" width="252" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="web" value="新增：Web 适配层&lt;br&gt;gigbuddy web" style="swimlane;html=1;rounded=0;horizontal=0;startSize=36;fillColor=#fffaf2;strokeColor=#c7792b;strokeWidth=2;fontColor=#5a3211;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="60" width="430" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="api" value="FastAPI 应用&lt;br&gt;Pydantic schema · localhost guard&lt;br&gt;错误映射 · CORS / auth 边界" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;strokeWidth=2;fontColor=#33200f;" vertex="1" parent="web">
+          <mxGeometry x="24" y="65" width="382" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="services" value="Application Services&lt;br&gt;ChainService · LibraryService · PresetService" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;fontColor=#33200f;" vertex="1" parent="web">
+          <mxGeometry x="24" y="205" width="382" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="jobs" value="JobManager&lt;br&gt;TONE3000 下载 · 进度 · 取消 · 重试" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;fontColor=#33200f;" vertex="1" parent="web">
+          <mxGeometry x="24" y="325" width="382" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="engine" value="EngineManager&lt;br&gt;启动 · 停止 · 锁 · 设备 · 重启&lt;br&gt;prepare / runtime ack" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;fontColor=#33200f;" vertex="1" parent="web">
+          <mxGeometry x="24" y="445" width="382" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="watcher" value="RuntimeWatcher&lt;br&gt;读取 level.json / reply.json&lt;br&gt;转换成 WebSocket 事件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0d9;strokeColor=#c7792b;fontColor=#33200f;" vertex="1" parent="web">
+          <mxGeometry x="24" y="580" width="382" height="82" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core" value="现有：可复用 Python 核心" style="swimlane;html=1;rounded=0;horizontal=0;startSize=36;fillColor=#f5f8fa;strokeColor=#4f7085;fontColor=#213844;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="850" y="60" width="360" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="library" value="src/library.py&lt;br&gt;SQLite · 音色 · 模型 · Preset&lt;br&gt;Chain facade" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0f5;strokeColor=#4f7085;fontColor=#14232d;" vertex="1" parent="core">
+          <mxGeometry x="24" y="65" width="312" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="protocol" value="src/chain_protocol.py&lt;br&gt;slots[] 校验 · 路径安全&lt;br&gt;revision · CAS · 原子写" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0f5;strokeColor=#4f7085;fontColor=#14232d;" vertex="1" parent="core">
+          <mxGeometry x="24" y="205" width="312" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="live" value="tui/live.py&lt;br&gt;live_chain · managed control&lt;br&gt;runtime report · file lock" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0f5;strokeColor=#4f7085;fontColor=#14232d;" vertex="1" parent="core">
+          <mxGeometry x="24" y="345" width="312" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="tone" value="src/tone3000.py&lt;br&gt;搜索 · 详情 · 模型 · 下载" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0f5;strokeColor=#4f7085;fontColor=#14232d;" vertex="1" parent="core">
+          <mxGeometry x="24" y="485" width="312" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="coreboundary" value="这些模块不应依赖 FastAPI；保持可被 TUI、CLI、Web 共用" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8fbfd;strokeColor=#8aa1af;fontColor=#29434f;" vertex="1" parent="core">
+          <mxGeometry x="24" y="620" width="312" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="host" value="macOS 主机：数据与音频运行时" style="swimlane;html=1;rounded=0;horizontal=0;startSize=36;fillColor=#f5faf2;strokeColor=#6e9562;fontColor=#27401f;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="60" width="520" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="db" value="SQLite&lt;br&gt;data/gigbuddy.db&lt;br&gt;tones · models · presets · settings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#edf5e9;strokeColor=#6e9562;fontColor=#1d3219;" vertex="1" parent="host">
+          <mxGeometry x="24" y="65" width="220" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="assets" value="本地资产&lt;br&gt;data/tones · data/dry_inputs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#edf5e9;strokeColor=#6e9562;fontColor=#1d3219;" vertex="1" parent="host">
+          <mxGeometry x="276" y="65" width="220" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="files" value="运行时文件协议&lt;br&gt;live_chain.json · live_control.json&lt;br&gt;level.json · live_control.reply.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#edf5e9;strokeColor=#6e9562;fontColor=#1d3219;" vertex="1" parent="host">
+          <mxGeometry x="24" y="220" width="472" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="cpp" value="C++ realtime_cli&lt;br&gt;NAM / IR DSP · Slot I/O trim&lt;br&gt;热切换 · 干声播放 · 录音" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0f5;strokeColor=#4f7085;strokeWidth=2;fontColor=#14232d;" vertex="1" parent="host">
+          <mxGeometry x="24" y="375" width="472" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="audio" value="CoreAudio / PortAudio&lt;br&gt;Mac 音频输入与输出设备" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0f5;strokeColor=#4f7085;fontColor=#14232d;" vertex="1" parent="host">
+          <mxGeometry x="24" y="535" width="472" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="hostnote" value="首版单用户、单活动引擎；浏览器不接触这些路径和设备句柄" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8fbfd;strokeColor=#8aa1af;fontColor=#29434f;" vertex="1" parent="host">
+          <mxGeometry x="24" y="650" width="472" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="remote" value="TONE3000 Public API&lt;br&gt;远程公开音色元数据与模型下载" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f2eafa;strokeColor=#8d68a8;fontColor=#281a35;" vertex="1" parent="1">
+          <mxGeometry x="1850" y="350" width="280" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="请求" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="webui" target="rest"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" value="实时订阅" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="webui" target="socket"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="rest" target="api"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" value="WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="socket" target="api"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" value="路由分发" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="api" target="services"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" value="异步任务" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="api" target="jobs"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" value="引擎控制" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="api" target="engine"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" value="状态监听" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="api" target="watcher"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e9" value="领域调用" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f7085;endArrow=block;" edge="1" parent="1" source="services" target="library"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" value="校验 / CAS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f7085;endArrow=block;" edge="1" parent="1" source="services" target="protocol"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" value="文件运行时" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f7085;endArrow=block;" edge="1" parent="1" source="services" target="live"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e12" value="模型任务" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f7085;endArrow=block;" edge="1" parent="1" source="jobs" target="tone"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e13" value="落库" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=block;" edge="1" parent="1" source="library" target="db"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e14" value="文件资产" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=block;" edge="1" parent="1" source="library" target="assets"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e15" value="写入 / 读取" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=block;" edge="1" parent="1" source="protocol" target="files"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e16" value="控制文件" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=block;" edge="1" parent="1" source="live" target="files"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e17" value="进程控制" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c7792b;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="engine" target="cpp"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e18" value="读取 chain / 写 telemetry" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=both;" edge="1" parent="1" source="cpp" target="files"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e19" value="真实音频" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f7085;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="cpp" target="audio"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e20" value="轮询状态" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=block;" edge="1" parent="1" source="files" target="watcher"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e21" value="推送事件" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6e9562;endArrow=block;" edge="1" parent="1" source="watcher" target="socket"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e22" value="远程元数据 / 模型" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#8d68a8;endArrow=both;" edge="1" parent="1" source="tone" target="remote"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e23" value="下载到本地" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#8d68a8;endArrow=block;" edge="1" parent="1" source="tone" target="assets"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e24" value="禁止直接访问" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#9b5b5b;dashed=1;dashPattern=8 8;endArrow=block;" edge="1" parent="1" source="webui" target="files"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e25" value="首版不传 PCM" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#9b5b5b;dashed=1;dashPattern=8 8;endArrow=block;" edge="1" parent="1" source="webui" target="audio"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="legend" value="实线：调用 / 数据流　　橙色：新增 Web 层　　蓝色：现有核心 / 引擎　　绿色：本地文件与状态回流　　虚线：首版明确禁止" style="shape=note;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#a5a5a5;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="30" y="900" width="1780" height="52" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
