@@ -2382,16 +2382,38 @@ class GigBuddyApp(App):
             return
         self.push_screen(ClearSlotsConfirm())
 
+    @staticmethod
+    def _click_belongs_to_chain(event, panel: ChainPanel) -> bool:
+        """Return whether a bubbled click originated inside ChainPanel.
+
+        ``event.widget`` is the widget where Textual first dispatched the
+        mouse event; it remains unchanged while the event bubbles through its
+        ancestors.  Coordinate-only routing cannot distinguish a ChainPanel
+        click from an unrelated Panel click, and some Chain border hit-tests
+        intentionally restore Slot focus before checking their coordinates.
+        """
+        source = getattr(event, "widget", None)
+        if source is None:
+            return False
+        try:
+            return any(ancestor is panel
+                       for ancestor in source.ancestors_with_self)
+        except AttributeError:
+            return False
+
     def on_click(self, event) -> None:
         """Click routing for the chain panel's clickable rows and switch buttons.
 
         NodeWidget owns keyboard focus, while the row shell is a larger visual
         hit target. Textual forwards mouse events to the deepest widget under
-        the pointer, so route by hit-testing the click coordinates here.
+        the pointer, so validate that source before hit-testing the click
+        coordinates here.
         """
         if event.screen_x is None:
             return
         panel = self.query_one(ChainPanel)
+        if not self._click_belongs_to_chain(event, panel):
+            return
         if panel.handle_slot_hint_click(event):
             return
         # Route by coordinates first: hit-testing can land on overlapping

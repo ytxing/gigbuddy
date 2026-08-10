@@ -1,13 +1,16 @@
 """Focused acceptance checks for the v0.2 shared Library controls."""
 
 import asyncio
+import json
 
 from rich.text import Text
+from textual.events import Click
 from textual.widgets import DataTable, Select
 from textual.widgets._data_table import ColumnKey
 
 import library
 from tui.app import GigBuddyApp
+from tui.library_panel import LibraryPanel
 from tui.modals import set_border_hint_hover
 from tui.panels import ChainPanel
 from tui.view_controls import SearchBar, ViewTabStrip
@@ -92,6 +95,42 @@ def test_clicking_library_search_stays_in_library(monkeypatch, tmp_path):
             assert app.focused is search
             assert not any(ancestor is chain
                            for ancestor in search.ancestors_with_self)
+
+    run(scenario())
+
+
+def test_app_chain_router_ignores_bubbled_click_from_library(
+        monkeypatch, tmp_path):
+    _patch_remote(monkeypatch, tmp_path)
+    chain_file = tmp_path / "live_chain.json"
+    chain_file.write_text(json.dumps({
+        "slots": [{"path": None}],
+        "gain": 1.0,
+        "master": 1.0,
+        "quality": 1.0,
+    }), encoding="utf-8")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", chain_file)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.3)
+            chain = app.query_one(ChainPanel)
+            library_panel = app.query_one(LibraryPanel)
+            search = app.query_one("#local-search")
+            assert chain.slot_widgets
+
+            search.focus()
+            await pilot.pause()
+            x = library_panel.region.x + 1
+            y = library_panel.region.y + 1
+            event = Click(
+                library_panel, 1, 1, 0, 0, 1, False, False, False, x, y)
+            app.on_click(event)
+            await pilot.pause()
+
+            assert app.focused is search
+            assert not chain.slot_widgets[0].has_focus
 
     run(scenario())
 
