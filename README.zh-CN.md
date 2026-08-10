@@ -9,12 +9,12 @@
 
 *找到音色 · 即刻演奏*
 
-*v1.1.2 · 2026-08-10*
+*v1.1.3 · 2026-08-10*
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.2/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/install.sh | bash
 ```
 
 ![GigBuddy 安装](docs/screenshots/gigbuddy.gif)
@@ -118,7 +118,7 @@ AUDIO 面板把电平、静音、设备、缓冲、采样率、延迟控制在�
 可跳过询问。卸载同样一行完成：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.2/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/uninstall.sh | bash
 ```
 
 独立卸载脚本会删除本地安装、生成的运行时文件和持久化的 TONE3000 会话。
@@ -126,7 +126,7 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.2/scripts/unins
 参数；登录会话仍会被删除：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.2/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 从源码检出开始：
@@ -323,7 +323,7 @@ TONE3000 的 API 政策与 endpoint 范围可能变化。OAuth 流程、免费�
 
 ## 依赖
 
-版本固定（v1.1.2）。升级时需同步更新 `requirements.txt` 与 `install.sh`
+版本固定（v1.1.3）。升级时需同步更新 `requirements.txt` 与 `install.sh`
 中的 NeuralAudio commit。
 
 **Python 运行时**（`requirements.txt`）：

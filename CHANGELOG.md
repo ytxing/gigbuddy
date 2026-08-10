@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3 - 2026-08-10
+
+### Fixed
+
+- The animated installer banner starts only after the install-location and
+  TONE3000 login decisions are complete, so it cannot overwrite either prompt.
+
 ## 1.1.2 - 2026-08-10
 
 ### Fixed

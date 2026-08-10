@@ -75,3 +75,8 @@ def test_installers_check_login_before_creating_runtime_environment():
         script = (repo_root / relative_path).read_text(encoding="utf-8")
         assert script.index("Checking TONE3000 login") < script.index(
             "Creating Python environment")
+
+    user_installer = (repo_root / "scripts/install.sh").read_text(
+        encoding="utf-8")
+    assert user_installer.index("Checking TONE3000 login") < user_installer.index(
+        "\nstart_banner\n")

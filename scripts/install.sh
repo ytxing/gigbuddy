@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.1.2}"
+REPO_REF="${GIGBUDDY_REF:-v1.1.3}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
@@ -300,8 +300,6 @@ if [[ -t 0 && -z "${GIGBUDDY_HOME:-}" ]]; then
   esac
 fi
 
-start_banner
-
 run_quiet() {
   if [[ "${GIGBUDDY_VERBOSE:-0}" == "1" ]]; then
     "$@"
@@ -419,6 +417,10 @@ if [[ "$SKIP_PRESETS" != 1 ]]; then
     fi
   fi
 fi
+
+# All user decisions are complete before the animated banner starts. In
+# particular, the prompt/browser flow must never be covered by the banner.
+start_banner
 
 step "Creating Python environment (uv)"
 UV_BIN="${GIGBUDDY_UV:-uv}"
