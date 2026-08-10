@@ -20,6 +20,9 @@ def _fake_install(tmp_path: Path) -> tuple[Path, Path]:
     (install_root / ".gigbuddy-install").write_text("GigBuddy\n")
     (install_root / "data" / "gigbuddy.db").write_text("db")
     (install_root / "app.py").write_text("app")
+    token_file = home / ".config" / "gigbuddy" / "tone3000_tokens.json"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text('{"access_token":"test"}\n')
     (bin_dir / "gigbuddy").symlink_to(install_root / ".venv" / "bin" / "gigbuddy")
     (bin_dir / "gigbuddy-tui").symlink_to(install_root / ".venv" / "bin" / "gigbuddy-tui")
     return home, install_root
@@ -42,6 +45,7 @@ def test_uninstall_keep_data_removes_runtime_only(tmp_path):
     assert (install_root / ".gigbuddy-install").exists()
     assert not (install_root / "app.py").exists()
     assert not (home / ".local" / "bin" / "gigbuddy").is_symlink()
+    assert (home / ".config" / "gigbuddy" / "tone3000_tokens.json").exists()
     assert "local data kept" in result.stdout
 
 
@@ -53,6 +57,7 @@ def test_uninstall_yes_removes_local_data(tmp_path):
     assert result.returncode == 0, result.stderr
     assert not install_root.exists()
     assert not (home / ".local" / "bin" / "gigbuddy").exists()
+    assert not (home / ".config" / "gigbuddy" / "tone3000_tokens.json").exists()
     assert "including local data" in result.stdout
 
 

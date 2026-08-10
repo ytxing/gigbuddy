@@ -537,6 +537,10 @@ def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
     current = {"chain": _chain([str(tmp_path / "a.nam")], revision=1)}
     monkeypatch.setattr("tui.app.live.read_chain",
                         lambda: dict(current["chain"]))
+    monkeypatch.setattr(
+        "tui.app.live.read_chain_snapshot",
+        lambda: (dict(current["chain"]), None),
+    )
     monkeypatch.setattr("tui.app.live.last_chain_write_fingerprint",
                         lambda: None)
 

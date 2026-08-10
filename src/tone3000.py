@@ -283,6 +283,17 @@ def _clear_tokens() -> None:
             pass
 
 
+def logout() -> bool:
+    """Clear the persisted OAuth credentials used by this desktop client.
+
+    An explicit ``TONE3000_ACCESS_TOKEN`` environment variable is outside the
+    persisted login session and is therefore left untouched. Return whether
+    no such environment credential remains active.
+    """
+    _clear_tokens()
+    return not bool(os.environ.get("TONE3000_ACCESS_TOKEN", "").strip())
+
+
 def _token_request(body: dict) -> dict:
     request = urllib.request.Request(
         f"{API}/oauth/token",

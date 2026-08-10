@@ -5,13 +5,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+USER_HOME="${HOME:-}"
 TARGETS=(
   "$ROOT/.venv"                  # Python 虚拟环境
   "$ROOT/data"                   # 本地库 / 链文件 / 音色文件 / 干音素材
   "$ROOT/bin/realtime_cli"       # 实时引擎
   "$ROOT/bin/nam_cli"            # 离线渲染引擎
+  "$ROOT/.local"                  # 本地 PortAudio 构建前缀
   "$ROOT/third_party"            # NeuralAudio 依赖（下次 install 重新拉取）
 )
+if [[ -n "$USER_HOME" ]]; then
+  TARGETS+=(
+    "$USER_HOME/.config/gigbuddy/tone3000_tokens.json"  # TONE3000 登录凭据
+  )
+fi
 
 echo "Removing: ${TARGETS[*]}"
 for target in "${TARGETS[@]}"; do

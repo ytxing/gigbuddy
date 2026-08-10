@@ -18,7 +18,9 @@ running a command. Do not guess a different project root or a local file path.
 The stable agent-facing interface is:
 
 ~~~bash
-bin/gigbuddy tone list [--gear amp|amp-cab|pedal|outboard|cab|space|experimental] [--limit N] [--query Q] [--json]
+bin/gigbuddy tone login
+bin/gigbuddy tone logout
+bin/gigbuddy tone list [--gear amp|amp-cab|pedal|outboard|cab|space|experimental|full-rig|ir] [--limit N] [--query Q] [--json]
 bin/gigbuddy tone search <query> [--gear GEAR] [--author USER] [--tag TAG] [--limit N] [--json]
 bin/gigbuddy tone show <tone-id> [--json]
 bin/gigbuddy tone import <tone-id>
@@ -29,15 +31,22 @@ bin/gigbuddy preset save <name> [--note "..."]
 bin/gigbuddy preset load <name>
 bin/gigbuddy preset show <name> [--json]
 bin/gigbuddy preset current | preset rename <old> <new> | preset note <name> [text]
-bin/gigbuddy preset delete <name> | preset bootstrap
+bin/gigbuddy preset delete <name> | preset seed [--replace] [--local-only]
+bin/gigbuddy preset bootstrap
 ~~~
 
 Interpret the commands as follows:
 
+- tone login opens the documented TONE3000 OAuth 2.0 + PKCE flow in the
+  system browser. The user completes authentication in their own account;
+  tokens remain local to that user. tone logout removes the persisted OAuth
+  session. Do not ask for or reuse another user's token.
 - tone list searches the imported local SQLite library. Its --query covers
   local title, creator, and description text.
 - tone search performs a live TONE3000 search through the repository's public
-  API adapter. Use --json whenever the response must be analyzed.
+  API adapter. It requires a current user login; if it reports an
+  authentication error, run tone login and retry. Use --json whenever the
+  response must be analyzed.
 - tone show reads one imported Tone and is the authoritative local view of
   the full description and its models[] rows.
 - tone import downloads the selected Tone's supported model files and stores
@@ -49,6 +58,14 @@ Interpret the commands as follows:
 - preset bootstrap downloads the starter model catalog and seeds the built-in
   presets; preset save snapshots the CURRENT live chain (never builds a chain
   from arguments).
+
+Remote TONE3000 work must stay within the public integration boundary: use the
+documented per-user OAuth flow, keep list/search requests bounded, download only
+after the user selects or explicitly requests a Tone, and preserve creator and
+license metadata. Do not crawl or mirror the catalog, bulk-download files,
+proxy or pool accounts, or build a shared/hosted library from one user's
+session. Respect HTTP 429 and its `Retry-After` value; a rate-limit response is
+not a reason to widen the next request.
 
 The remote search JSON may contain a Tone description and a summary
 model_name, but it does not contain the complete models[] list. To explain

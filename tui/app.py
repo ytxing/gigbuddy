@@ -34,7 +34,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.events import MouseEvent, MouseMove
 from textual.theme import Theme
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Button, Footer, Header, Static
 from textual.widgets._header import (HeaderClock, HeaderClockSpace, HeaderIcon,
                                      HeaderTitle)
 
@@ -513,6 +513,7 @@ class GigBuddyHeader(Header):
         title = HeaderTitle()
         title.ALLOW_SELECT = False
         yield title
+        yield Button("log in", id="header-auth", compact=True)
         clock = (HeaderClock().data_bind(Header.time_format)
                  if self._show_clock else HeaderClockSpace())
         clock.ALLOW_SELECT = False
@@ -562,7 +563,16 @@ class GigBuddyApp(App):
     }
     GigBuddyHeader HeaderTitle {
         width: 1fr; content-align: center middle;  /* 标题居中 */
-        padding-left: 10;  /* 与右侧 HeaderClock 对称，内容精确居中 */
+        padding-left: 22;  /* 与右侧 auth + HeaderClock 对称，内容精确居中 */
+    }
+    GigBuddyHeader #header-auth {
+        dock: none; width: 12; min-width: 12; height: 1;
+        padding: 0 1; content-align: center middle;
+        color: $text-muted; background: $panel; border: none;
+    }
+    GigBuddyHeader #header-auth:hover,
+    GigBuddyHeader #header-auth:focus {
+        color: $accent; background: $surface-lighten-1;
     }
     GigBuddyHeader HeaderClock, GigBuddyHeader HeaderClockSpace { width: 10; }
     GigBuddyHeader #header-status {
@@ -1040,6 +1050,8 @@ class GigBuddyApp(App):
         self._playback_op_ts = 0.0
         self._header_status_timer = None
         self._header_status_identity: str | None = None
+        self._tone3000_logged_in = False
+        self._tone3000_auth_generation = 0
         self._last_refresh_chain_fingerprint: str | None = None
         self._last_runtime_status_report: tuple[int | None, str] | None = None
         self._mutation_refresh = MutationRefreshCoordinator(
@@ -1307,19 +1319,78 @@ class GigBuddyApp(App):
 
     def refresh_tone3000_identity(self) -> None:
         """Refresh the personalized subtitle without blocking the TUI."""
+        self._tone3000_auth_generation += 1
+        generation = self._tone3000_auth_generation
         self.run_worker(
-            self._load_tone3000_identity(), name="tone3000-identity",
+            self._load_tone3000_identity(generation), name="tone3000-identity",
             exclusive=True)
 
-    async def _load_tone3000_identity(self) -> None:
+    def _apply_tone3000_identity(self, username: str | None, *,
+                                 logged_in: bool) -> None:
+        """Apply one authenticated identity to the header controls."""
+        self._tone3000_logged_in = logged_in
+        self.sub_title = (
+            f"{username}'s one-stop NAM tone manager"
+            if username else self.DEFAULT_SUB_TITLE)
+        try:
+            button = self.query_one("#header-auth", Button)
+            button.label = "log out" if logged_in else "log in"
+        except NoMatches:
+            pass
+
+    async def _load_tone3000_identity(self, generation: int) -> None:
         try:
             profile = await asyncio.to_thread(library.tone3000.current_user)
+        except library.tone3000.AuthenticationRequiredError:
+            if generation == self._tone3000_auth_generation:
+                self._apply_tone3000_identity(None, logged_in=False)
+            return
         except Exception:
+            # Preserve the last known auth state across a transient network
+            # failure; an unavailable profile is not proof of a logout.
+            return
+        if generation != self._tone3000_auth_generation:
             return
         username = str(profile.get("username") or "").strip()
-        if username:
-            self.sub_title = (
-                f"{username}'s one-stop NAM tone manager")
+        self._apply_tone3000_identity(username or None, logged_in=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "header-auth":
+            return
+        event.stop()
+        self.run_worker(self._toggle_tone3000_auth(), name="tone3000-auth",
+                        group="tone3000-auth", exclusive=True)
+
+    async def _toggle_tone3000_auth(self) -> None:
+        try:
+            button = self.query_one("#header-auth", Button)
+        except NoMatches:
+            return
+        button.disabled = True
+        try:
+            if self._tone3000_logged_in:
+                no_environment_token = await asyncio.to_thread(
+                    library.tone3000.logout)
+                self._tone3000_auth_generation += 1
+                self._apply_tone3000_identity(None, logged_in=False)
+                self.notify("TONE3000 logged out")
+                if not no_environment_token:
+                    self.refresh_tone3000_identity()
+                return
+
+            await asyncio.to_thread(library.tone3000.login)
+            self._tone3000_auth_generation += 1
+            self._apply_tone3000_identity(None, logged_in=True)
+            self.notify("TONE3000 logged in")
+            self.refresh_tone3000_identity()
+        except library.tone3000.AuthenticationRequiredError:
+            self.notify("TONE3000 login cancelled — select log in",
+                        severity="warning")
+        except Exception:
+            self.notify("TONE3000 login unavailable — select log in",
+                        severity="error")
+        finally:
+            button.disabled = False
 
     def on_resize(self, _event) -> None:
         self._update_unsupported_size()

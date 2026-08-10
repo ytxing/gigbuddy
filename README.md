@@ -11,12 +11,12 @@
 
 *Find a sound. Shape it. Play it now.*
 
-*v1.0.2 · 2026-08-08*
+*v1.1.0 · 2026-08-10*
 
 One line from the terminal — downloads, installs, and initializes everything:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
@@ -63,8 +63,8 @@ dependency), fully MIT core stack.
   "the most-favorited Fender amp," "the most-downloaded bass overdrive" — and
   an agent can search, filter, and build or refine your presets for you.
 - 🎨 **Make it feel like your rig.** Six amp-inspired themes — press `t` to
-  cycle from orange tolex to tweed brass, blackface silver, British green, and
-  surf cream.
+  cycle through orange tolex, tweed brass, diamond noir, blackface silver,
+  British green, and surf cream.
 
 ![Browsing TONE3000 — live search with trending results, sort and type filters](docs/screenshots/tone3000-browse.png)
 
@@ -78,6 +78,18 @@ GigBuddy turns the original tone-chain console into a complete tone workbench:
   off on its own and switched back on whenever you like — the rest of the
   chain keeps playing, and your setup is exactly where you left it next time
   you open the app.
+- **Per-Slot level control:** every Slot has independent input and output trim
+  controls from -24 to +24 dB. The engine-backed `CAL` action can recommend a
+  NAM output trim, reports when the safe range clamps that recommendation, and
+  keeps the result with the preset.
+- **Your TONE3000 account, your session:** sign in through the system browser
+  with OAuth 2.0 + PKCE. The header shows the current login state, the library
+  offers a direct login action when remote data needs it, and both the TUI and
+  CLI can log out and clear the local session.
+- **Live work stays in place:** remote model loading, pack refreshes, preset
+  changes, and dry-input playback are queued away from the Textual event loop;
+  focus, selection, and the latest user action survive late network or engine
+  replies.
 - **A library that remembers your work:** imported tones, model metadata, local
   files, download state, and presets are kept together in one searchable local
   library.
@@ -111,10 +123,19 @@ into `~/.local/bin`. Run `gigbuddy` with no arguments to open the TUI; add a
 subcommand (`tone`, `chain`, `preset`) for the CLI. Run interactively and you can choose another location —
 `"."` for the current directory or any path (useful when you want the bundled
 agent skill available inside your own project folder); set `GIGBUDDY_HOME` to
-skip the prompt. Remove everything with `~/.local/bin/gigbuddy`'s sibling:
+skip the prompt. To remove a user-level install, run the matching uninstall
+script:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash
+```
+
+The standalone uninstaller removes the local install, generated runtime files,
+and the persisted TONE3000 session. Use `--keep-data` when you want to remove
+the runtime while keeping downloaded tones, local data, and the login session:
+
+```
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 From a fresh checkout:
@@ -158,6 +179,8 @@ fresh, run the one-line uninstall:
 
 1. Open **PRESETS** and load a starter rig, or open **TONE3000** and search for
    a sound such as `super reverb`, `vox ac30`, or `darkglass`.
+   If the remote view asks for authentication, choose `log in` in the header
+   or run `gigbuddy tone login`; complete the TONE3000 flow in your browser.
 2. Focus **INPUT**, press `enter`, and choose a dry guitar or bass recording.
    Press `space` to play, `s` to stop, or `l` to loop.
 3. Select a Slot and use its pack view to choose the exact model or IR you want.
@@ -245,6 +268,8 @@ to drive it, the CLI exposes the same library, chain, and preset operations:
 ```
 gigbuddy tone search "marshall plexi" --json
 gigbuddy tone import <tone-id>
+gigbuddy tone login
+gigbuddy tone logout
 gigbuddy preset list
 gigbuddy preset load <name>
 gigbuddy chain get
@@ -253,9 +278,55 @@ gigbuddy chain set '{"slots": [], "gain": 1.0, "master": 1.0}'
 
 The CLI and TUI share the local database and `data/live_chain.json`. A running
 engine watches that file and applies valid chain changes without requiring a
-restart. The `gigbuddy` skill under `.claude/skills/gigbuddy` adds a guarded
-natural-language workflow for agents; it only uses tone IDs returned by real
-search results.
+restart. The guarded agent workflow is shipped at
+`.agent/skills/gigbuddy/SKILL.md`; `.claude/skills/gigbuddy` is kept as a
+compatibility path. It searches local data first, requires real TONE3000 IDs
+and exact imported file paths, and refuses unsupported A1 or non-engine
+formats.
+
+### Agent skill
+
+The bundled skill turns a natural-language guitar or bass request into a
+traceable search, Model selection, import, chain update, or preset operation.
+It documents the complete agent-facing CLI, distinguishes a Tone pack from
+its concrete Models, checks local paths before connecting them, and reports
+what came from creator metadata versus inference. Remote actions use the
+current user's OAuth session and the public TONE3000 request/download boundary;
+the skill does not support shared credentials, catalog mirroring, or
+background bulk downloads. Read the full workflow in
+`.agent/skills/gigbuddy/SKILL.md`.
+
+## TONE3000 integration
+
+GigBuddy connects to TONE3000 as a desktop client. Each person signs in to
+their own TONE3000 account through the documented OAuth 2.0 + PKCE flow; the
+app does not require a server-side secret key or a shared account. Access and
+refresh tokens are stored in the local user configuration with restrictive file
+permissions, and `log out` removes the persisted session.
+
+The integration follows the public [TONE3000 API documentation](https://www.tone3000.com/api)
+and [API Terms](https://www.tone3000.com/api/terms):
+
+- requests use bearer access tokens, refresh expired sessions, and keep a
+  minimum 0.6-second spacing to stay within the documented default of 100
+  requests per minute; `Retry-After` is respected when the service returns
+  HTTP 429;
+- remote pages are bounded, and model files are downloaded only as part of an
+  explicit import, Slot selection, or user-invoked starter bootstrap rather
+  than as a background catalog mirror;
+- creator names, tone metadata, and the source platform remain visible in the
+  local library; creator-selected licenses still apply to every downloaded
+  file;
+- the desktop client does not proxy, pool, or publish one user's TONE3000
+  library for other users. Review the current API terms before building a
+  hosted or commercial service around this code.
+
+TONE3000's API policy and endpoint availability can change. The official docs
+are the authority for OAuth flows, free-tier scope, rate limits, attribution,
+and commercial requirements. In particular, the current terms distinguish
+free non-commercial integrations from full API/commercial access; check the
+listed OAuth prompt and bounded-list scope before publishing a derivative
+integration.
 
 ## Good to know
 
@@ -267,6 +338,9 @@ search results.
   `TEXTUAL_COLOR_SYSTEM=truecolor gigbuddy`.
 - `--no-engine` is a browse-and-edit mode; live audio and level telemetry need
   the native engine and an available audio device.
+- TONE3000 search, creator views, model details, and downloads need network
+  access and an active user login; the LOCAL library and saved presets remain
+  usable offline.
 - Core code is MIT. The runtime uses NeuralAudio, NAM Core, RTNeural, Eigen,
   PortAudio, and Textual under their respective licenses.
 
@@ -278,7 +352,7 @@ search results.
 
 ## Dependencies
 
-Pinned versions (v1.0.2). Update `requirements.txt` and the NeuralAudio commit
+Pinned versions (v1.1.0). Update `requirements.txt` and the NeuralAudio commit
 in `install.sh` together when bumping.
 
 **Python runtime** (`requirements.txt`):

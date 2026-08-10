@@ -9,12 +9,12 @@
 
 *找到音色 · 即刻演奏*
 
-*v1.0.2 · 2026-08-08*
+*v1.1.0 · 2026-08-10*
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/install.sh | bash
 ```
 
 ![GigBuddy 安装](docs/screenshots/gigbuddy.gif)
@@ -62,8 +62,8 @@ MIT 许可。
 优化 preset。
 
 **界面可以换成你的风格。** 内置六套灵感源自吉他音箱的主题，按 `t` 键在
-orange-tolex、tweed-brass、blackface-silver、british-green、
-surf-cream 之间循环。
+orange-tolex、tweed-brass、diamond-noir、blackface-silver、
+british-green、surf-cream 之间循环。
 
 ![浏览 TONE3000 — 实时搜索、热度排序、类型过滤](docs/screenshots/tone3000-browse.png)
 
@@ -73,6 +73,18 @@ surf-cream 之间循环。
 有序链，每个 Slot 可放任意受支持的 NAM 模型或 `.wav` IR，信号路径完全
 按你的搭建方式排列。任意 Slot 都能单独关闭、随时重开，链的其余部分照常
 播放；重启应用后设置保持原样。
+
+**每个 Slot 都能单独控电平。** 每个 Slot 都有 -24 到 +24 dB 的输入与输出
+trim。引擎驱动的 `CAL` 可以为 NAM Slot 推荐输出 trim；如果推荐值超出安全
+范围，界面会明确显示已截断，并把最终结果随 preset 保存。
+
+**每个用户使用自己的 TONE3000 账号。** 通过系统浏览器完成 OAuth 2.0 +
+PKCE 登录。顶栏显示当前登录状态，远程库需要认证时直接提供登录按钮，TUI
+和 CLI 都支持退出登录并清除本地会话。
+
+**实时操作不会被晚到的任务打乱。** 远程模型加载、音色包刷新、preset
+切换与干音播放都移到 Textual 事件循环之外；网络或引擎回复晚到时，焦点、
+选择和用户最后一次操作仍保持在原位置。
 
 **本地库记住你的工作。** 导入的音色、模型信息、本地文件、下载状态与
 preset 统一存放，随时可搜索。LOCAL、TONE3000、TOP CREATORS 三个视图
@@ -106,7 +118,15 @@ AUDIO 面板把电平、静音、设备、缓冲、采样率、延迟控制在�
 可跳过询问。卸载同样一行完成：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash
+```
+
+独立卸载脚本会删除本地安装、生成的运行时文件和持久化的 TONE3000 会话。
+如果只想删除运行时、保留下载的音色、本地数据和登录状态，可使用
+`--keep-data` 参数：
+
+```
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.0/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 从源码检出开始：
@@ -145,7 +165,9 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.0.2/scripts/unins
 ## 第一次上手
 
 1. 打开 **PRESETS** 加载一个内置音色，或打开 **TONE3000** 搜索
-   `super reverb`、`vox ac30`、`darkglass` 这类声音。
+   `super reverb`、`vox ac30`、`darkglass` 这类声音。如果远程视图提示认证，
+   点击顶栏的 `log in`，或运行 `gigbuddy tone login`，然后在浏览器完成
+   TONE3000 登录。
 2. 聚焦 **INPUT**，按 `enter` 选择一段干音吉他贝斯录音，用 `space`
    播放、`s` 停止、`l` 循环。
 3. 选中一个 Slot，在它的音色包视图里挑选想要的模型或 IR，按 `enter`
@@ -224,6 +246,8 @@ GigBuddy 完全可以在 TUI 里操作。需要脚本或外部代理驱动时，
 ```
 gigbuddy tone search "marshall plexi" --json
 gigbuddy tone import <tone-id>
+gigbuddy tone login
+gigbuddy tone logout
 gigbuddy preset list
 gigbuddy preset load <name>
 gigbuddy chain get
@@ -231,9 +255,45 @@ gigbuddy chain set '{"slots": [], "gain": 1.0, "master": 1.0}'
 ```
 
 CLI 与 TUI 共用本地数据库和 `data/live_chain.json`。引擎监视该文件，
-链一变即热切换，无需重启。`.claude/skills/gigbuddy` 下的 `gigbuddy`
-skill 为代理提供了一套带防护的自然语言工作流，只使用真实搜索结果返回
-的音色 ID。
+链一变即热切换，无需重启。内置的代理工作流位于
+`.agent/skills/gigbuddy/SKILL.md`，`.claude/skills/gigbuddy` 保留为兼容入口。
+它先查本地数据，只使用真实 TONE3000 音色 ID 和导入后确认过的文件路径，
+并拒绝不支持的 A1 或非引擎格式。
+
+### Agent skill
+
+这份 skill 会把自然语言的吉他或贝斯需求转成可追溯的搜索、Model 选择、
+导入、chain 更新或 preset 操作。它完整记录代理可用的 CLI，区分 Tone 音色包
+与其中的具体 Model，连接到 chain 前检查本地文件，并把创作者元数据与推断
+分开报告。远程操作使用当前用户自己的 OAuth 会话，并遵守公开的 TONE3000
+请求与下载边界；不支持共享凭据、镜像目录或后台批量下载。完整工作流见
+`.agent/skills/gigbuddy/SKILL.md`。
+
+## TONE3000 集成说明
+
+GigBuddy 以桌面客户端方式连接 TONE3000。每个用户都通过官方 OAuth 2.0 +
+PKCE 流程登录自己的 TONE3000 账号；应用不需要服务器 Secret Key，也不共用
+一个账号。Access Token 与 Refresh Token 存在本机用户配置目录中，并使用
+严格的文件权限；点击 `log out` 会删除持久化会话。
+
+集成遵循 [TONE3000 API 文档](https://www.tone3000.com/api) 和
+[API 使用条款](https://www.tone3000.com/api/terms)：
+
+- 请求使用 Bearer Token，登录过期时刷新会话；请求之间至少间隔 0.6 秒，
+  对应官方默认的每分钟 100 次限制，服务返回 HTTP 429 时遵守
+  `Retry-After`；
+- 远程列表使用有界分页；模型文件只在用户明确导入、从 Slot 选择或执行
+  用户主动请求的 starter bootstrap 时下载，不在后台镜像整个目录；
+- 本地库保留创作者名称、音色元数据和来源平台，下载文件仍受创作者选择的
+  许可约束；
+- 桌面客户端不会替用户代理、汇聚或向其他用户发布某个 TONE3000 账号的
+  音色库。若要基于 GigBuddy 构建托管服务或商业产品，请先阅读当前 API
+  条款并确认适用范围。
+
+TONE3000 的 API 政策与 endpoint 范围可能变化。OAuth 流程、免费层范围、
+速率限制、署名和商业要求，以官方文档为准。当前条款特别区分了免费非商业
+集成与完整 API/商业集成；发布衍生集成前，应重新核对条款列出的 OAuth prompt
+流程和有界列表 endpoint 范围。
 
 ## 实用信息
 
@@ -243,6 +303,8 @@ skill 为代理提供了一套带防护的自然语言工作流，只使用真�
   完整主题，运行 `TEXTUAL_COLOR_SYSTEM=truecolor gigbuddy`。
 - `--no-engine` 是浏览编辑模式；实时音频与电平遥测需要原生引擎和可用
   的音频设备。
+- TONE3000 搜索、创作者视图、模型详情和下载需要网络与有效登录；LOCAL
+  本地库和已保存的 preset 仍可离线使用。
 - 核心代码采用 MIT 许可。运行时使用 NeuralAudio、NAM Core、RTNeural、
   Eigen、PortAudio、Textual，各自许可见[依赖](#依赖)。
 
@@ -255,7 +317,7 @@ skill 为代理提供了一套带防护的自然语言工作流，只使用真�
 
 ## 依赖
 
-版本固定（v1.0.2）。升级时需同步更新 `requirements.txt` 与 `install.sh`
+版本固定（v1.1.0）。升级时需同步更新 `requirements.txt` 与 `install.sh`
 中的 NeuralAudio commit。
 
 **Python 运行时**（`requirements.txt`）：

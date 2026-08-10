@@ -134,6 +134,54 @@ def test_login_button_reloads_current_tone_view(monkeypatch):
     run(scenario())
 
 
+def test_header_auth_button_logs_in_and_out(monkeypatch):
+    calls = {"login": 0, "logout": 0}
+
+    def current_user():
+        if calls["login"] == 0 or calls["logout"]:
+            raise tone3000.AuthenticationRequiredError("login required")
+        return {"id": 1, "username": "tester"}
+
+    monkeypatch.setattr(library.tone3000, "current_user", current_user)
+    monkeypatch.setattr(
+        library.tone3000, "login",
+        lambda: calls.__setitem__("login", calls["login"] + 1)
+        or {"access_token": "access"},
+    )
+    monkeypatch.setattr(
+        library.tone3000, "logout",
+        lambda: calls.__setitem__("logout", calls["logout"] + 1) or True,
+    )
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.4)
+            button = app.query_one("#header-auth", Button)
+            clock = app.query_one("HeaderClock")
+            assert button.region.width == 12
+            assert button.region.right == clock.region.x
+            assert button.label.plain == "log in"
+            assert "log in" in button.render_line(0).text
+
+            await pilot.click(button)
+            await pilot.pause(0.8)
+            assert calls["login"] == 1
+            assert button.label.plain == "log out"
+            assert "log out" in button.render_line(0).text
+            assert app.sub_title == (
+                "tester's one-stop NAM tone manager")
+
+            await pilot.click(button)
+            await pilot.pause(0.3)
+            assert calls["logout"] == 1
+            assert button.label.plain == "log in"
+            assert "log in" in button.render_line(0).text
+            assert app.sub_title == GigBuddyApp.DEFAULT_SUB_TITLE
+
+    run(scenario())
+
+
 def test_tone_rows_render_before_download_state_probe(monkeypatch, tmp_path):
     """The remote page must remain usable while local status is enriched."""
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")

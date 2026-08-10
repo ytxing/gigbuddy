@@ -1,0 +1,54 @@
+# Changelog
+
+## 1.1.0 - 2026-08-10
+
+### Added
+
+- Per-Slot input and output trim controls with a bounded range of -24 to +24
+  dB.
+- Engine-backed NAM output calibration, including the raw recommendation and a
+  visible indication when the safe range clamps it.
+- Persistent Slot trims across preset save/load, dirty-state checks, undo, and
+  redo.
+- TONE3000 OAuth 2.0 + PKCE login for the TUI and CLI, local token refresh, and
+  explicit logout. The header and remote library views expose the current
+  authentication state.
+
+### Fixed
+
+- Managed Slot edits and calibration no longer block the Textual event loop or
+  lose the latest user value during a held control.
+- Pack model refreshes preserve the current table focus and selection while
+  remote metadata arrives.
+- Dry-input Play, Stop, and Loop actions remain responsive when the engine is
+  starting or unavailable.
+- Remote tone rows render before optional download-state enrichment, and
+  creator loading is bounded to one official page at a time.
+- Library and pack status columns keep stable widths and active markers remain
+  aligned with the selected tone or model.
+- Clicks stay within their owning pane instead of bubbling into unrelated
+  panels or the application-level handler.
+- Current dry-input markers, safe Slot I/O editing, double-click reset, and
+  stale async view responses now keep their state consistent.
+
+### Release and documentation
+
+- OAuth callback page now carries visible TONE3000 attribution.
+- The public documentation describes per-user authentication, request pacing,
+  bounded remote loading, creator attribution, and the current TONE3000 API
+  terms.
+- The bundled agent skill was reviewed against the current CLI and now covers
+  login/logout, exact Tone-versus-Model selection, engine compatibility, and
+  the same per-user and bounded-download API boundary.
+- The remote installer now defaults to the `v1.1.0` tag.
+- The local uninstall script removes the PortAudio `.local` build prefix along
+  with the other generated runtime artifacts and clears the persisted local
+  TONE3000 session on a full uninstall.
+
+### Compatibility
+
+- macOS remains the supported native-audio platform.
+- Existing presets and legacy flat `model` / `ir` preset fields remain
+  readable and normalize to the current ordered Slot representation.
+- The TONE3000 API policy and endpoint scope are maintained by TONE3000; the
+  official API documentation and terms remain authoritative.

@@ -4,6 +4,7 @@ set -euo pipefail
 USER_HOME="${HOME:-}"
 INSTALL_ROOT_RAW="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR_RAW="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
+TOKEN_FILE="${USER_HOME}/.config/gigbuddy/tone3000_tokens.json"
 ASSUME_YES=0
 KEEP_DATA=0
 
@@ -140,6 +141,11 @@ if [[ -d "$INSTALL_ROOT/data" ]]; then
   fi
 fi
 
+REMOVE_SESSION=0
+if [[ "$KEEP_DATA" != 1 && -f "$TOKEN_FILE" ]]; then
+  REMOVE_SESSION=1
+fi
+
 if [[ -d "$INSTALL_ROOT" && ! -f "$INSTALL_ROOT/.gigbuddy-install" ]]; then
   printf 'GigBuddy\n' > "$INSTALL_ROOT/.gigbuddy-install"
 fi
@@ -169,6 +175,10 @@ elif [[ -d "$INSTALL_ROOT" ]]; then
     esac
     rm -rf -- "$entry"
   done
+fi
+
+if [[ "$REMOVE_SESSION" == 1 ]]; then
+  rm -f -- "$TOKEN_FILE"
 fi
 
 if [[ "$DELETE_DATA" == 1 ]]; then

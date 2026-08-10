@@ -35,7 +35,7 @@ from uuid import uuid4
 import tone3000
 import chain_protocol
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -2086,6 +2086,7 @@ def main(argv: list[str] | None = None) -> int:
     pt = sub.add_parser("tone", help="tone library operations")
     tsub = pt.add_subparsers(dest="tone_cmd", required=True)
     tsub.add_parser("login", help="sign in to TONE3000 in the system browser")
+    tsub.add_parser("logout", help="clear the local TONE3000 login")
     pl = tsub.add_parser("list", help="list imported tones")
     pl.add_argument("--gear", choices=["amp", "amp-cab", "pedal", "outboard",
                                         "cab", "space", "experimental", "full-rig", "ir"],
@@ -2159,6 +2160,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"TONE3000 login failed: {exc}", file=sys.stderr)
                 return 1
             print("TONE3000 login complete.")
+        elif args.tone_cmd == "logout":
+            tone3000.logout()
+            print("TONE3000 logout complete.")
         elif args.tone_cmd == "list":
             tones = list_tones(args.gear, args.limit, args.query)
             print(json.dumps(tones, ensure_ascii=False, indent=2) if args.json else

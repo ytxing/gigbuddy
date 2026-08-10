@@ -498,6 +498,26 @@ def test_cli_exposes_tone_login(monkeypatch, capsys):
     assert "login complete" in capsys.readouterr().out.lower()
 
 
+def test_logout_clears_persisted_tokens(monkeypatch, tmp_path):
+    token_file = tmp_path / "tokens.json"
+    monkeypatch.setattr(tone3000, "TOKEN_FILE", token_file)
+    tone3000._write_tokens({"access_token": "access"})
+    assert token_file.exists()
+
+    assert tone3000.logout() is True
+    assert not token_file.exists()
+
+
+def test_cli_exposes_tone_logout(monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(library.tone3000, "logout",
+                        lambda: called.append(True) or True)
+
+    assert library.main(["tone", "logout"]) == 0
+    assert called == [True]
+    assert "logout complete" in capsys.readouterr().out.lower()
+
+
 def test_nested_user_fields_fill_empty_compatibility_values():
     row = tone3000._canonical_tone({
         "user": {"id": 42, "username": "alice", "avatar_url": "avatar",
