@@ -54,8 +54,8 @@ def test_chain_params_is_single_focus_stop_without_overlays(
             visible = screen_row[
                 params.content_region.x:params.content_region.right]
             assert visible.startswith(
-                "gain  [g] +01.00 [G]   master  [m] +01.00 [M]   "
-                "quality  [q] +01.00 [Q]")
+                "gain  [g] 1.00 [G]   master  [m] 1.00 [M]   "
+                "quality  [q] 1.00 [Q]")
             assert all(
                 duplicate not in visible
                 for duplicate in ("GGAIN", "MMASTER", "QQUALITY"))

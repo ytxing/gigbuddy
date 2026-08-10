@@ -537,7 +537,7 @@ class ChainParams(Static):
     HOLD_TICK = 0.025
 
     PARAM_BUTTON_WIDTH = 3
-    PARAM_VALUE_WIDTH = 7  # six value cells plus one blinking-cursor cell
+    PARAM_VALUE_WIDTH = 5  # original positive value width; cursor stays in-cell
     PARAM_LABEL_GAP = 2
     PARAM_GAP = 1
     PARAM_VALUE_END_GAP = 0
@@ -601,8 +601,8 @@ class ChainParams(Static):
 
     @staticmethod
     def _format_value(value: float) -> str:
-        """Render a signed, two-decimal value with two integer columns."""
-        return f"{float(value):+06.2f}"
+        """Render the original positive chain-parameter format."""
+        return f"{float(value):.2f}"
 
     def _rebuild_hit_regions(self) -> None:
         """Recalculate hit spans after a value changes width."""
@@ -635,14 +635,23 @@ class ChainParams(Static):
         """Render one fixed-width parameter segment."""
         label, value, hint, _decrease, _increase = self._controls[index]
         if self._editing == index:
-            cursor = "▌" if self._cursor_visible else " "
-            edit_display = (self._edit_text + cursor).ljust(
-                self.PARAM_VALUE_WIDTH)
+            if self._cursor_visible:
+                if len(self._edit_text) >= self.PARAM_VALUE_WIDTH:
+                    # Keep the five-cell numeric column fixed at the upper
+                    # bound; the block cursor temporarily covers the last cell.
+                    edit_display = (self._edit_text[:self.PARAM_VALUE_WIDTH - 1]
+                                    + "▌")
+                else:
+                    edit_display = (self._edit_text + "▌").ljust(
+                        self.PARAM_VALUE_WIDTH)
+            else:
+                edit_display = self._edit_text[:self.PARAM_VALUE_WIDTH].ljust(
+                    self.PARAM_VALUE_WIDTH)
             value_part = f"[b $background on $accent]{_escape(edit_display)}[/]"
         else:
             value_style = (
                 "$text on $surface-lighten-1"
-                if hovered == 10 + index else "$accent")
+                if hovered == 10 + index else "$text")
             value_display = value.ljust(self.PARAM_VALUE_WIDTH)
             value_part = f"[b {value_style}]{_escape(value_display)}[/]"
         lo, hi = (part.strip() for part in hint.split("·"))
@@ -657,9 +666,9 @@ class ChainParams(Static):
             if hovered == index * 2 + 1 else hi
         )
         if hovered != index * 2:
-            lo_part = f"[b $accent]{lo_text}[/]"
+            lo_part = f"[b $text]{lo_text}[/]"
         if hovered != index * 2 + 1:
-            hi_part = f"[b $accent]{hi_text}[/]"
+            hi_part = f"[b $text]{hi_text}[/]"
         return (f"[b]{_escape(label)}[/]"
                 f"{' ' * self.PARAM_LABEL_GAP}{lo_part}"
                 f"{' ' * self.PARAM_GAP}{value_part}"
@@ -838,7 +847,7 @@ class ChainParams(Static):
         label, _old, hint, decrease, increase = self._controls[index]
         controls = list(self._controls)
         controls[index] = (
-            label, signed_fixed(value), hint, decrease, increase)
+            label, self._format_value(value), hint, decrease, increase)
         self._controls = controls
         self._rebuild_hit_regions()
         self._hover_index = self._press_span
@@ -1155,8 +1164,16 @@ class ChainSlotWidget(Static):
     def _io_button(self, key: str, delta: float, text: str) -> str:
         content = _escape(text)
         if self._io_hover == (key, delta):
+            return f"[b $text on $surface-lighten-1]{content}[/]"
+        return f"[b $text]{content}[/]"
+
+    def _io_value_markup(self, key: str) -> str:
+        content = _escape(self._format_io_value(key))
+        if self._io_editing == key:
             return f"[b $background on $accent]{content}[/]"
-        return f"[b $accent]{content}[/]"
+        if self._io_hover == (key, "value"):
+            return f"[b $text on $surface-lighten-1]{content}[/]"
+        return f"[b $text]{content}[/]"
 
     def _io_calibrate_button(self) -> str:
         content = _escape("[CAL]")
@@ -1167,7 +1184,7 @@ class ChainSlotWidget(Static):
     def _io_line_markup(self, label: str, key: str, *, calibrate: bool = False) -> str:
         minus = self._io_button(key, -self.IO_STEP_DB, "[-]")
         plus = self._io_button(key, self.IO_STEP_DB, "[+]")
-        value = self._format_io_value(key)
+        value = self._io_value_markup(key)
         gap = " " * self.IO_GAP
         line = (f"{label:<{self.IO_LABEL_WIDTH}}{minus}{gap}"
                 f"{value}{gap}{plus}")

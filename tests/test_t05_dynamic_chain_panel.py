@@ -399,6 +399,21 @@ def test_slot_io_hit_map_keeps_two_rows_and_button_columns():
     assert io._hit_at_offset(cal_start + 2, 0) is None
 
 
+def test_slot_io_hover_uses_light_feedback_for_buttons_and_values():
+    pytest.importorskip("textual", reason="T05 renderer smoke needs Textual")
+    from tui.panels import ChainSlotIOWidget, ChainSlotWidget
+
+    state = ChainState(_chain(["amp.nam"]))
+    slot = ChainSlotWidget(0, state.slot(0), title="Tone", gear="amp")
+    io = ChainSlotIOWidget(slot)
+
+    slot._io_hover = ("input_gain_db", -slot.IO_STEP_DB)
+    assert "$text on $surface-lighten-1" in io.render()
+
+    slot._io_hover = ("input_gain_db", "value")
+    assert "$text on $surface-lighten-1" in io.render()
+
+
 @pytest.mark.parametrize(
     ("gear", "label"),
     [
