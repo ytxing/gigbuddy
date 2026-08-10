@@ -32,10 +32,18 @@ from .modals import (ClickSelectTree, GigBuddyModal, ModalBox,
 DEFAULT_DRY_KEYS = list(tone3000.DRY_INPUT_STARTER_KEYS)
 
 
+def _resolved(path: str | Path) -> Path:
+    """Resolve a dry-input path relative to the project root when needed."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = live.ROOT / candidate
+    return candidate.resolve()
+
+
 def _rel(path: str) -> str:
     """绝对路径 → 相对项目根（live_chain.json 用相对路径，与 model/ir 一致）"""
     try:
-        return str(Path(path).resolve().relative_to(live.ROOT))
+        return str(_resolved(path).relative_to(live.ROOT.resolve()))
     except ValueError:
         return path
 
@@ -110,6 +118,8 @@ class InputSourceScreen(GigBuddyModal):
         tree.root.add_leaf(current, {"type": "instrument"})
         files = sorted(
             p for p in live.DRY_INPUTS_DIR.glob("*.wav")) if live.DRY_INPUTS_DIR.is_dir() else []
+        current_path = (_resolved(current_file)
+                        if current_file is not None else None)
         if files:
             # 干声按文件名 " - Guitar"/" - Bass" 后缀分组为一级选项
             # （Guitar / Bass），组内才是 wav 文件。
@@ -122,7 +132,8 @@ class InputSourceScreen(GigBuddyModal):
                 branch = tree.root.add(group, {"type": "group"})
                 branch.expand()
                 for f in groups[group]:
-                    mark = "✓ " if str(_rel(str(f))) == str(current_file) else "  "
+                    mark = ("✓ " if current_path is not None
+                            and _resolved(f) == current_path else "  ")
                     branch.add_leaf(f"{mark}{f.name}", {"type": "dry", "path": str(f)})
             missing = tone3000.fetch_dry_inputs_missing(live.DRY_INPUTS_DIR)
             if missing:

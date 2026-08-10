@@ -3,6 +3,7 @@
 Network-free: no TONE3000 calls; chain/level files point at tmp dirs.
 Run: .venv/bin/python -m pytest tests/ -q
 """
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -57,6 +58,42 @@ def test_input_source_playback_commit_does_not_publish_mutation():
 
     assert result["revision"] == 3
     assert events == []
+
+
+def test_input_source_tree_marks_current_file(monkeypatch, tmp_path):
+    dry_dir = tmp_path / "data" / "dry_inputs"
+    dry_dir.mkdir(parents=True)
+    selected = dry_dir / "selected - Guitar.wav"
+    other = dry_dir / "other - Guitar.wav"
+    selected.write_bytes(b"wav")
+    other.write_bytes(b"wav")
+    live.write_chain({
+        "slots": [],
+        "input": {
+            "source": "file",
+            "file": "data/dry_inputs/selected - Guitar.wav",
+            "state": "playing",
+            "loop": True,
+        },
+    })
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.action_open_input_source()
+            await pilot.pause()
+            tree = app.screen.query_one("#input-tree")
+
+            def labels(node):
+                yield str(node.label)
+                for child in node.children:
+                    yield from labels(child)
+
+            assert "✓ selected - Guitar.wav" in set(labels(tree.root))
+            assert "  other - Guitar.wav" in set(labels(tree.root))
+
+    asyncio.run(scenario())
 
 
 def test_read_levels_extended_returns_playback_state():
