@@ -37,8 +37,8 @@ from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
 from .metadata import (SelectableStatic, architecture_label, description_only,
                        metadata_table, model_architecture,
                        normalize_model_architecture, preset_metadata_table,
-                       preset_slot_label, signed_fixed, theme_colors,
-                       tone_format)  # noqa: E402
+                       preset_slot_label, signed_fixed, status_cell,
+                       theme_colors, tone_format)  # noqa: E402
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      border_hint_hit, hint_span,
@@ -2269,10 +2269,11 @@ class ChainPanel(Vertical):
 class PackFileTable(ClickSelectTable):
     """Interactive file list of the focused node's tone pack.
 
-    Every model of the owning tone is listed (downloaded or not); Enter or
-    double-click picks one and the app hot-swaps its chain slot. Single click
-    only moves the cursor (ClickSelectTable). Esc returns keyboard focus to
-    the chain node so ↑/↓ stepping works again.
+    Locally known models are listed (downloaded or not); Enter or double-click
+    picks one and the app hot-swaps its chain slot. A partial local pack marks
+    the missing remote models in the border hint; x opens the full Pack screen.
+    Single click only moves the cursor (ClickSelectTable). Esc returns
+    keyboard focus to the chain node so ↑/↓ stepping works again.
 
     REQ-038 多选下载/卸载（与 pack install 二级菜单同语义）：
     space 勾选/取消光标行（Pick 列 □/■）、a 全选/全不选、i 安装选中、
@@ -2296,8 +2297,7 @@ class PackFileTable(ClickSelectTable):
     def __init__(self) -> None:
         super().__init__(id="detail-pack-table", cursor_type="row")
         self.pack_kind = "amp"  # the chain slot this pack was opened from
-        self.add_column("Pick", key="pick", width=5)
-        self.add_column("Sel", key="sel", width=4)
+        self.add_column("St", key="sel", width=4)
         self.add_column("Arch", key="arch", width=6)
         # REQ-019：不再显示 TONE id 列
         self.add_column("File", key="file")
@@ -2609,6 +2609,7 @@ class DetailPane(Vertical):
         # row key ("m<model id>") → model; local_path → row key; last chain.
         self._pack_rows: dict[str, dict] = {}
         self._pack_path_to_key: dict[str, str] = {}
+        self._pack_status_markers: dict[str, str] = {}
         self._pack_chain: dict = {}
         # REQ-038 多选下载/卸载：勾选行 key 集合 + preset 引用二次确认标记。
         self._pack_picked: set[str] = set()
@@ -2860,6 +2861,7 @@ class DetailPane(Vertical):
         self._pack_tone = {}
         self._pack_rows = {}
         self._pack_path_to_key = {}
+        self._pack_status_markers = {}
         self._pack_picked = set()
         if getattr(self, "_pack_table", None) is not None:
             self._pack_table.clear()
@@ -3172,9 +3174,20 @@ class DetailPane(Vertical):
                 self._restore_pack_anchor(saved.get("anchor"))
                 return
             if tone and not (tone.get("models") or []):
-                # 远程/无本地模型的 tone：拉远程模型列表做 Selection 视图
-                # （未下载置灰、Enter 进安装二级页）。
-                self.show_remote_pack(tone)
+                if self._description_remote:
+                    # Remote tone: fetch the model list for Selection. Local
+                    # tones remain explicitly local until x opens Pack.
+                    self.show_remote_pack(tone)
+                else:
+                    self._enter_selection(
+                        tone=tone,
+                        slot_index=self._pack_slot_index,
+                        slot_status=self._pack_slot_status,
+                        slot_label=self._pack_slot_label,
+                        origin=(self._pack_origin
+                                if self._pack_slot_index is not None
+                                else "description"),
+                        focus_table=True, remote=False, allow_empty=True)
             else:
                 self._enter_selection(tone=tone,
                                       slot_index=self._pack_slot_index,
@@ -3190,8 +3203,9 @@ class DetailPane(Vertical):
 
     def _pack_view_hint(self, *, reserved_state_width: int = 0) -> str:
         """Selection 视图右下角常驻动作 token（REQ-024/025：状态靠左、
-        动作靠右）。i install / u uninstall 是 pack 视图的核心动作，必须
-        常驻；空间不足时按优先级缩短或省略低优先级动作（Esc 仍可返回）。"""
+        动作靠右）。i install / u uninstall / x expand 是 pack 视图的
+        核心动作，必须常驻；空间不足时按优先级缩短或省略低优先级动作
+        （Esc 仍可返回）。"""
         actions = [token for token, _action in self._border_hint_actions()]
         if not actions:
             return ""
@@ -3201,36 +3215,75 @@ class DetailPane(Vertical):
         if width <= 0:
             return " · ".join(actions)
 
-        # Keep the batch actions descriptive on the normal detail-pane width.
-        # The generic hint fitter compacts every token as a group, which would
-        # hide the meaning of i/u even though those are the primary Pack actions.
+        # Keep the primary Pack actions descriptive on the normal detail-pane
+        # width. The generic hint fitter compacts every token as a group, which
+        # would hide the meaning of i/u/x even though they are the core actions.
         inner = max(width - 6, 1)
         available = max(
             inner - reserved_state_width - (cell_len(" · ") if reserved_state_width else 0),
             1)
         if cell_len(" · ".join(actions)) <= available:
             return " · ".join(actions)
-        core = {"i install", "u uninstall"}
+        core = {"i install", "u uninstall", "x expand"}
+        if reserved_state_width and self._pack_unloaded_model_count():
+            priority = [
+                "x expand" if action == "x expand"
+                else action.split(None, 1)[0]
+                for action in actions if action in core
+            ]
+            if cell_len(" · ".join(priority)) <= available:
+                return " · ".join(priority)
+            if "x expand" in actions:
+                return "x expand"
+        core_actions = [action for action in actions if action in core]
+        if reserved_state_width and core_actions:
+            core_text = " · ".join(core_actions)
+            if cell_len(core_text) <= available:
+                return core_text
+            core_keys = " · ".join(
+                action.split(None, 1)[0] for action in core_actions)
+            if cell_len(core_keys) <= available:
+                return core_keys
         compacted = [
             action if action in core else action.split(None, 1)[0]
             for action in actions
         ]
         if cell_len(" · ".join(compacted)) <= available:
             return " · ".join(compacted)
-        core_actions = [action for action in actions if action in core]
         if cell_len(" · ".join(core_actions)) <= available:
             return " · ".join(core_actions)
         return " · ".join(actions)
 
+    def _pack_unloaded_model_count(self) -> int:
+        """Return remote model metadata not yet present in this Pack table."""
+        if getattr(self, "_pack_remote", False):
+            return 0
+        tone = self._pack_tone or self._current_tone or {}
+        count_keys = ("a2_models_count", "custom_models_count", "irs_count")
+        try:
+            if any(key in tone and tone.get(key) is not None
+                   for key in count_keys):
+                total = sum(int(tone.get(key) or 0) for key in count_keys)
+            else:
+                total = int(tone.get("models_count"))
+        except (TypeError, ValueError):
+            return 0
+        return max(total - len(self._pack_rows), 0) if total > 0 else 0
+
     def _update_pack_hint(self) -> None:
         """提示条更新（REQ-024/025：状态变化靠左、常驻动作靠右）。
 
-        左段状态 = 勾选计数 + 安装进度（有则显示），右段常驻 =
-        i install · u uninstall · x expand；同级视图由顶部 [/] tab 控制。
+        左段状态 = 未加载模型数 + 勾选计数 + 安装进度（有则显示），
+        右段常驻 = i install · u uninstall · x expand；同级视图由顶部
+        [/] tab 控制。
         """
         if self._view_mode != "selection":
             return
         left = []
+        unloaded = self._pack_unloaded_model_count()
+        if unloaded:
+            noun = "model" if unloaded == 1 else "models"
+            left.append(f"{unloaded} {noun} not loaded")
         n = len(self._pack_picked)
         if n:
             left.append(f"{n} sel")
@@ -3303,6 +3356,12 @@ class DetailPane(Vertical):
             return
         self._pack_toggle_key(rows[table.cursor_row].key.value)
 
+    def _pack_status_cell(self, key: str) -> str:
+        return status_cell(
+            key in self._pack_picked,
+            self._pack_status_markers.get(key, ""),
+        )
+
     def _pack_toggle_key(self, key: str) -> None:
         """勾选/取消指定行 key（space 键与 Pick 列鼠标点选共用）。"""
         if self._pack_busy is not None or key not in self._pack_rows:
@@ -3317,8 +3376,7 @@ class DetailPane(Vertical):
             self._pack_uninstall_target = ()
         try:
             self._pack_table.update_cell(
-                key, "pick",
-                "\\[x]" if key in self._pack_picked else "\\[ ]")
+                key, "sel", self._pack_status_cell(key))
         except Exception:
             pass
         self._update_pack_hint()
@@ -3339,8 +3397,7 @@ class DetailPane(Vertical):
         table = self._pack_table
         for key in keys:
             try:
-                table.update_cell(key, "pick",
-                                  "\\[x]" if key in self._pack_picked else "\\[ ]")
+                table.update_cell(key, "sel", self._pack_status_cell(key))
             except Exception:
                 pass
         self._update_pack_hint()
@@ -3643,8 +3700,7 @@ class DetailPane(Vertical):
         for row_key in self._pack_rows:
             try:
                 table.update_cell(
-                    row_key, "pick",
-                    "\\[x]" if row_key in valid_picks else "\\[ ]")
+                    row_key, "sel", self._pack_status_cell(row_key))
             except Exception:
                 pass
         # A table refresh can invalidate a preset-reference confirmation even
@@ -3954,8 +4010,8 @@ class DetailPane(Vertical):
         self._detail_preset_id = None
         self._detail_model = None
         self._set_pack_mode(True)
-        self._update_pack_hint()
         self._fill_pack_rows(models)
+        self._update_pack_hint()
         first = next(iter(self._pack_rows.values()), None)
         self._set_marquee(self._marquee_content(
             tone, first.get("id") if first else None))
@@ -3998,6 +4054,7 @@ class DetailPane(Vertical):
         table.clear()
         self._pack_rows = {}
         self._pack_path_to_key = {}
+        self._pack_status_markers = {}
         # 表重建 = 行集合变化：勾选态与卸载二次确认一并作废。
         self._pack_picked = set()
         self._pack_uninstall_confirmed = False
@@ -4014,6 +4071,7 @@ class DetailPane(Vertical):
             model_id = model.get("id")
             key = f"m{model_id}"
             self._pack_rows[key] = model
+            self._pack_status_markers[key] = ""
             local_path = model.get("local_path")
             filename = Path(local_path).name if local_path else (
                 model.get("name") or model.get("title") or "?")
@@ -4031,7 +4089,8 @@ class DetailPane(Vertical):
                 file_cell = (f"[dim]○ {_escape(filename)} "
                              f"[i](not downloaded)[/i][/dim]")
                 size_cell = "[dim]—[/]"
-            table.add_row("\\[ ]", "·", self._arch_tag(model.get("architecture"), colors),
+            table.add_row(self._pack_status_cell(key),
+                          self._arch_tag(model.get("architecture"), colors),
                           file_cell, size_cell, key=key)
 
     def show_slot_pack(self, tone: dict, models: list[dict], chain: dict,
@@ -4054,47 +4113,6 @@ class DetailPane(Vertical):
             slot_label=tone.get("gear") if tone else None,
             origin="slot",
             focus_table=focus_table)
-        if self._slot_pack_needs_remote_models(tone, models):
-            self._start_slot_pack_remote_load(int(tone["id"]))
-
-    @staticmethod
-    def _slot_pack_needs_remote_models(tone: dict,
-                                        models: list[dict]) -> bool:
-        """Detect a partial local pack from the server's model count.
-
-        ``library.get_tone`` only contains rows with a local file.  The
-        persisted ``models_count`` is the complete TONE3000 pack size, so a
-        smaller local set means the slot view needs a remote metadata merge.
-        Older/imported test rows without that count keep the synchronous local
-        fallback instead of causing an unsolicited network request.
-        """
-        if tone.get("id") is None or tone.get("models_count") is None:
-            return False
-        try:
-            total = int(tone["models_count"])
-        except (TypeError, ValueError):
-            return False
-        if total <= 0:
-            return False
-        downloaded = sum(1 for model in models if model.get("local_path"))
-        return downloaded < total
-
-    def _start_slot_pack_remote_load(self, tone_id: int) -> None:
-        """Hydrate a partial local Slot pack without taking table focus."""
-        if (not self._pack_mode or self._pack_slot_index is None
-                or int((self._pack_tone or {}).get("id") or 0) != tone_id):
-            return
-        # A Slot pack is still a local chain context, but its complete row set
-        # is remote-backed. This lets the existing install/uninstall paths
-        # operate on mixed downloaded and not-downloaded rows.
-        self._pack_remote = True
-        self._pack_loading = True
-        self._pack_error = False
-        self._pack_progress_status = "loading…"
-        self._update_pack_hint()
-        self.run_worker(
-            partial(self._fetch_remote_models, tone_id, self._view_generation),
-            name="remote-slot-pack", exclusive=True)
 
     def show_slot_empty(self, slot_index: int, *, target: bool = True) -> None:
         """Show an Empty Slot without retaining the previous pack context."""
@@ -4439,10 +4457,12 @@ class DetailPane(Vertical):
                 mark = "[bold $error]▷[/]"
                 ir_idx = index
             else:
-                mark = "[dim]·[/]"
+                mark = ""
+            self._pack_status_markers[key] = mark
             try:
-                if self._pack_table.get_cell(key, "sel") != mark:
-                    self._pack_table.update_cell(key, "sel", mark)
+                state = self._pack_status_cell(key)
+                if self._pack_table.get_cell(key, "sel") != state:
+                    self._pack_table.update_cell(key, "sel", state)
             except Exception:
                 pass
         if self._pack_slot_index is not None:

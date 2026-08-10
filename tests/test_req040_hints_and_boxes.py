@@ -263,7 +263,7 @@ def test_install_screen_box_mouse_toggle(monkeypatch):
 
 
 def test_local_table_box_style_and_mouse_toggle(monkeypatch, tmp_path):
-    """library LOCAL 表：Sel 列 [ ]/[x] + 鼠标点选（批量卸载场景）。"""
+    """library LOCAL 表：P 列 [ ]/[x] + 鼠标点选（批量卸载场景）。"""
     tone = {"id": 10, "title": "Plexi", "gear": "amp", "username": "alice",
             "downloads_count": 1}
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
@@ -278,15 +278,15 @@ def test_local_table_box_style_and_mouse_toggle(monkeypatch, tmp_path):
             await pilot.pause(0.3)
             table = app.query_one("#lib-table-local")
             assert str(table.get_cell("local:10", "pick")) == "\\[ ]"
-            assert table.columns["pick"].width == 5
-            # 单击 Sel 列 → 勾选
-            await pilot.click(table, offset=(3, 1))
+            assert table.columns["pick"].width == 4
+            # 单击 P 列 → 勾选
+            await pilot.click(table, offset=(1, 1))
             await pilot.pause(0.25)
             panel = app.query_one("LibraryPanel")
             assert panel._local_selected == {10}
             assert str(table.get_cell("local:10", "pick")) == "\\[x]"
             # 再点 → 取消
-            await pilot.click(table, offset=(3, 1))
+            await pilot.click(table, offset=(1, 1))
             await pilot.pause(0.25)
             assert panel._local_selected == set()
 

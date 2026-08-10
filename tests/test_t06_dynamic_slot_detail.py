@@ -7,6 +7,7 @@ from pathlib import Path
 from tui.app import GigBuddyApp
 from tui.install_screen import PackInstallScreen
 from tui.library_panel import RemoteToneSelected, ToneSelected
+from tui.modals import border_hint_label
 from tui.panels import ChainPanel, DetailPane
 from tui.chain_state import SlotStatus
 
@@ -87,13 +88,13 @@ def test_slot_focus_opens_slot_pack_and_tracks_three_states(monkeypatch, tmp_pat
             assert detail._pack_mode
             assert detail._pack_slot_index == 0
             assert detail._pack_table.get_cell("m101", "sel") == \
-                "[bold $success]▶[/]"
+                "\\[ ] [bold $success]▶[/]"
 
             await pilot.press("enter")
             await pilot.pause()
             assert panel.state.slot(0).status is SlotStatus.BYPASS
             assert detail._pack_table.get_cell("m101", "sel") == \
-                "[bold $error]▷[/]"
+                "\\[ ] [bold $error]▷[/]"
 
             await pilot.press("enter")
             await pilot.pause()
@@ -133,8 +134,11 @@ def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
                         lambda _path: [dict(local_model)])
     monkeypatch.setattr("tui.app.library.get_tone", lambda _tone_id: tone)
     monkeypatch.setattr("tui.panels.library.get_tone", lambda _tone_id: tone)
+    remote_calls = []
+
     def slow_models(_tone_id, a2_only=False):
-        time.sleep(0.15)
+        remote_calls.append(_tone_id)
+        time.sleep(0.5)
         return remote_models
 
     monkeypatch.setattr("tui.panels.tone3000.models", slow_models)
@@ -154,27 +158,26 @@ def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
             panel.slot_widgets[0].focus()
             detail = app.query_one(DetailPane)
             for _ in range(20):
-                if detail._pack_remote:
+                if detail._pack_mode:
+                    break
+                await pilot.pause(0.05)
+            assert detail._pack_mode
+            assert not detail._pack_remote
+            assert remote_calls == []
+            assert "1 model not loaded" in border_hint_label(detail)
+            assert "x expand" in border_hint_label(detail)
+
+            # Explicitly opening the remote-backed view keeps the existing
+            # focus-restoration regression covered without making Slot entry
+            # perform that request implicitly.
+            detail.show_remote_pack(tone)
+            for _ in range(20):
+                if "m102" in detail._pack_rows and not detail._pack_loading:
                     break
                 await pilot.pause(0.05)
             assert detail._pack_remote
             detail._pack_table.focus()
             await pilot.pause()
-
-            # Textual may move focus to the chain target while a focused table
-            # is cleared and rebuilt. The remote refresh must restore the
-            # user's Pack focus after that transient fallback.
-            clear = detail._pack_table.clear
-
-            def clear_and_fallback(*args, **kwargs):
-                result = clear(*args, **kwargs)
-                panel.slot_widgets[0].focus()
-                return result
-
-            monkeypatch.setattr(detail._pack_table, "clear",
-                                clear_and_fallback)
-            await pilot.pause(0.4)
-            assert app.focused is detail._pack_table
             assert [row.key.value for row in detail._pack_table.ordered_rows] == [
                 "m101", "m102"
             ]
@@ -270,7 +273,8 @@ def test_slot_pack_loads_by_index_and_esc_restores_slot_focus(
             assert panel.state.slot(0).path == second
             assert current["chain"]["slots"][0]["path"] == second
             assert detail._pack_slot_index == 0
-            assert table.get_cell("m102", "sel") == "[bold $success]▶[/]"
+            assert table.get_cell("m102", "sel") == \
+                "\\[ ] [bold $success]▶[/]"
             assert app.focused is table
 
             await pilot.press("escape")
@@ -313,7 +317,7 @@ def test_library_pack_uses_existing_target_without_changing_source(
             assert detail._pack_mode
             assert detail._pack_origin == "description"
             assert detail._pack_table.get_cell("m102", "sel") == \
-                "[bold $success]▶[/]"
+                "\\[ ] [bold $success]▶[/]"
             assert panel.state.target_index == 0
             assert first != second
 
@@ -406,6 +410,83 @@ def test_library_pack_x_expands_to_large_pack_screen(monkeypatch, tmp_path):
             await pilot.pause()
             assert isinstance(app.screen, PackInstallScreen)
             assert app.screen._tone["id"] == tone["id"]
+            assert [model["id"] for model in app.screen._models] == [101, 102]
+
+    run(scenario())
+
+
+def test_local_pack_marks_unloaded_models_without_fetching(monkeypatch, tmp_path):
+    first = str(tmp_path / "first.nam")
+    local_model = {
+        "id": 101, "tone_id": 10, "name": "first.nam",
+        "local_path": first, "architecture": "SlimmableContainer",
+    }
+    tone = {
+        "id": 10, "title": "Local Tone", "gear": "amp",
+        "username": "creator", "models_count": 2,
+        "models": [local_model],
+    }
+    remote_models = [
+        dict(local_model),
+        {"id": 102, "tone_id": 10, "name": "second.nam",
+         "architecture": "SlimmableContainer"},
+    ]
+    remote_calls = []
+    monkeypatch.setattr(
+        "tui.panels.tone3000.models",
+        lambda tone_id, a2_only=False: remote_calls.append(tone_id) or remote_models,
+    )
+    monkeypatch.setattr(
+        "tui.install_screen.tone3000.models",
+        lambda _tone_id, a2_only=False: remote_models,
+    )
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(DetailPane)
+            pane.show_library_pack(tone)
+            await pilot.pause()
+
+            assert remote_calls == []
+            label = border_hint_label(pane)
+            assert "1 model not loaded" in label
+            assert "x expand" in label
+
+            pane._pack_table.focus()
+            await pilot.press("x")
+            await pilot.pause()
+            assert isinstance(app.screen, PackInstallScreen)
+
+    run(scenario())
+
+
+def test_empty_local_description_pack_does_not_fetch(monkeypatch):
+    tone = {
+        "id": 10, "title": "Empty Local Metadata", "gear": "amp",
+        "username": "creator", "models_count": 2, "models": [],
+    }
+    remote_calls = []
+    monkeypatch.setattr(
+        "tui.panels.tone3000.models",
+        lambda tone_id, a2_only=False: remote_calls.append(tone_id) or [],
+    )
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(DetailPane)
+            pane.show(tone)
+            await pilot.pause()
+            pane.action_view_selection()
+            await pilot.pause()
+
+            assert pane._view_mode == "selection"
+            assert pane._pack_mode
+            assert remote_calls == []
+            assert "2 models not loaded" in border_hint_label(pane)
 
     run(scenario())
 

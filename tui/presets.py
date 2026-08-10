@@ -20,7 +20,7 @@ from textual.message import Message
 from textual.widgets import DataTable, Input, Select, Static
 
 from .marquee import MarqueeBar
-from .metadata import preset_slot_label, signed_fixed
+from .metadata import preset_slot_label, signed_fixed, status_cell
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      border_hint_hit, hint_span, set_border_hint_hover)
@@ -72,6 +72,7 @@ def _preset_slot_summary(chain: dict | None) -> str:
 
 PRESET_SORT_CHOICES = [("Updated", "updated"), ("Name", "name")]
 _PRESET_SEARCH_FIELDS = ("name", "note", "file", "id")
+ACTIVE_MARK = "[bold $success]▶[/]"
 
 
 def _preset_search_tokens(query: str) -> list[tuple[str, str]]:
@@ -287,7 +288,7 @@ class PresetPanel(Vertical):
             id="preset-search-bar",
         )
         table = PresetTable(id="preset-table", cursor_type="row")
-        table.add_column("Sel", key="pick", width=5)
+        table.add_column("St", key="pick", width=4)
         table.add_column("Preset", key="name")
         table.add_column("Slots", key="slots")
         table.add_column("NOTE", key="note")
@@ -462,13 +463,15 @@ class PresetPanel(Vertical):
                 is_active = p["name"] == active
                 dirty = is_active and library.preset_is_dirty(active)
                 table.add_row(
-                    "\\[x]" if key in self._selected else "\\[ ]",
+                    status_cell(key in self._selected,
+                                ACTIVE_MARK if is_active else ""),
                     f"{p['name']}{' *' if dirty else ''}",
                     _preset_slot_summary(ch),
                     p.get("note") or "",
                     key=key)
             if not table.rows:
-                table.add_row("", "(no matching presets)", "", "", key="__status__")
+                table.add_row("", "(no matching presets)", "", "",
+                              key="__status__")
         if table.rows and focused_key in visible_keys:
             focused_row = next(
                 index for index, row in enumerate(table.ordered_rows)
@@ -634,7 +637,8 @@ class PresetPanel(Vertical):
             is_active = preset["name"] == active
             dirty = is_active and library.preset_is_dirty(active)
             desired[key] = (
-                "\\[x]" if key in self._selected else "\\[ ]",
+                status_cell(key in self._selected,
+                            ACTIVE_MARK if is_active else ""),
                 f"{preset['name']}{' *' if dirty else ''}",
                 _preset_slot_summary(preset.get("chain")),
                 preset.get("note") or "",
@@ -660,7 +664,8 @@ class PresetPanel(Vertical):
 
         if not desired_order:
             if "__status__" not in table.rows:
-                table.add_row("", "(no matching presets)", "", "", key="__status__")
+                table.add_row("", "(no matching presets)", "", "",
+                              key="__status__")
             return
 
         try:
@@ -818,7 +823,10 @@ class PresetPanel(Vertical):
         else:
             self._selected.add(key)
         table.update_cell(
-            key, "pick", "\\[x]" if key in self._selected else "\\[ ]")
+            key, "pick", status_cell(
+                key in self._selected,
+                ACTIVE_MARK if self._active == self._preset_name_for_key(key)
+                else ""))
         self._update_selection_status()
 
     def action_toggle_all(self) -> None:
@@ -830,14 +838,23 @@ class PresetPanel(Vertical):
         }
         self._selected = set() if keys and keys <= self._selected else keys
         for key in keys:
-            table.update_cell(key, "pick", "\\[x]" if key in self._selected else "\\[ ]")
+            table.update_cell(
+                key, "pick", status_cell(
+                    key in self._selected,
+                    ACTIVE_MARK if self._active == self._preset_name_for_key(key)
+                    else ""))
         self._update_selection_status()
 
     def action_clear_selected(self) -> None:
         table = self.query_one("#preset-table", DataTable)
         for key in self._selected:
             try:
-                table.update_cell(key, "pick", "\\[ ]")
+                table.update_cell(
+                    key, "pick", status_cell(
+                        False,
+                        ACTIVE_MARK
+                        if self._active == self._preset_name_for_key(key)
+                        else ""))
             except Exception:
                 pass
         self._selected.clear()

@@ -48,6 +48,12 @@ def signed_fixed(value, digits: int = 2, fallback: str = "?") -> str:
         return fallback
 
 
+def status_cell(selected: bool, marker: str = "") -> str:
+    """Render the compact combined selection/active state cell."""
+    box = "\\[x]" if selected else "\\[ ]"
+    return f"{box} {marker}" if marker else box
+
+
 def architecture_label(architecture) -> str:
     """Normalize legacy and canonical TONE3000 architecture tokens."""
     value = str(architecture or "").strip()

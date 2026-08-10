@@ -32,7 +32,7 @@ import library  # noqa: E402
 from .install_screen import PackInstallScreen  # noqa: E402
 from .marquee import (MarqueeBar, ellipsis_window, marquee_window,
                       resolve_rich_style)  # noqa: E402
-from .metadata import gear_markup, theme_colors, tone_format  # noqa: E402
+from .metadata import gear_markup, status_cell, theme_colors, tone_format  # noqa: E402
 from .modals import (ClickSelectTable, border_hint_action_token,
                      border_hint_hit, hint_span, set_border_hint_hover,
                      refresh_border_hint_layout,
@@ -434,6 +434,7 @@ _TONE_CACHE_MAX = 20
 # Keep the SearchBar's standard and compact tracks deterministic at the
 # terminal widths used by the TUI; content never participates in track sizing.
 FILTER_BAR_COMPACT_WIDTH = 118
+ACTIVE_MARK = "[bold $success]▶[/]"
 
 
 class LibraryContentTabs(TabbedContent):
@@ -469,7 +470,7 @@ class LibraryPanel(Vertical):
                     selectable: bool = False) -> LibraryTable:
         table = LibraryTable(id=table_id, cursor_type="row")
         if selectable:
-            table.add_column("Sel", key="pick", width=5)
+            table.add_column("St", key="pick", width=4)
         if rank:
             table.add_column("Rank", key="rank", width=5)
         # 54 = 表格可用宽 - 2 侧 padding：单元格内容（含 marker）不超过它，
@@ -608,6 +609,8 @@ class LibraryPanel(Vertical):
         self._creator_error = False
         self._creator_auth_required = False
         self._local_selected: set[int] = set()
+        self._active_slot_path: str | None = None
+        self._active_tone_id: int | None = None
         self._mutation_anchor: ViewAnchor | None = None
         self._screen_generation = 1
         self._mutation_request_id = 0
@@ -1439,6 +1442,60 @@ class LibraryPanel(Vertical):
 
     # ---- local tab --------------------------------------------------------
 
+    def _active_tone_for_path(self, path: str | None) -> int | None:
+        """Resolve one focused local model to its owning tone."""
+        if not path:
+            return None
+        try:
+            models = library.local_models_by_tone(path) or []
+        except Exception:
+            return None
+        for model in models:
+            try:
+                tone_id = model.get("tone_id")
+                if tone_id is not None:
+                    return int(tone_id)
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return None
+
+    def set_active_slot_path(self, path: str | None) -> None:
+        """Update the Local active marker without moving its table cursor."""
+        if path == getattr(self, "_active_slot_path", None):
+            return
+        old_tone_id = getattr(self, "_active_tone_id", None)
+        self._active_slot_path = path
+        self._active_tone_id = self._active_tone_for_path(path)
+        if old_tone_id == self._active_tone_id:
+            return
+        try:
+            table = self.query_one("#lib-table-local", DataTable)
+        except Exception:
+            return
+        for tone_id in {old_tone_id, self._active_tone_id}:
+            if tone_id is None:
+                continue
+            try:
+                table.update_cell(
+                    f"local:{tone_id}", "pick",
+                    self._local_status_cell(tone_id),
+                    update_width=False,
+                )
+            except Exception:
+                pass
+
+    def sync_active_slot(self) -> None:
+        """Read the focused Slot identity and refresh only its Local marker."""
+        try:
+            chain_panel = self.app.query_one("ChainPanel")
+            target_index = chain_panel.state.target_index
+            snapshot = (chain_panel.state.slot(target_index)
+                        if target_index is not None else None)
+            path = (snapshot.path or snapshot.candidate) if snapshot else None
+        except Exception:
+            path = None
+        self.set_active_slot_path(path)
+
     def refresh_rows(self, *, force: bool = False, publish: bool = True,
                      preserve_pages: bool = False) -> None:
         """Reload local rows from the DB (called on tick so external imports appear).
@@ -1446,6 +1503,7 @@ class LibraryPanel(Vertical):
         Skips repaint unless the DB or local install state changed, so the
         user's browsing position and the TONE3000 tab are not clobbered.
         """
+        self.sync_active_slot()
         # _mode can lag behind inside tab-activation handlers; _active_pane is
         # set first and is the authoritative "which tab is showing" signal.
         if (not force
@@ -1500,9 +1558,9 @@ class LibraryPanel(Vertical):
                 loaded_page, (len(tones) - 1) // LOCAL_PAGE_SIZE)
         self._local_selected.intersection_update(all_local_ids)
         self._update_local_selection_status()
-        for t in tones:
-            checked = "\\[x]" if t["id"] in self._local_selected else "\\[ ]"
-            table.add_row(checked, *self._row_cells(t, table), key=f"local:{t['id']}")
+        for tone in tones:
+            table.add_row(*self._local_row_cells(tone, table),
+                          key=f"local:{tone['id']}")
         self._sync_type_search_options(table)
         if not tones:
             self._status_row(
@@ -1528,7 +1586,7 @@ class LibraryPanel(Vertical):
         columns = ("pick", "title", "type", "author", "downloads", "favorites",
                    "uploaded", "format", "arch", "files")
         cells = [
-            "\\[x]" if int(tone["id"]) in self._local_selected else "\\[ ]",
+            self._local_status_cell(int(tone["id"])),
             *self._row_cells(tone),
         ]
         for column, value in zip(columns, cells):
@@ -1658,8 +1716,7 @@ class LibraryPanel(Vertical):
                 if has_row(row_key):
                     self._update_local_row(table, tone)
                 else:
-                    checked = "\\[x]" if tone_id in self._local_selected else "\\[ ]"
-                    table.add_row(checked, *self._row_cells(tone), key=row_key)
+                    table.add_row(*self._local_row_cells(tone), key=row_key)
             else:
                 if has_row(row_key):
                     table.remove_row(row_key)
@@ -1835,8 +1892,8 @@ class LibraryPanel(Vertical):
             return
         table = self.query_one("#lib-table-local", DataTable)
         for tone in tones:
-            checked = "\\[x]" if tone["id"] in self._local_selected else "\\[ ]"
-            table.add_row(checked, *self._row_cells(tone), key=f"local:{tone['id']}")
+            table.add_row(*self._local_row_cells(tone),
+                          key=f"local:{tone['id']}")
         self._sync_type_search_options(table)
         self._local_page = page
         self._local_has_more = len(tones) == LOCAL_PAGE_SIZE
@@ -1884,7 +1941,7 @@ class LibraryPanel(Vertical):
         else:
             self._local_selected.add(tone_id)
         self.query_one("#lib-table-local", DataTable).update_cell(
-            f"local:{tone_id}", "pick", "\\[x]" if tone_id in self._local_selected else "\\[ ]")
+            f"local:{tone_id}", "pick", self._local_status_cell(tone_id))
         self._update_local_selection_status()
 
     def toggle_all_local(self) -> None:
@@ -1895,7 +1952,7 @@ class LibraryPanel(Vertical):
         self._local_selected = set() if visible and visible <= self._local_selected else visible
         for tone_id in visible:
             table.update_cell(f"local:{tone_id}", "pick",
-                              "\\[x]" if tone_id in self._local_selected else "\\[ ]")
+                              self._local_status_cell(tone_id))
         self._update_local_selection_status()
 
     def clear_local_selection(self) -> None:
@@ -1905,7 +1962,8 @@ class LibraryPanel(Vertical):
             table = self.query_one("#lib-table-local", DataTable)
             for tone_id in selected:
                 try:
-                    table.update_cell(f"local:{tone_id}", "pick", "\\[ ]")
+                    table.update_cell(f"local:{tone_id}", "pick",
+                                      self._local_status_cell(tone_id))
                 except Exception:
                     pass
         except Exception:
@@ -1926,7 +1984,8 @@ class LibraryPanel(Vertical):
         try:
             table = self.query_one("#lib-table-local", DataTable)
             for tone_id in affected:
-                table.update_cell(f"local:{tone_id}", "pick", "\\[ ]")
+                table.update_cell(f"local:{tone_id}", "pick",
+                                  self._local_status_cell(tone_id))
         except Exception:
             pass
         if getattr(self, "_active_pane", None) == "pane-local":
@@ -2647,6 +2706,25 @@ class LibraryPanel(Vertical):
         await self._show_top_creators(append=True)
 
     # ---- shared row rendering ---------------------------------------------
+
+    def _local_status_cell(self, tone_id: int) -> str:
+        return status_cell(
+            tone_id in self._local_selected,
+            ACTIVE_MARK if tone_id == self._active_tone_id else "",
+        )
+
+    def _local_row_cells(self, tone: dict,
+                         table: DataTable | None = None) -> list[str]:
+        tone_id = tone.get("id")
+        try:
+            tone_id = int(tone_id)
+        except (TypeError, ValueError):
+            tone_id = None
+        return [
+            self._local_status_cell(tone_id) if tone_id is not None
+            else status_cell(False),
+            *self._row_cells(tone, table),
+        ]
 
     def _row_cells(self, t: dict, table: DataTable | None = None) -> list[str]:
         title = str(t.get("title") or "")
