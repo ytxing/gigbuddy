@@ -82,7 +82,7 @@ dependency), fully MIT core stack.
   cycle through orange tolex, tweed brass, diamond noir, blackface silver,
   British green, and surf cream.
 
-![Browsing TONE3000 — live search with trending results, sort and type filters](docs/screenshots/tone3000-browse.png)
+![GigBuddy main workspace — browse TONE3000 tones, build NAM and IR chains, manage presets, and monitor levels](docs/screenshots/gigbuddy-workspace.png)
 
 See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md) for a closer look at the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
 

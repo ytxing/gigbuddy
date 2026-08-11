@@ -80,7 +80,7 @@ MIT 许可。
 orange-tolex、tweed-brass、diamond-noir、blackface-silver、
 british-green、surf-cream 之间循环。
 
-![浏览 TONE3000 — 实时搜索、热度排序、类型过滤](docs/screenshots/tone3000-browse.png)
+![GigBuddy 主工作台 — 浏览 TONE3000 音色、搭建 NAM 和 IR 音色链、管理 preset，并实时监控电平](docs/screenshots/gigbuddy-workspace.png)
 
 如需查看 Library、Tone Chain、Tone Detail、Presets 和 Audio / Level 面板的
 逐项说明，请参阅 [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md)。
