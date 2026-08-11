@@ -11,18 +11,17 @@
 
 *Find a sound. Shape it. Play it now.*
 
-*v1.1.3 · 2026-08-10*
+*v1.1.4 · 2026-08-11*
 
 One line from the terminal — downloads, installs, and initializes everything:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
 
-See the [panel-by-panel guide](docs/gigbuddy-panels.md) for a closer look at
-the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
+See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md) for a closer look at the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
 
 GigBuddy is a realtime [NAM (Neural Amp Modeler)](https://www.tone3000.com/guides/nam-a2-the-complete-guide)
 tone workspace with full **A2 architecture** support — the most faithful
@@ -117,6 +116,11 @@ GigBuddy turns the original tone-chain console into a complete tone workbench:
   Slot on and off never clicks or dips the signal, even on a sustained note.
 - **A workspace that stays understandable:** focus, selection, installation,
   preset editing, and destructive actions remain in the pane where they belong.
+- **A quieter runtime:** the Audio / Level view reports unified TUI and managed
+  engine CPU usage, while polling, catalog refreshes, and unchanged redraws are
+  kept off the hot path.
+- **Model changes start clean:** replacing a model restores neutral Slot input
+  and output trims; bypass and restore preserve the existing model's trims.
 
 ## Start playing
 
@@ -130,7 +134,7 @@ skip the prompt. To remove a user-level install, run the matching uninstall
 script:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/uninstall.sh | bash
 ```
 
 The standalone uninstaller removes the local install, generated runtime files,
@@ -139,7 +143,7 @@ the runtime while keeping downloaded tones and local data; the login session is
 still removed:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 From a fresh checkout:
@@ -365,7 +369,7 @@ integration.
 
 ## Dependencies
 
-Pinned versions (v1.1.3). Update `requirements.txt` and the NeuralAudio commit
+Pinned versions (v1.1.4). Update `requirements.txt` and the NeuralAudio commit
 in `install.sh` together when bumping.
 
 **Python runtime** (`requirements.txt`):

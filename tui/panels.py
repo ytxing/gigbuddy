@@ -316,9 +316,22 @@ class InputNodeWidget(NodeWidget):
         self.set_label(live.short_name(path))
 
     def set_playback(self, state: str, pos_sec: float, loop: bool) -> None:
+        old_visual = (
+            self.play_state,
+            self.play_loop,
+            f"{self.play_pos:.0f}" if self.play_state != live.PLAY_STOPPED
+            else None,
+        )
         self.play_state = state
         self.play_pos = pos_sec
         self.play_loop = loop
+        new_visual = (
+            state,
+            loop,
+            f"{pos_sec:.0f}" if state != live.PLAY_STOPPED else None,
+        )
+        if old_visual == new_visual:
+            return
         self._update_border()   # 播放灯（边框）跟随状态
         self.refresh()
 
@@ -2325,7 +2338,7 @@ class ChainPanel(Vertical):
         set_border_hint_hover(self, None)
 
     def update_playback(self, state: str, pos_sec: float) -> None:
-        """0.1s levels tick: engine playback state reflected on the INPUT node
+        """0.2s levels tick: engine playback state reflected on the INPUT node
         (the in-row PLAY block redraws itself from play_state)."""
         if hasattr(self, "input_node") and self.input_node.is_file:
             self.input_node.set_playback(state, pos_sec, self.input_node.play_loop)
@@ -2482,7 +2495,7 @@ class ChainPanel(Vertical):
         """Node readout: tone title (line 1) + model filename (line 2).
 
         External files (not in the library DB) fall back to the filename only.
-        Titles are cached by path — the 0.3s tick must not hit SQLite twice
+        Titles are cached by path — the 0.2s tick must not hit SQLite twice
         per refresh for an unchanged chain.
         """
         if not path:
@@ -4727,7 +4740,7 @@ class DetailPane(Vertical):
         # 选择=聚焦统一：链上激活槽位变更时，pack 表光标同步到该行——DataTable
         # 光标移动自带 scroll-into-view，视口以聚焦（光标）行为锚，▶ 行自然
         # 可见；▶ 三角仅作信息标记，不再参与视口铆定。仅当槽位路径真正变化
-        # 才移动光标：0.3s tick 不能在用户浏览时把光标拉回（浏览中的光标位置
+        # 才移动光标：0.2s tick 不能在用户浏览时把光标拉回（浏览中的光标位置
         # 就是用户自己的选择意向）。model 与 ir 同时变化时以 model 行为准。
         sync_index = None
         if model_idx is not None and active_path != self._pack_synced_model:
@@ -5000,15 +5013,15 @@ class DetailPane(Vertical):
 class MeterBar(Static):
     """Bottom level meter: color-graded (green/yellow/red) + peak-hold marker.
 
-    Refresh 0.3s from the engine level file; peaks hold ~1s then follow.
+    Refresh 0.2s from the engine level file; peaks hold ~1s then follow.
     """
 
     ALLOW_SELECT = False
 
     # ``tui.live.read_levels`` carries playback metadata after the input/output
     # levels. The meter only renders the first two values, but accepting the
-    # full protocol tuple keeps the 0.3s refresh tick compatible with the
-    # engine's current level file.
+    # full protocol tuple keeps the refresh tick compatible with the engine's
+    # current level file.
     levels: reactive[tuple] = reactive((0.0, 0.0), recompose=False)
     HOLD_S = 1.0
 
@@ -5017,6 +5030,34 @@ class MeterBar(Static):
         self.border_title = "LEVEL"
         self._pk_in = self._pk_out = 0.0
         self._pk_in_at = self._pk_out_at = 0.0
+        self._last_render_key: tuple | None = None
+
+    def _display_width(self) -> int:
+        return max(8, min(40, (self.size.width or 100) - 18))
+
+    @classmethod
+    def _display_key(cls, value: float, peak: float, width: int) -> tuple:
+        db = cls._db(value)
+        peak_db = cls._db(peak)
+        filled = int(max(0.0, min(1.0, (db + 60.0) / 60.0)) * width)
+        peak_cell = int(max(0.0, min(1.0, (peak_db + 60.0) / 60.0)) * width)
+        return (
+            f"{db: 6.1f}",
+            filled,
+            peak_cell if peak >= 1e-5 else None,
+        )
+
+    def _render_key(self, levels: tuple) -> tuple:
+        width = self._display_width()
+        return (
+            width,
+            self._display_key(levels[0], self._pk_in, width),
+            self._display_key(levels[1], self._pk_out, width),
+        )
+
+    def on_resize(self) -> None:
+        self._last_render_key = None
+        self.refresh()
 
     def watch_levels(self, levels: tuple) -> None:
         import time
@@ -5025,8 +5066,16 @@ class MeterBar(Static):
         now = time.monotonic()
         if inl > self._pk_in:
             self._pk_in, self._pk_in_at = inl, now
+        elif now - self._pk_in_at > self.HOLD_S:
+            self._pk_in = inl
         if outl > self._pk_out:
             self._pk_out, self._pk_out_at = outl, now
+        elif now - self._pk_out_at > self.HOLD_S:
+            self._pk_out = outl
+        render_key = self._render_key(levels)
+        if render_key == self._last_render_key:
+            return
+        self._last_render_key = render_key
         self.refresh()
 
     @staticmethod
@@ -5068,7 +5117,7 @@ class MeterBar(Static):
             self._pk_in = inl
         if now - self._pk_out_at > self.HOLD_S:
             self._pk_out = outl
-        width = max(8, min(40, (self.size.width or 100) - 18))
+        width = self._display_width()
         return (
             f"[b]IN [/] {self._bar(inl, self._pk_in, width)} {self._db(inl): 6.1f} dBFS\n"
             f"[b]OUT[/] {self._bar(outl, self._pk_out, width)} "
@@ -5262,16 +5311,36 @@ class InterfaceBar(Horizontal):
     def __init__(self) -> None:
         super().__init__()
         self.border_title = "LEVEL"
+        self._muted: bool | None = None
+        self._cpu_text: str | None = None
+        self._runtime_text: str | None = None
 
     def compose(self) -> ComposeResult:
         yield MeterBar()
+        self.cpu = Static("CPU  --.-%", id="cpu-status")
+        yield self.cpu
         self.runtime = Static("", id="runtime-status")
         yield self.runtime
         yield AudioActionButton("AUDIO SETTINGS", "settings", "audio-settings")
         self.mute = AudioActionButton("MUTE", "mute", "audio-mute")
         yield self.mute
 
+    def set_cpu_usage(self, percent: float | None) -> None:
+        """Show TUI plus the managed realtime engine CPU."""
+        if percent is None:
+            return
+        # Keep one blank tens place for single-digit values; spaces preserve
+        # the width without rendering misleading zero padding such as 08.9%.
+        text = f"CPU {max(0.0, percent):4.1f}%"
+        if self._cpu_text == text:
+            return
+        self._cpu_text = text
+        self.cpu.update(text)
+
     def set_muted(self, muted: bool) -> None:
+        if self._muted == muted:
+            return
+        self._muted = muted
         self.mute.set_classes("audio-action muted" if muted else "audio-action")
         self.mute.update("MUTED" if muted else "MUTE")
 
@@ -5287,6 +5356,9 @@ class InterfaceBar(Horizontal):
             text = "APPLIED"
         else:
             text = "PENDING"
+        if self._runtime_text == text:
+            return
+        self._runtime_text = text
         self.runtime.update(text)
 
 

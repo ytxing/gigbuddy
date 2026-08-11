@@ -408,6 +408,15 @@ def chain_file_fingerprint() -> str | None:
     return _file_fingerprint(_chain_path())
 
 
+def chain_change_token() -> tuple[int, int, int]:
+    """Return cheap file signals for polling an externally edited chain."""
+    try:
+        stat = _chain_path().stat()
+    except OSError:
+        return (0, 0, 0)
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def level_file_fingerprint() -> str | None:
     """Return the current runtime report fingerprint for commit waits."""
     return _file_fingerprint(LEVEL_FILE)
@@ -549,14 +558,72 @@ def last_chain_write_fingerprint() -> str | None:
     return _last_chain_write_fingerprint
 
 
-def read_levels() -> tuple[float, float, str, float]:
-    """Read engine levels (in, out, play_state, play_pos_sec); 0/stopped on missing/broken file"""
+def _read_level_payload() -> dict | None:
     try:
-        d = json.loads(LEVEL_FILE.read_text())
-        return (float(d.get("in", 0.0)), float(d.get("out", 0.0)),
-                d.get("play_state", PLAY_STOPPED), float(d.get("play_pos", 0.0)))
+        payload = json.loads(LEVEL_FILE.read_text())
     except Exception:
-        return 0.0, 0.0, PLAY_STOPPED, 0.0
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _runtime_report_from_payload(payload: dict | None) -> dict[str, object]:
+    """Normalize runtime metadata from an already-read level payload."""
+    if not isinstance(payload, dict):
+        return {
+            "revision": None,
+            "status": "unknown",
+            "transaction_id": None,
+            "session_id": None,
+            "ack_seq": None,
+        }
+    revision = payload.get("runtime_revision")
+    if (isinstance(revision, bool)
+            or not isinstance(revision, int) or revision < 0):
+        revision = None
+    status = payload.get("runtime_status")
+    if status not in {"applied", "rejected", "unknown"}:
+        status = "unknown"
+    transaction_id = payload.get("runtime_transaction_id")
+    if not isinstance(transaction_id, str) or not transaction_id:
+        transaction_id = None
+    session_id = payload.get("runtime_session_id")
+    if not isinstance(session_id, str) or not session_id:
+        session_id = None
+    ack_seq = payload.get("runtime_ack_seq")
+    if (isinstance(ack_seq, bool)
+            or not isinstance(ack_seq, int) or ack_seq < 0):
+        ack_seq = None
+    return {
+        "revision": revision,
+        "status": status,
+        "transaction_id": transaction_id,
+        "session_id": session_id,
+        "ack_seq": ack_seq,
+    }
+
+
+def read_level_snapshot() -> tuple[tuple[float, float, str, float],
+                                      tuple[int | None, str]]:
+    """Read levels and runtime status from one level-file snapshot."""
+    payload = _read_level_payload()
+    if payload is None:
+        return ((0.0, 0.0, PLAY_STOPPED, 0.0), (None, "unknown"))
+    try:
+        levels = (
+            float(payload.get("in", 0.0)),
+            float(payload.get("out", 0.0)),
+            payload.get("play_state", PLAY_STOPPED),
+            float(payload.get("play_pos", 0.0)),
+        )
+    except Exception:
+        levels = (0.0, 0.0, PLAY_STOPPED, 0.0)
+    report = _runtime_report_from_payload(payload)
+    return levels, (report["revision"], report["status"])
+
+
+def read_levels() -> tuple[float, float, str, float]:
+    """Read engine levels (in, out, play_state, play_pos_sec)."""
+    return read_level_snapshot()[0]
 
 
 def read_runtime_status() -> tuple[int | None, str]:
@@ -566,7 +633,7 @@ def read_runtime_status() -> tuple[int | None, str]:
     fields.  Treat that as an explicit unknown state instead of claiming that
     the file revision reached the DSP runtime.
     """
-    report = read_runtime_report()
+    report = _runtime_report_from_payload(_read_level_payload())
     return report["revision"], report["status"]
 
 

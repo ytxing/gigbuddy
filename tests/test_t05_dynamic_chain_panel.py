@@ -224,6 +224,15 @@ def _patch_managed_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr("tui.app._ManagedChainAdapter", SlowAdapter)
 
 
+async def _wait_for_slots(pilot, panel, count=2):
+    """Wait for the first external chain refresh before indexing its slots."""
+    for _ in range(20):
+        if len(panel.state.slots) >= count:
+            return
+        await pilot.pause(0.05)
+    raise AssertionError(f"expected at least {count} slots")
+
+
 def test_managed_move_does_not_block_ui_and_publishes_after_worker(
         monkeypatch, tmp_path):
     from tui.app import GigBuddyApp
@@ -262,8 +271,8 @@ def test_managed_calibration_eventually_updates_slot_output(monkeypatch,
         app = GigBuddyApp(spawn_engine=False)
         app._managed_engine_active = lambda: True
         async with app.run_test(size=(140, 40)) as pilot:
-            await pilot.pause(0.1)
             panel = app.query_one(ChainPanel)
+            await _wait_for_slots(pilot, panel)
             path = panel.state.slot(1).path
             app._calibration_generation = 1
             app._apply_slot_calibration(1, 1, path, -5.875)
@@ -282,8 +291,8 @@ def test_calibration_notice_explains_backend_clamp(monkeypatch, tmp_path):
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
         async with app.run_test(size=(140, 40)) as pilot:
-            await pilot.pause(0.1)
             panel = app.query_one(ChainPanel)
+            await _wait_for_slots(pilot, panel)
             path = panel.state.slot(1).path
             notes = []
 

@@ -722,7 +722,7 @@ def test_cli_reports_the_frozen_release_version(capsys):
         library.main(["--version"])
 
     assert exc_info.value.code == 0
-    assert capsys.readouterr().out.strip() == "gigbuddy 1.1.0"
+    assert capsys.readouterr().out.strip() == "gigbuddy 1.1.4"
 
 
 def test_cli_search_json(capsys, monkeypatch):

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.4 - 2026-08-11
+
+### Added
+
+- Added a panel-by-panel guide covering Library, Tone Chain, Tone Detail,
+  Presets, and Audio / Level views.
+- Added a unified CPU readout for the TUI and its managed realtime engine.
+
+### Fixed
+
+- Replacing a model resets its Slot input and output trims to neutral defaults,
+  while bypass and restore keep the existing model's trims.
+- Reduced TUI polling and redraw work by reusing one level/runtime snapshot,
+  checking the chain only when its file token changes, throttling catalog
+  refreshes, and skipping unchanged visual updates.
+- Prevented stale level and playback telemetry from surviving a stopped managed
+  engine.
+
 ## 1.1.3 - 2026-08-10
 
 ### Fixed

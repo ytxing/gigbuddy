@@ -809,6 +809,10 @@ class GigBuddyApp(App):
         opacity: 1;
     }
     InterfaceBar MeterBar { height: 2; width: 1fr; border: none; padding: 0 1; }
+    InterfaceBar #cpu-status {
+        width: 13; height: 1; color: $text-muted;
+        content-align: center middle; margin-right: 1;
+    }
     InterfaceBar #runtime-status {
         width: auto; height: 1; color: $text-muted;
         content-align: center middle; margin-right: 3;
@@ -1046,13 +1050,23 @@ class GigBuddyApp(App):
         self._amp_model_backup: str | None = None
         self._last_quit_at = 0.0  # Ctrl+C twice within QUIT_WINDOW_S exits
         # 播放控制操作时间戳：操作后短暂抑制 level.json 回传覆盖，
-        # 避免引擎处理链延迟期间 play_state 来回跳变（0.1s tick 旧状态覆盖）
+        # 避免引擎处理链延迟期间 play_state 来回跳变（0.2s tick 旧状态覆盖）
         self._playback_op_ts = 0.0
         self._header_status_timer = None
         self._header_status_identity: str | None = None
         self._tone3000_logged_in = False
         self._tone3000_auth_generation = 0
         self._last_refresh_chain_fingerprint: str | None = None
+        self._last_refresh_chain_token: tuple | None = None
+        self._last_refresh_chain_config: dict | None = None
+        self._last_catalog_refresh_at: float | None = None
+        self._last_ui_cpu_sample_at: float | None = None
+        self._last_ui_cpu_sample_time: float | None = None
+        self._ui_cpu_percent: float | None = None
+        self._last_engine_cpu_pid: int | None = None
+        self._last_engine_cpu_sample_at: float | None = None
+        self._engine_cpu_percent: float | None = None
+        self._total_cpu_percent: float | None = None
         self._last_runtime_status_report: tuple[int | None, str] | None = None
         self._mutation_refresh = MutationRefreshCoordinator(
             self.call_after_refresh, self._reconcile_after_mutation,
@@ -1105,6 +1119,8 @@ class GigBuddyApp(App):
         return ShiftSelectableScreen(id="_default")
 
     QUIT_WINDOW_S = 1.5
+    CATALOG_REFRESH_INTERVAL_S = 0.5
+    UI_CPU_SAMPLE_INTERVAL_S = 0.5
 
     def action_request_quit(self) -> None:
         """Copy a text selection, or require two Ctrl+C presses to quit.
@@ -1309,12 +1325,14 @@ class GigBuddyApp(App):
                 self.notify(str(exc), severity="error")
                 self.call_after_refresh(self.exit)
         self._ensure_engine()
-        self.set_interval(0.1, self.refresh_from_files)
+        self.set_interval(0.2, self.refresh_from_files)
         self.query_one("#lib-table-local").focus()
         self._device_request_generation += 1
         self.run_worker(partial(self._load_devices,
                                 self._device_request_generation), name="devices")
         self.refresh_tone3000_identity()
+        self._last_ui_cpu_sample_at = time.monotonic()
+        self._last_ui_cpu_sample_time = time.process_time()
         self._update_unsupported_size()
 
     def refresh_tone3000_identity(self) -> None:
@@ -1411,7 +1429,7 @@ class GigBuddyApp(App):
         a model) — the user gets a hint instead, and picking a tone later starts
         audio. A dry-file input starts the engine even with AMP bypassed
         (model=null) so playback still runs through the chain.
-        Also recovers from engine crashes via the 0.1s tick."""
+        Also recovers from engine crashes via the 0.2s tick."""
         if not self._spawn_engine:
             return
         if self._engine_restart_exhausted:
@@ -1714,6 +1732,70 @@ class GigBuddyApp(App):
             return 0.0, 0.0, live.PLAY_STOPPED, 0.0
         return live.read_levels()
 
+    def _sample_ui_cpu(self) -> float | None:
+        """Return this Python TUI process's CPU use as a one-core percent."""
+        now = time.monotonic()
+        cpu_time = time.process_time()
+        previous_at = self._last_ui_cpu_sample_at
+        previous_cpu = self._last_ui_cpu_sample_time
+        if previous_at is None or previous_cpu is None:
+            self._last_ui_cpu_sample_at = now
+            self._last_ui_cpu_sample_time = cpu_time
+            return self._ui_cpu_percent
+        elapsed = now - previous_at
+        if elapsed < self.UI_CPU_SAMPLE_INTERVAL_S:
+            return self._ui_cpu_percent
+        self._last_ui_cpu_sample_at = now
+        self._last_ui_cpu_sample_time = cpu_time
+        self._ui_cpu_percent = max(
+            0.0, (cpu_time - previous_cpu) / elapsed * 100.0)
+        return self._ui_cpu_percent
+
+    def _sample_engine_cpu(self) -> float | None:
+        """Read CPU use for the managed realtime engine, if it is alive."""
+        engine = getattr(self, "_engine", None)
+        if engine is None or engine.poll() is not None:
+            self._last_engine_cpu_pid = None
+            self._last_engine_cpu_sample_at = None
+            self._engine_cpu_percent = 0.0
+            return self._engine_cpu_percent
+
+        pid = engine.pid
+        now = time.monotonic()
+        if pid != self._last_engine_cpu_pid:
+            self._last_engine_cpu_pid = pid
+            self._last_engine_cpu_sample_at = None
+            self._engine_cpu_percent = None
+        previous_at = self._last_engine_cpu_sample_at
+        if (previous_at is not None
+                and now - previous_at < self.UI_CPU_SAMPLE_INTERVAL_S):
+            return self._engine_cpu_percent
+        self._last_engine_cpu_sample_at = now
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "%cpu="],
+                capture_output=True, text=True, check=False, timeout=0.2)
+            value = float(result.stdout.strip())
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return self._engine_cpu_percent
+        self._engine_cpu_percent = max(0.0, value)
+        return self._engine_cpu_percent
+
+    def _sample_total_cpu(self) -> float | None:
+        """Return TUI plus its managed realtime engine CPU as one-core percent."""
+        ui_cpu = self._sample_ui_cpu()
+        engine_cpu = self._sample_engine_cpu()
+        if ui_cpu is None:
+            return self._total_cpu_percent
+        managed_engine = (
+            getattr(self, "_spawn_engine", False)
+            and getattr(self, "_engine", None) is not None
+            and self._engine.poll() is None)
+        if managed_engine and engine_cpu is None:
+            return self._total_cpu_percent
+        self._total_cpu_percent = max(0.0, ui_cpu + (engine_cpu or 0.0))
+        return self._total_cpu_percent
+
     def on_device_changed(self, event: DeviceChanged) -> None:
         """Interface changes restart only the isolated realtime engine."""
         if event.kind == "mute":
@@ -1783,7 +1865,7 @@ class GigBuddyApp(App):
         self.notify(f"Uninstalled {event.count} file(s) · metadata retained")
 
     def refresh_from_files(self) -> None:
-        """0.3s tick: meters + chain panel + library rows follow the current state"""
+        """Poll meters and external state without repainting unchanged views."""
         # The interval may fire once while Textual is tearing down a test or
         # closing the app. Ignore that final tick instead of querying detached
         # widgets.
@@ -1796,8 +1878,14 @@ class GigBuddyApp(App):
         except NoMatches:
             return
         self._ensure_engine()   # restart after crash / start after picking a tone
-        in_lvl, out_lvl, play_state, play_pos = self._audio_levels()
-        runtime_revision, runtime_status = live.read_runtime_status()
+        if (getattr(self, "_spawn_engine", False)
+                and not self._managed_engine_active()):
+            in_lvl, out_lvl, play_state, play_pos = (
+                0.0, 0.0, live.PLAY_STOPPED, 0.0)
+            runtime_revision, runtime_status = live.read_runtime_status()
+        else:
+            (in_lvl, out_lvl, play_state, play_pos), (
+                runtime_revision, runtime_status) = live.read_level_snapshot()
         meter.levels = (in_lvl, out_lvl)
         runtime_report = (runtime_revision, runtime_status)
         if (runtime_status == "rejected"
@@ -1806,21 +1894,29 @@ class GigBuddyApp(App):
                 "Runtime rejected the chain; previous applied revision kept",
                 severity="error")
         self._last_runtime_status_report = runtime_report
-        cfg = live.read_chain()
+        chain_token = live.chain_change_token()
+        if (chain_token == self._last_refresh_chain_token
+                and self._last_refresh_chain_config is not None):
+            cfg = self._last_refresh_chain_config
+            chain_changed = False
+        else:
+            cfg = live.read_chain()
+            self._last_refresh_chain_token = chain_token
+            self._last_refresh_chain_config = cfg
+            try:
+                chain_revision = chain_fingerprint(cfg)
+            except (TypeError, ValueError):
+                chain_revision = None
+            chain_changed = chain_revision != self._last_refresh_chain_fingerprint
+            if chain_changed:
+                self._clear_external_bypass_candidates(cfg)
+                chain.chain = cfg
+                self._last_refresh_chain_fingerprint = chain_revision
         chain_error = live.consume_chain_error()
         if chain_error:
             self.notify(
                 f"Chain update rejected; keeping last valid chain: {chain_error}",
                 severity="error")
-        try:
-            chain_revision = chain_fingerprint(cfg)
-        except (TypeError, ValueError):
-            chain_revision = None
-        chain_changed = chain_revision != self._last_refresh_chain_fingerprint
-        if chain_changed:
-            self._clear_external_bypass_candidates(cfg)
-            chain.chain = cfg
-            self._last_refresh_chain_fingerprint = chain_revision
         # 用户刚操作播放控制（写入 chain 后引擎处理有延迟）：窗口内不用
         # level.json 的旧 play_state 覆盖，避免 PLAY/PAUSE 来回跳变
         if time.monotonic() - self._playback_op_ts > 0.4:
@@ -1832,6 +1928,21 @@ class GigBuddyApp(App):
         if chain_changed:
             detail.refresh_pack_active(cfg)  # pack 视图的 ▶ 标记跟随外部链变更
         library_panel.check_active_tab()
+        # Keep the focused local model marker responsive without re-running the
+        # database-backed catalog refresh on every meter tick.
+        library_panel.sync_active_slot()
+        self._refresh_catalog_panels(library_panel, preset_panel)
+        interface.set_cpu_usage(self._sample_total_cpu())
+
+    def _refresh_catalog_panels(self, library_panel, preset_panel, *,
+                                now: float | None = None) -> None:
+        """Refresh DB-backed catalogs at a lower-cost background cadence."""
+        now = time.monotonic() if now is None else now
+        previous = self._last_catalog_refresh_at
+        if (previous is not None
+                and now - previous < self.CATALOG_REFRESH_INTERVAL_S):
+            return
+        self._last_catalog_refresh_at = now
         library_panel.refresh_rows()
         # Incremental: external fingerprint changes (chain mtime, active preset)
         # must not clear+rebuild the table, which resets the scroll and leaves
@@ -2343,7 +2454,7 @@ class GigBuddyApp(App):
 
         watch_chain 无法从链值区分"卸载"与"双击 BYPASS"（都是 null）——
         BYPASS 保留内容显示，卸载必须强制重置节点为 NONE 空态。后续
-        0.1s tick 的 watch_chain 因 label 已是 NONE 走空态分支，保持稳定。
+        0.2s tick 的 watch_chain 因 label 已是 NONE 走空态分支，保持稳定。
         """
         cfg = live.read_chain()
         cfg[key] = None

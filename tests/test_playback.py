@@ -18,6 +18,7 @@ import tone3000  # noqa: E402
 from tui import live  # noqa: E402
 from tui.app import GigBuddyApp  # noqa: E402
 from tui.input_screen import InputSourceScreen  # noqa: E402
+from tui.panels import InputNodeWidget, InterfaceBar, MeterBar  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +105,177 @@ def test_read_levels_extended_returns_playback_state():
     assert live.read_levels() == (0.0, 0.0, "stopped", 0.0)
     live.LEVEL_FILE.unlink()
     assert live.read_levels() == (0.0, 0.0, "stopped", 0.0)
+
+
+def test_read_level_snapshot_combines_levels_and_runtime_status():
+    live.LEVEL_FILE.write_text(json.dumps({
+        "in": 0.1,
+        "out": 0.2,
+        "play_state": "playing",
+        "play_pos": 12.5,
+        "runtime_revision": 7,
+        "runtime_status": "applied",
+    }))
+
+    assert live.read_level_snapshot() == (
+        (0.1, 0.2, "playing", 12.5),
+        (7, "applied"),
+    )
+
+
+def test_input_playback_skips_refresh_when_visible_state_is_unchanged(monkeypatch):
+    widget = InputNodeWidget()
+    refreshes = []
+    monkeypatch.setattr(widget, "refresh", lambda: refreshes.append(True))
+
+    widget.set_playback(live.PLAY_PLAYING, 0.1, False)
+    widget.set_playback(live.PLAY_PLAYING, 0.2, False)
+    widget.set_playback(live.PLAY_PLAYING, 1.0, False)
+
+    assert len(refreshes) == 2
+    assert widget.play_pos == 1.0
+
+
+def test_interface_bar_skips_repeated_status_updates():
+    class FakeWidget:
+        def __init__(self):
+            self.classes = []
+            self.labels = []
+
+        def set_classes(self, value):
+            self.classes.append(value)
+
+        def update(self, value):
+            self.labels.append(value)
+
+    mute = FakeWidget()
+    cpu = FakeWidget()
+    runtime = FakeWidget()
+    bar = SimpleNamespace(
+        _muted=None,
+        _cpu_text=None,
+        _runtime_text=None,
+        mute=mute,
+        cpu=cpu,
+        runtime=runtime,
+    )
+
+    InterfaceBar.set_muted(bar, False)
+    InterfaceBar.set_muted(bar, False)
+    InterfaceBar.set_cpu_usage(bar, 8.9)
+    InterfaceBar.set_cpu_usage(bar, 8.9)
+    InterfaceBar.set_cpu_usage(bar, 12.3)
+    InterfaceBar.set_runtime_status(bar, 7, 7, "applied")
+    InterfaceBar.set_runtime_status(bar, 7, 7, "applied")
+
+    assert mute.labels == ["MUTE"]
+    assert cpu.labels == ["CPU  8.9%", "CPU 12.3%"]
+    assert len(cpu.labels[0]) == len(cpu.labels[1])
+    assert "08.9%" not in cpu.labels[0]
+    assert runtime.labels == ["APPLIED"]
+
+
+def test_meter_skips_repaint_when_visible_output_is_unchanged(monkeypatch):
+    meter = MeterBar()
+    refreshes = []
+    monkeypatch.setattr(meter, "refresh", lambda: refreshes.append(True))
+
+    meter.watch_levels((0.1, 0.2))
+    meter.watch_levels((0.10001, 0.20001))
+    meter.watch_levels((0.2, 0.2))
+
+    assert len(refreshes) == 2
+
+
+def test_meter_repaints_when_peak_hold_expires(monkeypatch):
+    meter = MeterBar()
+    refreshes = []
+    monkeypatch.setattr(meter, "refresh", lambda: refreshes.append(True))
+
+    meter.watch_levels((1.0, 0.2))
+    meter._pk_in_at = 0.0
+    meter.watch_levels((0.1, 0.2))
+
+    assert len(refreshes) == 2
+
+
+def test_catalog_refresh_is_throttled_but_runs_at_interval():
+    calls = []
+    library_panel = SimpleNamespace(
+        refresh_rows=lambda: calls.append("library"))
+    preset_panel = SimpleNamespace(
+        refresh_presets=lambda **kwargs: calls.append(("preset", kwargs)))
+    app = SimpleNamespace(
+        _last_catalog_refresh_at=None,
+        CATALOG_REFRESH_INTERVAL_S=GigBuddyApp.CATALOG_REFRESH_INTERVAL_S,
+    )
+
+    GigBuddyApp._refresh_catalog_panels(
+        app, library_panel, preset_panel, now=10.0)
+    GigBuddyApp._refresh_catalog_panels(
+        app, library_panel, preset_panel, now=10.2)
+    GigBuddyApp._refresh_catalog_panels(
+        app, library_panel, preset_panel, now=10.5)
+
+    assert calls == [
+        "library",
+        ("preset", {"incremental": True}),
+        "library",
+        ("preset", {"incremental": True}),
+    ]
+
+
+def test_ui_cpu_sample_is_windowed_and_uses_one_core_percent(monkeypatch):
+    app = SimpleNamespace(
+        _last_ui_cpu_sample_at=0.0,
+        _last_ui_cpu_sample_time=0.0,
+        _ui_cpu_percent=None,
+        UI_CPU_SAMPLE_INTERVAL_S=0.5,
+    )
+    wall_times = iter((0.2, 0.6))
+    cpu_times = iter((0.01, 0.03))
+    monkeypatch.setattr("tui.app.time.monotonic", lambda: next(wall_times))
+    monkeypatch.setattr("tui.app.time.process_time", lambda: next(cpu_times))
+
+    assert GigBuddyApp._sample_ui_cpu(app) is None
+    assert GigBuddyApp._sample_ui_cpu(app) == pytest.approx(5.0)
+
+
+def test_managed_engine_cpu_reads_only_owned_process(monkeypatch):
+    class FakeEngine:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+    app = SimpleNamespace(
+        _engine=FakeEngine(),
+        _last_engine_cpu_pid=None,
+        _last_engine_cpu_sample_at=None,
+        _engine_cpu_percent=None,
+        UI_CPU_SAMPLE_INTERVAL_S=0.5,
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=" 3.75\n")
+
+    monkeypatch.setattr("tui.app.subprocess.run", fake_run)
+
+    assert GigBuddyApp._sample_engine_cpu(app) == pytest.approx(3.75)
+    assert calls[0][0] == ["ps", "-p", "4321", "-o", "%cpu="]
+
+
+def test_total_cpu_combines_tui_and_managed_engine(monkeypatch):
+    app = GigBuddyApp(spawn_engine=False)
+    app._spawn_engine = True
+    app._engine = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(app, "_sample_ui_cpu", lambda: 2.3)
+    monkeypatch.setattr(app, "_sample_engine_cpu", lambda: 1.7)
+
+    assert GigBuddyApp._sample_total_cpu(app) == pytest.approx(4.0)
 
 
 def test_managed_playback_does_not_write_when_engine_is_down(monkeypatch):

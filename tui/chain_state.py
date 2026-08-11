@@ -599,6 +599,11 @@ class ChainState:
             self._mark_local_mutation()
             slot.path = path
             slot.candidate = None
+            # Input/output trims belong to the loaded model. Replacing a
+            # model must start from neutral gain; bypass/restore above keeps
+            # the existing model's trims intact.
+            slot.input_gain_db = SLOT_GAIN_DEFAULT_DB
+            slot.output_gain_db = SLOT_GAIN_DEFAULT_DB
         slot.overlay = None
         slot.error = None
         slot.operation_id = None

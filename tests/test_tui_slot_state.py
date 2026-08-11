@@ -9,6 +9,7 @@ from tui.chain_state import (
     ChainStateError,
     CommitReceipt,
     PreparedCommit,
+    SLOT_GAIN_DEFAULT_DB,
     SlotOverlay,
     SlotStatus,
     chain_fingerprint,
@@ -100,6 +101,33 @@ def test_slot_gains_follow_reorder_and_survive_bypass():
 
     with pytest.raises(ChainStateError):
         state.set_slot_gain(1, "output_gain_db", 24.1)
+
+
+def test_slot_gains_reset_when_replacing_model():
+    state = _state("a.nam")
+    state.set_slot_gain(0, "input_gain_db", 3.5)
+    state.set_slot_gain(0, "output_gain_db", -2.0)
+
+    state.load_file(0, "b.nam")
+
+    slot = state.slot(0)
+    assert slot.path == "b.nam"
+    assert slot.input_gain_db == SLOT_GAIN_DEFAULT_DB
+    assert slot.output_gain_db == SLOT_GAIN_DEFAULT_DB
+
+
+def test_slot_gain_reset_does_not_affect_bypass_restore():
+    state = _state("a.nam")
+    state.set_slot_gain(0, "input_gain_db", 3.5)
+    state.set_slot_gain(0, "output_gain_db", -2.0)
+
+    state.load_file(0, "a.nam")
+    state.load_file(0, "a.nam")
+
+    slot = state.slot(0)
+    assert slot.path == "a.nam"
+    assert slot.input_gain_db == 3.5
+    assert slot.output_gain_db == -2.0
 
 
 def test_apply_candidate_refreshes_gains_when_paths_are_unchanged():

@@ -1358,7 +1358,7 @@ class LibraryPanel(Vertical):
         self.run_worker(partial(worker), name=name, exclusive=True)
 
     def check_active_tab(self) -> None:
-        """Tick-driven tab detection (0.1s): the reactive `active` value is
+        """Tick-driven tab detection (0.2s): the reactive `active` value is
         always current here, unlike TabActivated events whose pane/active can
         lag during a switch. Drives trending/creators loading and routing."""
         try:
@@ -1503,12 +1503,12 @@ class LibraryPanel(Vertical):
         Skips repaint unless the DB or local install state changed, so the
         user's browsing position and the TONE3000 tab are not clobbered.
         """
-        self.sync_active_slot()
         # _mode can lag behind inside tab-activation handlers; _active_pane is
         # set first and is the authoritative "which tab is showing" signal.
         if (not force
                 and getattr(self, "_active_pane", "pane-local") != "pane-local"):
             return
+        self.sync_active_slot()
         db_token = library.database_change_token()
         if not force and self._fingerprint is not None and db_token == self._db_token:
             return
