@@ -9,6 +9,21 @@
 
 *找到音色 · 即刻演奏*
 
+在 [TONE3000](https://www.tone3000.com) 里，音色已经很多了。点开其中一个
+tone pack，里面又是一长串 NAM 文件，每个文件都是不同 setting 下的 capture。
+然后我就忍不住开始问自己：
+
+- 🤔 这个 tone pack 里的哪个 NAM 文件，才适合我的吉他、贝斯、拾音器和演奏方式？
+- 😵‍💫 这个 NAM capture 或 IR 接上我的设备，实时听起来到底怎么样？
+- 💫 如果我把几个 NAM 文件和 IR 串成 pedal -> amp -> cab 音色链，最后到底会是什么声音？
+- 🗂️ 我想把一个 tone pack 里的 NAM 文件做 A/B，难道还得在插件里一个个选吗？
+- 😵 文件名又写得不清不楚，我到底要怎么找到下一个 capture？
+- 💭 切到下一个以后，我还记得刚才那个声音吗？
+
+所以我做了 GigBuddy：把 tone pack、NAM 文件和 IR 放进一个可搜索的本地库。
+我可以用同一段干音或自己的乐器试听，知道当前听的到底是哪一个文件，找到
+合适的声音后直接搭建整条音色链。
+
 *v1.1.4 · 2026-08-11*
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
@@ -66,6 +81,9 @@ orange-tolex、tweed-brass、diamond-noir、blackface-silver、
 british-green、surf-cream 之间循环。
 
 ![浏览 TONE3000 — 实时搜索、热度排序、类型过滤](docs/screenshots/tone3000-browse.png)
+
+如需查看 Library、Tone Chain、Tone Detail、Presets 和 Audio / Level 面板的
+逐项说明，请参阅 [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md)。
 
 ## 主要特性
 

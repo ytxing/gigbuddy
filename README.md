@@ -11,17 +11,31 @@
 
 *Find a sound. Shape it. Play it now.*
 
+There are already plenty of tones on [TONE3000](https://www.tone3000). Then I
+open one tone pack and find even more NAM files inside, each captured with
+different settings. That's when I start asking myself:
+
+- 🤔 Which NAM file should I try with my guitar, bass, pickups, and playing style?
+- 😵‍💫 What will this NAM capture or IR actually sound like with my setup?
+- 💫 If I chain several NAM files and IRs into a pedal -> amp -> cab rig, what will I get?
+- 🗂️ If I want to A/B the NAM files in a tone pack, do I really have to pick them one
+  by one in a plugin?
+- 😵 What if the filenames tell me nothing? How am I supposed to find the next capture?
+- 💭 Once I switch, will I even remember what the last one sounded like?
+
+So I built GigBuddy: a searchable library for tone packs, NAM files, and IRs. I
+can try them with the same dry recording or my own instrument, keep track of
+which file I am hearing, and build the chain once I find a sound that works.
+
 *v1.1.4 · 2026-08-11*
 
-One line from the terminal — downloads, installs, and initializes everything:
+**One line from the terminal — downloads, installs, and initializes everything:**
 
 ```
 curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
-
-See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md) for a closer look at the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
 
 GigBuddy is a realtime [NAM (Neural Amp Modeler)](https://www.tone3000.com/guides/nam-a2-the-complete-guide)
 tone workspace with full **A2 architecture** support — the most faithful
@@ -69,6 +83,8 @@ dependency), fully MIT core stack.
   British green, and surf cream.
 
 ![Browsing TONE3000 — live search with trending results, sort and type filters](docs/screenshots/tone3000-browse.png)
+
+See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md) for a closer look at the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
 
 ## What's new
 
