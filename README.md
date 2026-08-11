@@ -21,6 +21,9 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.3/scripts/insta
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
 
+See the [panel-by-panel guide](docs/gigbuddy-panels.md) for a closer look at
+the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
+
 GigBuddy is a realtime [NAM (Neural Amp Modeler)](https://www.tone3000.com/guides/nam-a2-the-complete-guide)
 tone workspace with full **A2 architecture** support — the most faithful
 amp-capture technology, which outplayed Neural DSP, ToneX, and Line 6 Proxy in
