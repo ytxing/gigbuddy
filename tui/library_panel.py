@@ -1,6 +1,7 @@
 """Library browser panel: LOCAL, remote sources, and creator aggregates.
 
-Row keys encode the source ("local:<id>" / "remote:<id>"). Selecting a local row
+Row keys encode the source ("local:<id>", "local:pack:<id>", or
+"remote:<id>"). Selecting a local row
 enters the canonical DetailPane flow; remote rows enter its PACK view.
 TONE3000 hits are tagged with their local download state (✓ when anything is
 downloaded, blank otherwise) by comparing model ids against the local library.
@@ -85,9 +86,10 @@ _SEARCH_BAR_ID = {
 class ToneSelected(Message):
     """A row in the library was selected — app shows the detail pane"""
 
-    def __init__(self, tone_id: int) -> None:
+    def __init__(self, tone_id: int | None = None, pack_id: str | None = None) -> None:
         super().__init__()
         self.tone_id = tone_id
+        self.pack_id = pack_id
 
 
 class RemoteToneSelected(Message):
@@ -347,9 +349,11 @@ class LibraryTable(ClickSelectTable):
             rows = self.ordered_rows
             if meta["row"] < len(rows):
                 key = rows[meta["row"]].key.value
-                if isinstance(key, str) and key.startswith("local:"):
+                if (isinstance(key, str)
+                        and (key.startswith("local:pack:")
+                             or key.removeprefix("local:").isdigit())):
                     self.screen.query_one(LibraryPanel).toggle_local_id(
-                        int(key.partition(":")[2]))
+                        key)
                     event.stop()
                     return
         if getattr(event, "chain", 1) >= 2:
@@ -412,11 +416,12 @@ LOCAL_SORT_CHOICES = [
     ("Newest added", "added-desc"),
     ("Oldest added", "added-asc"),
 ]
-# mirror tone3000.com's sort options; favorites comes from tones_counts
-# (the search RPC rejects favorites ordering)
+# Mirror the official search sort options. Favorites is the current user's
+# collection, exposed separately from the public search ordering.
 SORT_CHOICES = [("Trending", "trending"), ("Best match", "best-match"),
                 ("Most downloaded", "downloads"),
-                ("Most favorited", "favorites"), ("Newest", "newest")]
+                ("My favorites", "favorites"), ("Newest", "newest"),
+                ("Oldest", "oldest")]
 # TOP CREATORS 排行榜排序（REQ-029，参考 tone3000.com/top-creators 的
 # sort 下拉：Most Tones 默认 + 数字列可排序）。
 CREATOR_SORT_CHOICES = [("Most Tones", "tones"), ("Most Downloads", "downloads"),
@@ -553,6 +558,7 @@ class LibraryPanel(Vertical):
         self._mode = "local"
         self._active_pane = "pane-local"
         self._sort = "trending"
+        self._sort_explicit = False
         self._last_active = "pane-local"  # initial state: first tick is a no-op
         self._type_filter = "all"
         self._query = ""
@@ -606,9 +612,9 @@ class LibraryPanel(Vertical):
         self._creator_request_id = 0
         self._creator_error = False
         self._creator_auth_required = False
-        self._local_selected: set[int] = set()
+        self._local_selected: set[str | int] = set()
         self._active_slot_path: str | None = None
-        self._active_tone_id: int | None = None
+        self._active_local_key: str | None = None
         self._mutation_anchor: ViewAnchor | None = None
         self._screen_generation = 1
         self._mutation_request_id = 0
@@ -777,6 +783,7 @@ class LibraryPanel(Vertical):
                     f"#{search_id}", Input).value
             if pane_id == "pane-tone":
                 state["sort"] = self._sort
+                state["sort_explicit"] = self._sort_explicit
             elif pane_id == "pane-creators":
                 state["sort"] = self._creator_sort
             state["type_filter"] = self._type_filters.get(pane_id, "all")
@@ -827,8 +834,10 @@ class LibraryPanel(Vertical):
                     state["first_visible_predecessor_key"] = None
                     state["row_offset"] = 0
             state["selection_keys"] = tuple(
-                f"local:{tone_id}" for tone_id in sorted(self._local_selected)
-            ) if pane_id == "pane-local" else ()
+                key if isinstance(key, str) else f"local:{key}"
+                for key in sorted(self._local_selected, key=str)
+            ) \
+                if pane_id == "pane-local" else ()
             state["detail_context_key"] = self._highlighted_key
         except Exception:
             pass
@@ -839,13 +848,17 @@ class LibraryPanel(Vertical):
         self._type_filter = self._type_filters[pane_id]
         if pane_id == "pane-local":
             self._local_selected = {
-                int(key.partition(":")[2])
+                int(key.removeprefix("local:"))
+                if key.startswith("local:") and key.removeprefix("local:").isdigit()
+                else key
                 for key in state.get("selection_keys", ())
                 if isinstance(key, str) and key.startswith("local:")
-                and key.partition(":")[2].isdigit()
+                and (key.removeprefix("local:").isdigit()
+                     or key.startswith("local:pack:"))
             }
         if pane_id == "pane-tone":
             self._sort = state.get("sort", "trending")
+            self._sort_explicit = bool(state.get("sort_explicit", False))
             self._query = state.get("query", "")
             self._search_spec = self._parse_or_notify(self._query) or SearchSpec()
             self.query_one("#tone-search", Input).value = self._query
@@ -1039,6 +1052,14 @@ class LibraryPanel(Vertical):
                 value = str(tone["gear"]).strip()
                 if value:
                     values.add(value)
+            if (isinstance(key, str) and key.startswith("local:pack:")
+                    and tone):
+                formats = {model.get("format")
+                           for model in tone.get("models") or ()}
+                if "nam" in formats:
+                    values.add("amp")
+                if "ir" in formats:
+                    values.add("ir")
         if pane_id is not None:
             self._type_values_by_pane[pane_id] = values
         return sorted(values, key=str.casefold)
@@ -1141,13 +1162,20 @@ class LibraryPanel(Vertical):
     def _effective_authors(self, spec: SearchSpec) -> list[str]:
         return list(spec.authors)
 
-    def _selected_order(self) -> str:
-        return {
+    def _selected_order(self) -> str | None:
+        selected = {
             "trending": "trending",
             "best-match": "best-match",
             "downloads": "downloads-all-time",
             "newest": "newest",
+            "oldest": "oldest",
         }.get(self._sort, "trending")
+        # Leave the default unset so the adapter can apply the official rule:
+        # Trending for an empty query and Best Match for a non-empty query.
+        # Once the user explicitly chooses Trending, preserve that choice.
+        if selected == "trending" and not self._sort_explicit:
+            return None
+        return selected
 
     @staticmethod
     def _status_row(table: DataTable, message: str) -> None:
@@ -1444,8 +1472,8 @@ class LibraryPanel(Vertical):
 
     # ---- local tab --------------------------------------------------------
 
-    def _active_tone_for_path(self, path: str | None) -> int | None:
-        """Resolve one focused local model to its owning tone."""
+    def _active_local_key_for_path(self, path: str | None) -> str | None:
+        """Resolve one focused local model to its owning row key."""
         if not path:
             return None
         try:
@@ -1456,31 +1484,41 @@ class LibraryPanel(Vertical):
             try:
                 tone_id = model.get("tone_id")
                 if tone_id is not None:
-                    return int(tone_id)
+                    return f"local:{int(tone_id)}"
+                if model.get("pack_id"):
+                    return f"local:pack:{model['pack_id']}"
             except (AttributeError, TypeError, ValueError):
                 continue
+        try:
+            local = library.local_model_for_path(path)
+        except Exception:
+            local = None
+        if local:
+            if local.get("tone_id") is not None:
+                return f"local:{int(local['tone_id'])}"
+            if local.get("pack_id"):
+                return f"local:pack:{local['pack_id']}"
         return None
 
     def set_active_slot_path(self, path: str | None) -> None:
         """Update the Local active marker without moving its table cursor."""
         if path == getattr(self, "_active_slot_path", None):
             return
-        old_tone_id = getattr(self, "_active_tone_id", None)
+        old_key = getattr(self, "_active_local_key", None)
         self._active_slot_path = path
-        self._active_tone_id = self._active_tone_for_path(path)
-        if old_tone_id == self._active_tone_id:
+        self._active_local_key = self._active_local_key_for_path(path)
+        if old_key == self._active_local_key:
             return
         try:
             table = self.query_one("#lib-table-local", DataTable)
         except Exception:
             return
-        for tone_id in {old_tone_id, self._active_tone_id}:
-            if tone_id is None:
+        for row_key in {old_key, self._active_local_key}:
+            if row_key is None:
                 continue
             try:
                 table.update_cell(
-                    f"local:{tone_id}", "pick",
-                    self._local_status_cell(tone_id),
+                    row_key, "pick", self._local_status_cell(row_key),
                     update_width=False,
                 )
             except Exception:
@@ -1511,11 +1549,12 @@ class LibraryPanel(Vertical):
                 and getattr(self, "_active_pane", "pane-local") != "pane-local"):
             return
         self.sync_active_slot()
+        local_packs = library.list_local_packs()
         db_token = library.database_change_token()
         if not force and self._fingerprint is not None and db_token == self._db_token:
             return
         with library.connect() as conn:
-            fp = tuple(conn.execute(
+            db_fp = tuple(conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(id), 0), "
                 "COALESCE(SUM(local_dir IS NOT NULL), 0), "
                 "(SELECT COUNT(*) FROM models WHERE local_path IS NOT NULL), "
@@ -1527,6 +1566,15 @@ class LibraryPanel(Vertical):
                     "OR id IN (SELECT tone_id FROM models "
                     "WHERE local_path IS NOT NULL)").fetchall()
             }
+            fp = (db_fp, tuple(
+                (pack["pack_id"], pack.get("root_path"), pack.get("name"),
+                 pack.get("author"), pack.get("gear"), pack.get("description"),
+                 pack.get("manifest_sha256"), pack.get("manifest_status"),
+                 tuple((model.get("model_key"), model.get("name"),
+                        model.get("format"), model.get("size"), model.get("sha256"))
+                       for model in pack.get("models") or ()))
+                for pack in local_packs))
+        all_local_ids.update(f"local:pack:{pack['pack_id']}" for pack in local_packs)
         if not force and fp == self._fingerprint:
             self._db_token = db_token
             return
@@ -1564,8 +1612,13 @@ class LibraryPanel(Vertical):
         for tone in tones:
             table.add_row(*self._local_row_cells(tone, table),
                           key=f"local:{tone['id']}")
+        packs = [pack for pack in local_packs
+                 if self._local_tone_matches(pack, spec, self._type_filter)]
+        for pack in packs:
+            table.add_row(*self._local_row_cells(pack, table),
+                          key=f"local:pack:{pack['pack_id']}")
         self._sync_type_search_options(table)
-        if not tones:
+        if not tones and not packs:
             self._status_row(
                 table,
                 "no local tones — switch to TONE3000 "
@@ -1589,7 +1642,7 @@ class LibraryPanel(Vertical):
         columns = ("pick", "title", "type", "author", "downloads", "favorites",
                    "uploaded", "files", "arch", "format")
         cells = [
-            self._local_status_cell(int(tone["id"])),
+            self._local_status_cell(f"local:{tone['id']}"),
             *self._row_cells(tone),
         ]
         for column, value in zip(columns, cells):
@@ -1612,8 +1665,17 @@ class LibraryPanel(Vertical):
                             type_filter: str) -> bool:
         if not self._local_tone_has_files(tone):
             return False
-        if type_filter != "all" and str(tone.get("gear") or "") != type_filter:
-            return False
+        if type_filter != "all":
+            if tone.get("id") is None:
+                formats = {model.get("format") for model in tone.get("models") or ()}
+                if type_filter == "ir" and "ir" not in formats:
+                    return False
+                if type_filter in {"amp", "nam"} and "nam" not in formats:
+                    return False
+                if type_filter not in {"amp", "nam", "ir"}:
+                    return False
+            elif str(tone.get("gear") or "") != type_filter:
+                return False
         if spec.authors and str(tone.get("username") or "") not in spec.authors:
             return False
 
@@ -1635,10 +1697,17 @@ class LibraryPanel(Vertical):
                 return False
         if spec.text:
             needle = spec.text.casefold()
-            haystack = " ".join(
+            haystack_parts = [
                 str(tone.get(key) or "")
                 for key in ("title", "username", "description")
-            ).casefold()
+            ]
+            if tone.get("id") is None:
+                for model in tone.get("models") or ():
+                    if isinstance(model, dict):
+                        haystack_parts.extend(
+                            str(model.get(key) or "")
+                            for key in ("name", "relative_path", "model_key"))
+            haystack = " ".join(haystack_parts).casefold()
             if needle not in haystack:
                 return False
         return True
@@ -1685,14 +1754,23 @@ class LibraryPanel(Vertical):
         return tone_ids
 
     def _local_fingerprint(self) -> tuple:
+        local_packs = library.list_local_packs()
         with library.connect() as conn:
-            return tuple(conn.execute(
+            db_fp = tuple(conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(id), 0), "
                 "COALESCE(SUM(local_dir IS NOT NULL), 0), "
                 "(SELECT COUNT(*) FROM models WHERE local_path IS NOT NULL), "
                 "(SELECT COALESCE(GROUP_CONCAT(id || ':' || local_path, '|'), '') "
                 "FROM models WHERE local_path IS NOT NULL) FROM tones"
             ).fetchone())
+        return (db_fp, tuple(
+            (pack["pack_id"], pack.get("root_path"), pack.get("name"),
+             pack.get("author"), pack.get("gear"), pack.get("description"),
+             pack.get("manifest_sha256"), pack.get("manifest_status"),
+             tuple((model.get("model_key"), model.get("name"),
+                    model.get("format"), model.get("size"), model.get("sha256"))
+                   for model in pack.get("models") or ()))
+            for pack in local_packs))
 
     def _reconcile_local_rows(self, tone_ids: set[int]) -> None:
         table = self.query_one("#lib-table-local", DataTable)
@@ -1735,9 +1813,7 @@ class LibraryPanel(Vertical):
                 table,
                 "no local tones — switch to TONE3000 "
                 "to search and import")
-        state["selection_keys"] = tuple(
-            f"local:{tone_id}" for tone_id in sorted(self._local_selected)
-        )
+        state["selection_keys"] = tuple(sorted(self._local_selected))
         self._sync_type_search_options(table)
         try:
             self._fingerprint = self._local_fingerprint()
@@ -1765,7 +1841,10 @@ class LibraryPanel(Vertical):
                 continue
             downloaded = len(local_by_tone.get(tone_id, ()))
             tone["downloaded"] = downloaded
-            tone["download_state"] = "partial" if downloaded else "none"
+            total = library.tone3000.supported_tone_model_count(tone)
+            tone["download_state"] = (
+                "all" if downloaded and total and downloaded >= total
+                else "partial" if downloaded else "none")
         return tones
 
     def _apply_local_download_states(self) -> None:
@@ -1788,7 +1867,10 @@ class LibraryPanel(Vertical):
                     continue
                 downloaded = len(local_by_tone.get(tone_id, ()))
                 tone["downloaded"] = downloaded
-                tone["download_state"] = "partial" if downloaded else "none"
+                total = library.tone3000.supported_tone_model_count(tone)
+                tone["download_state"] = (
+                    "all" if downloaded and total and downloaded >= total
+                    else "partial" if downloaded else "none")
                 updated[tone_id] = tone
         if not updated:
             return
@@ -1901,7 +1983,7 @@ class LibraryPanel(Vertical):
         self._local_has_more = len(tones) == LOCAL_PAGE_SIZE
         self._update_local_selection_status()
 
-    def _local_cursor_id(self) -> int | None:
+    def _local_cursor_id(self) -> str | None:
         if self._active_pane != "pane-local":
             return None
         table = self.query_one("#lib-table-local", DataTable)
@@ -1911,7 +1993,7 @@ class LibraryPanel(Vertical):
         key = rows[table.cursor_row].key.value
         if not isinstance(key, str) or not key.startswith("local:"):
             return None
-        return int(key.partition(":")[2])
+        return key
 
     def _update_local_selection_status(self) -> None:
         count = len(self._local_selected)
@@ -1920,15 +2002,17 @@ class LibraryPanel(Vertical):
             self, state,
             [label for label, _action in self._border_hint_actions()])
 
-    def _visible_local_ids(self) -> set[int]:
+    def _visible_local_ids(self) -> set[str]:
         try:
             table = self.query_one("#lib-table-local", DataTable)
         except Exception:
             return set()
         return {
-            int(row.key.value.partition(":")[2])
+            row.key.value
             for row in table.ordered_rows
-            if isinstance(row.key.value, str) and row.key.value.startswith("local:")
+            if isinstance(row.key.value, str)
+            and (row.key.value.startswith("local:pack:")
+                 or row.key.value.removeprefix("local:").isdigit())
         }
 
     def toggle_local_selection(self) -> None:
@@ -1937,24 +2021,40 @@ class LibraryPanel(Vertical):
             return
         self.toggle_local_id(tone_id)
 
-    def toggle_local_id(self, tone_id: int) -> None:
-        if tone_id in self._local_selected:
-            self._local_selected.remove(tone_id)
+    def toggle_local_id(self, row_key: str | int) -> None:
+        value = self._local_selection_value(row_key)
+        if value in self._local_selected:
+            self._local_selected.remove(value)
         else:
-            self._local_selected.add(tone_id)
+            self._local_selected.add(value)
         self.query_one("#lib-table-local", DataTable).update_cell(
-            f"local:{tone_id}", "pick", self._local_status_cell(tone_id))
+            self._local_row_key(value), "pick", self._local_status_cell(row_key))
         self._update_local_selection_status()
+
+    @staticmethod
+    def _local_selection_value(row_key: str | int) -> str | int:
+        if isinstance(row_key, int):
+            return row_key
+        if row_key.startswith("local:pack:"):
+            return row_key
+        raw = row_key.removeprefix("local:tone:").removeprefix("local:")
+        return int(raw) if raw.isdigit() else row_key
+
+    @staticmethod
+    def _local_row_key(value: str | int) -> str:
+        return value if isinstance(value, str) else f"local:{value}"
 
     def toggle_all_local(self) -> None:
         if self._active_pane != "pane-local":
             return
         table = self.query_one("#lib-table-local", DataTable)
         visible = self._visible_local_ids()
-        self._local_selected = set() if visible and visible <= self._local_selected else visible
-        for tone_id in visible:
-            table.update_cell(f"local:{tone_id}", "pick",
-                              self._local_status_cell(tone_id))
+        visible_values = {self._local_selection_value(key) for key in visible}
+        self._local_selected = (
+            set() if visible_values and visible_values <= self._local_selected
+            else visible_values)
+        for row_key in visible:
+            table.update_cell(row_key, "pick", self._local_status_cell(row_key))
         self._update_local_selection_status()
 
     def clear_local_selection(self) -> None:
@@ -1962,10 +2062,11 @@ class LibraryPanel(Vertical):
         self._local_selected = set()
         try:
             table = self.query_one("#lib-table-local", DataTable)
-            for tone_id in selected:
+            for row_key in selected:
                 try:
-                    table.update_cell(f"local:{tone_id}", "pick",
-                                      self._local_status_cell(tone_id))
+                    table_key = self._local_row_key(row_key)
+                    table.update_cell(table_key, "pick",
+                                      self._local_status_cell(table_key))
                 except Exception:
                     pass
         except Exception:
@@ -1985,9 +2086,9 @@ class LibraryPanel(Vertical):
         selected.difference_update(removed)
         try:
             table = self.query_one("#lib-table-local", DataTable)
-            for tone_id in affected:
-                table.update_cell(f"local:{tone_id}", "pick",
-                                  self._local_status_cell(tone_id))
+            for row_key in affected:
+                table.update_cell(self._local_row_key(row_key), "pick",
+                                  self._local_status_cell(self._local_row_key(row_key)))
         except Exception:
             pass
         if getattr(self, "_active_pane", None) == "pane-local":
@@ -1996,11 +2097,19 @@ class LibraryPanel(Vertical):
     def uninstall_local_selection(self) -> None:
         if getattr(self, "_active_pane", None) != "pane-local":
             return
-        tone_ids = sorted(self._local_selected)
-        if not tone_ids:
-            cursor_id = self._local_cursor_id()
-            tone_ids = [cursor_id] if cursor_id is not None else []
-        if tone_ids:
+        selected = set(self._local_selected)
+        if not selected:
+            cursor_key = self._local_cursor_id()
+            selected = ({self._local_selection_value(cursor_key)}
+                        if cursor_key is not None else set())
+        remote_keys = sorted(
+            key for key in selected
+            if isinstance(key, int))
+        local_pack_keys = selected.difference(remote_keys)
+        if local_pack_keys:
+            self.notify("Local folder Packs cannot be uninstalled here", severity="warning")
+        if remote_keys:
+            tone_ids = [int(key) for key in remote_keys]
             self.app.push_screen(LocalUninstallScreen(tone_ids))
 
     def _show_local_filter(self, query: str, spec: SearchSpec | None = None) -> None:
@@ -2061,7 +2170,7 @@ class LibraryPanel(Vertical):
             except Exception:
                 return
             if key[2] == "favorites":
-                status.content = "most favorited · enter detail"
+                status.content = "my favorites · enter detail"
             else:
                 status.content = self._tone_status_hint(self._search_spec)
         if silent:
@@ -2095,7 +2204,8 @@ class LibraryPanel(Vertical):
         else:
             self._tone_request_id += 1
             request_id = self._tone_request_id
-            key = (query, self._type_filter, self._sort)
+            key = (query, self._type_filter,
+                   self._selected_order() or "default")
             self._tone_cache_key = key
             self._tone_error = False
             self._clear_tone_auth_required()
@@ -2143,7 +2253,10 @@ class LibraryPanel(Vertical):
                 search_kwargs = dict(
                     page_size=REMOTE_PAGE_SIZE, page_number=page,
                     order_by=order_by or self._selected_order(),
-                    gear_filters=None if self._type_filter == "all" else [self._type_filter],
+                    gear_filters=(None if self._type_filter in {"all", "ir"}
+                                  else [self._type_filter]),
+                    format_filter=("ir" if self._type_filter == "ir"
+                                   else None),
                     usernames=self._effective_authors(spec) or None,
                     tag_names=list(spec.tags) or None,
                     make_names=list(spec.makes) or None)
@@ -2218,7 +2331,15 @@ class LibraryPanel(Vertical):
         self._tone_page = page
         search_page = locals().get("search_page")
         if search_page is not None:
-            self._tone_total = search_page.loaded_count
+            self._tone_total = search_page.total_count
+        elif hits:
+            remote_totals = {
+                int(hit["total_count"])
+                for hit in hits
+                if isinstance(hit, dict) and hit.get("total_count") is not None
+            }
+            if len(remote_totals) == 1:
+                self._tone_total = remote_totals.pop()
         if not append:
             self._remote_tones = {}
             table.clear()
@@ -2233,9 +2354,6 @@ class LibraryPanel(Vertical):
             self._tone_has_more = False
         elif search_page is not None:
             self._tone_has_more = search_page.has_more
-            self._tone_total = search_page.loaded_count
-            if search_page.exhausted:
-                self._tone_total = len(self._remote_tones)
         else:
             self._tone_has_more = bool(hits)
             if not hits:
@@ -2264,7 +2382,10 @@ class LibraryPanel(Vertical):
 
     async def _load_more_tones(self) -> None:
         """Fetch the next remote page without moving the cursor or clearing rows."""
-        await self._show_search(self._query, order_by=self._selected_order(), append=True)
+        if self._sort == "favorites":
+            await self._reload_tone_table(append=True)
+        else:
+            await self._show_search(self._query, order_by=self._selected_order(), append=True)
 
     async def _login_tone3000(self) -> None:
         """Open OAuth in the browser, then reload the active remote view."""
@@ -2317,14 +2438,12 @@ class LibraryPanel(Vertical):
     # ---- recommended views (TONE3000 tab) ---------------------------------
 
     async def _reload_tone_table(self, *, refresh: bool = False,
-                                 silent: bool = False) -> None:
-        """Reload the TONE3000 tab per the SORT picker: trending / most
-        downloaded / most favorited / newest (mirrors tone3000.com's sort
-        options; favorites reads the tones_counts table since the search RPC
-        has no favorites ordering)."""
+                                 silent: bool = False,
+                                 append: bool = False) -> None:
+        """Reload the TONE3000 tab using the official search or user feed."""
         sort = self._sort
         generation = self._screen_generation
-        if not silent:
+        if not silent and not append:
             self._capture_view_state("pane-tone")
         if not self._screen_alive(generation):
             return
@@ -2336,24 +2455,32 @@ class LibraryPanel(Vertical):
         except Exception:
             return
         if sort == "favorites":
-            self._tone_request_id += 1
-            request_id = self._tone_request_id
-            key = (self._query, self._type_filter, "favorites")
-            self._tone_cache_key = key
-            # 与 _show_search 对齐：请求前保存视图快照，否则 _tone_alive
-            # 拿着上一次 sort 的残留 identity 判定本请求失效，加载完成后
-            # 静默 return，loading 永久残留（MOST FAVORITED 卡 "loading…"）。
-            self._tone_request_view = (
-                None if silent else self._view_identity("pane-tone"))
-            if not refresh and key in self._tone_cache:
+            if append:
+                if not self._tone_has_more or self._tone_loading:
+                    return
+                request_id = self._tone_request_id
+                key = self._tone_cache_key
+                page = self._tone_page + 1
+            else:
+                self._tone_request_id += 1
+                request_id = self._tone_request_id
+                key = (self._query, self._type_filter, "favorites")
+                self._tone_cache_key = key
+                # 与 _show_search 对齐：请求前保存视图快照，否则 _tone_alive
+                # 拿着上一次 sort 的残留 identity 判定本请求失效。
+                self._tone_request_view = (
+                    None if silent else self._view_identity("pane-tone"))
+                page = 1
+            if not append and not refresh and key in self._tone_cache:
                 if self._tone_alive(generation, request_id):
                     self._tone_loading = False
                     self._restore_tone_entry(key, silent=silent)
                 return
             self._tone_loading = True
-            if not silent:
+            if not silent and not append:
                 self._show_status_if_empty(table, "loading…")
                 status.content = "loading…"
+            if not silent:
                 self._update_tone_subtitle(loading=True)
                 # 同 _show_search：加载期间不清 detail（REQ-011）
             try:
@@ -2364,10 +2491,44 @@ class LibraryPanel(Vertical):
                 # 同步），初始为空 SearchSpec() 即无过滤全局榜，行为与
                 # 修复前一致。tag:/make: 无 tones_counts 字段支持，忽略。
                 spec = self._parse_or_notify(self._query) or self._search_spec
-                hits = await asyncio.to_thread(
-                    library.tone3000.top_favorites, 50,
-                    text=spec.text or None,
-                    usernames=self._effective_authors(spec) or None)
+                favorited_page = getattr(
+                    library.tone3000, "favorited_page", None)
+                top_favorites = getattr(library.tone3000, "top_favorites")
+                use_official_page = (
+                    callable(favorited_page)
+                    and getattr(favorited_page, "__module__", "") == "tone3000"
+                    and getattr(top_favorites, "__module__", "") == "tone3000")
+                page_result = None
+                if use_official_page:
+                    page_result = await asyncio.to_thread(
+                        favorited_page, page_size=REMOTE_PAGE_SIZE,
+                        page_number=page,
+                        gear=(None if self._type_filter == "all"
+                              else self._type_filter))
+                    hits = list(page_result.rows)
+                    text_value = str(spec.text or "").casefold().strip()
+                    authors = {
+                        str(name).casefold()
+                        for name in self._effective_authors(spec)
+                    }
+                    hits = [
+                        hit for hit in hits
+                        if (not text_value or text_value in " ".join((
+                            str(hit.get("title") or ""),
+                            str(hit.get("description") or ""),
+                        )).casefold())
+                        and (not authors or str(hit.get("username") or "")
+                             .casefold() in authors)
+                    ]
+                else:
+                    # Keep focused test doubles and older integrations source
+                    # compatible while production uses the official page API.
+                    hits = await asyncio.to_thread(
+                        top_favorites, 50,
+                        text=spec.text or None,
+                        usernames=self._effective_authors(spec) or None,
+                        gear=(None if self._type_filter == "all"
+                              else self._type_filter))
             except library.tone3000.AuthenticationRequiredError:
                 if not self._tone_alive(generation, request_id):
                     return
@@ -2391,28 +2552,37 @@ class LibraryPanel(Vertical):
                 return
             self._tone_loading = False
             self._clear_tone_auth_required()
-            self._remote_tones = {}
-            table.clear()
+            self._tone_page = page
+            self._tone_total = (
+                page_result.total_count if page_result is not None
+                else (len(hits) if not append else self._tone_total))
+            self._tone_has_more = (
+                page_result.has_more if page_result is not None else False)
+            if not append:
+                self._remote_tones = {}
+                table.clear()
             table.cursor_type = "row"
             for t in hits:
-                self._remote_tones[int(t["id"])] = t
-                table.add_row(*self._row_cells(t, table), key=f"remote:{t['id']}")
-            self._tone_total = None
-            self._tone_page = 1
-            self._tone_has_more = False
+                tone_id = int(t["id"])
+                if tone_id in self._remote_tones:
+                    continue
+                self._remote_tones[tone_id] = t
+                table.add_row(*self._row_cells(t, table), key=f"remote:{tone_id}")
             self._save_tone_cache(key)
             if silent:
                 return
-            status.content = "most favorited · enter detail"
-            if not table.row_count:
+            status.content = "my favorites · enter detail"
+            self._update_tone_subtitle()
+            if not append and not table.row_count:
                 # 空结果才清 detail（REQ-011）
                 self._highlighted_key = None
                 self.post_message(ToneHighlighted(None))
                 self._focus_if_pane_active(table)
                 return
-            self._restore_view_anchor("pane-tone")
             self._publish_highlight(table)
-            self._focus_if_pane_active(table)
+            if not append:
+                self._restore_view_anchor("pane-tone")
+                self._focus_if_pane_active(table)
         else:
             order = self._selected_order()
             await self._show_search(self._query or "", order_by=order,
@@ -2583,11 +2753,29 @@ class LibraryPanel(Vertical):
             self._update_creator_subtitle(loading=True)
         page = self._creator_page + 1 if append else 1
         try:
-            hits = await asyncio.to_thread(
-                library.tone3000.top_creators,
-                sort_by=self._creator_sort,
-                page_size=CREATOR_PAGE_SIZE,
-                page_number=page)
+            creator_page_fn = getattr(
+                library.tone3000, "top_creators_page", None)
+            creator_list_fn = getattr(library.tone3000, "top_creators")
+            use_official_page = (
+                callable(creator_page_fn)
+                and getattr(creator_page_fn, "__module__", "") == "tone3000"
+                and getattr(creator_list_fn, "__module__", "") == "tone3000")
+            creator_page = None
+            if use_official_page:
+                creator_page = await asyncio.to_thread(
+                    creator_page_fn,
+                    sort_by=self._creator_sort,
+                    page_size=CREATOR_PAGE_SIZE,
+                    page_number=page)
+                hits = list(creator_page.rows)
+            else:
+                # Keep focused test doubles and older integrations source
+                # compatible while production consumes official metadata.
+                hits = await asyncio.to_thread(
+                    creator_list_fn,
+                    sort_by=self._creator_sort,
+                    page_size=CREATOR_PAGE_SIZE,
+                    page_number=page)
         except library.tone3000.AuthenticationRequiredError:
             if not self._creator_alive(generation, request_id):
                 return
@@ -2629,6 +2817,9 @@ class LibraryPanel(Vertical):
         self._clear_creator_auth_required()
         self._creator_loading = False
         self._creator_page = page
+        if creator_page is not None:
+            self._creator_total = creator_page.total_count
+            self._creator_has_more = creator_page.has_more
         existing_count = len(self._creator_tones)
         new_creators: list[tuple[str, list[dict]]] = []
         for creator in hits:
@@ -2636,7 +2827,8 @@ class LibraryPanel(Vertical):
             if username and username not in self._creator_tones:
                 self._creator_tones[username] = [creator]
                 new_creators.append((username, [creator]))
-        self._creator_has_more = len(hits) >= CREATOR_PAGE_SIZE
+        if creator_page is None:
+            self._creator_has_more = len(hits) >= CREATOR_PAGE_SIZE
         if append:
             start_rank = existing_count + 1
             for offset, (name, tones_) in enumerate(new_creators):
@@ -2691,22 +2883,39 @@ class LibraryPanel(Vertical):
 
     # ---- shared row rendering ---------------------------------------------
 
-    def _local_status_cell(self, tone_id: int) -> str:
+    def _local_status_cell(self, row_key: str) -> str:
+        selection_value = self._local_selection_value(row_key)
         return status_cell(
-            tone_id in self._local_selected,
-            ACTIVE_MARK if tone_id == self._active_tone_id else "",
+            selection_value in self._local_selected,
+            ACTIVE_MARK if row_key == self._active_local_key else "",
         )
 
     def _local_row_cells(self, tone: dict,
                          table: DataTable | None = None) -> list[str]:
-        tone_id = tone.get("id")
-        try:
-            tone_id = int(tone_id)
-        except (TypeError, ValueError):
-            tone_id = None
+        if tone.get("id") is not None:
+            row_key = f"local:{int(tone['id'])}"
+        else:
+            row_key = f"local:pack:{tone.get('pack_id')}"
+        if tone.get("id") is None:
+            total = len(tone.get("models") or ())
+            nam_count = sum(model.get("format") == "nam"
+                            for model in tone.get("models") or ())
+            ir_count = sum(model.get("format") == "ir"
+                           for model in tone.get("models") or ())
+            format_label = ("NAM" if ir_count == 0 else
+                            "IR" if nam_count == 0 else "NAM/IR")
+            files = str(total)
+            return [
+                self._local_status_cell(row_key),
+                escape(str(tone.get("title") or tone.get("name") or "Untitled")),
+                gear_markup(tone.get("gear") or "local",
+                            colors=theme_colors(self.app)),
+                self._author_label(tone.get("username") or "LOCAL"),
+                "—", "—", _uploaded(tone), files,
+                "A2" if nam_count and not ir_count else "—", format_label,
+            ]
         return [
-            self._local_status_cell(tone_id) if tone_id is not None
-            else status_cell(False),
+            self._local_status_cell(row_key),
             *self._row_cells(tone, table),
         ]
 
@@ -2776,14 +2985,20 @@ class LibraryPanel(Vertical):
             # first tone of that creator so the detail pane never blanks.
             tones = self._creator_tones.get(rest)
             return tones[0] if tones else None
-        try:
-            tone_num = int(rest)
-        except ValueError:
-            return None
         if kind == "remote":
-            return self._remote_tones.get(tone_num)
-        if kind == "local":
-            return library.get_tone(tone_num)
+            try:
+                return self._remote_tones.get(int(rest))
+            except ValueError:
+                return None
+        if key.startswith("local:tone:") or (
+                key.startswith("local:") and key.removeprefix("local:").isdigit()):
+            try:
+                raw = key.removeprefix("local:tone:").removeprefix("local:")
+                return library.get_tone(int(raw))
+            except ValueError:
+                return None
+        if key.startswith("local:pack:"):
+            return library.local_pack_by_id(key.removeprefix("local:pack:"))
         return None
 
     def _publish_highlight(self, table: DataTable) -> None:
@@ -2944,7 +3159,9 @@ class LibraryPanel(Vertical):
             return
         if event.select.id == "sort-filter":
             self._sort = str(event.value)
+            self._sort_explicit = True
             self._view_states["pane-tone"]["sort"] = self._sort
+            self._view_states["pane-tone"]["sort_explicit"] = True
             if self._active_pane == "pane-tone":
                 self.run_worker(partial(self._reload_tone_table), name="search",
                                 exclusive=True)
@@ -3037,8 +3254,16 @@ class LibraryPanel(Vertical):
                 self.retry_active()
             return
         kind, _, tid = key.partition(":")
-        if kind == "local":
-            self.post_message(ToneSelected(int(tid)))
+        if key.startswith("local:tone:") or (
+                key.startswith("local:") and key.removeprefix("local:").isdigit()):
+            try:
+                raw = key.removeprefix("local:tone:").removeprefix("local:")
+                self.post_message(ToneSelected(tone_id=int(raw)))
+            except ValueError:
+                return
+        elif key.startswith("local:pack:"):
+            self.post_message(ToneSelected(
+                pack_id=key.removeprefix("local:pack:")))
         elif kind == "creator":
             # REQ-033：作者行 Enter/双击 → 跳 TONE3000 搜索 @author——
             # 搜索栏填上 @名并触发真实搜索（作者信息聚焦联动保留）。

@@ -19,12 +19,14 @@ CLI:
 """
 import argparse
 import filecmp
+import hashlib
 import json
 import math
 import os
 import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import warnings
 from collections.abc import Sequence
@@ -101,21 +103,43 @@ def _to_abs_path(path: str) -> str:
         return str(resolved)
     except OSError:
         return str(p)
+
+
+def _local_file_exists(path: str | None) -> bool:
+    """Return whether a stored local path currently names a regular file."""
+    if not path:
+        return False
+    try:
+        return Path(_to_abs_path(str(path))).is_file()
+    except (OSError, TypeError, ValueError):
+        return False
 DB_FILE = ROOT / "data" / "gigbuddy.db"
 CHAIN_FILE = ROOT / "data" / "live_chain.json"  # same path as tui/live.py (engine protocol)
 TONES_DIR = ROOT / "data" / "tones"             # same as tui/live.py
+PRESETS_DIR = ROOT / "data" / "presets"
+PACK_MANIFEST_NAME = "gigbuddy.json"
+_PACK_ASSET_FORMATS = {".nam": "nam", ".wav": "ir"}
+PRESET_DOCUMENT_KIND = "gigbuddy-preset"
+_PRESET_FILE_SETTING_PREFIX = "preset_file:"
+_PRESET_SYNC_LOCK = threading.RLock()
+_PRESET_SYNC_ACTIVE = False
 
 _IMPORT_LOCKS: dict[str, threading.Lock] = {}
 _IMPORT_LOCKS_GUARD = threading.Lock()
 _SCHEMA_READY: set[Path] = set()
 _SCHEMA_READY_LOCK = threading.Lock()
-_SCHEMA_TABLES = frozenset({"tones", "models", "presets", "settings"})
+_SCHEMA_TABLES = frozenset({
+    "tones", "models", "local_packs", "local_models", "presets", "settings",
+})
+_LOCAL_SCAN_CACHE: dict[tuple[Path, Path], tuple] = {}
+_LOCAL_SCAN_CACHE_LOCK = threading.Lock()
 
 # All 23 TONE3000 search fields (minus search-level `total_count`) + 2 local columns.
 TONE_COLUMNS = [
     "id", "title", "description", "tags", "gear", "makes", "format", "platform",
     "downloads_count", "favorites_count", "a1_models_count", "a2_models_count",
     "custom_models_count", "username", "avatar_url", "user_id", "images",
+    "url", "user_url",
     "model_name", "created_at", "updated_at", "published_at",
     "has_model_with_url", "irs_count", "models_count",
     "imported_at", "local_dir",
@@ -141,6 +165,8 @@ CREATE TABLE IF NOT EXISTS tones (
     avatar_url          TEXT,
     user_id             TEXT,
     images              TEXT,          -- JSON array
+    url                 TEXT,          -- official canonical tone page
+    user_url            TEXT,          -- official creator profile page
     model_name          TEXT,
     created_at          TEXT,
     updated_at          TEXT,
@@ -162,6 +188,34 @@ CREATE TABLE IF NOT EXISTS models (
     local_size   INTEGER,
     local_sha256 TEXT
 );
+CREATE TABLE IF NOT EXISTS local_packs (
+    pack_id         TEXT PRIMARY KEY,
+    root_path       TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    author          TEXT,
+    gear            TEXT,
+    tags_json       TEXT,
+    makes_json      TEXT,
+    description     TEXT,
+    source_kind     TEXT NOT NULL DEFAULT 'local',
+    source_tone_id  INTEGER,
+    metadata_json   TEXT,
+    manifest_sha256 TEXT,
+    manifest_status TEXT NOT NULL DEFAULT 'missing',
+    scanned_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS local_models (
+    model_key       TEXT PRIMARY KEY,
+    pack_id         TEXT NOT NULL REFERENCES local_packs(pack_id) ON DELETE CASCADE,
+    relative_path   TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    format          TEXT NOT NULL,
+    size            INTEGER,
+    sha256          TEXT,
+    metadata_json   TEXT,
+    scanned_at      TEXT NOT NULL,
+    UNIQUE(pack_id, relative_path)
+);
 CREATE TABLE IF NOT EXISTS presets (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT UNIQUE NOT NULL,
@@ -178,6 +232,8 @@ CREATE INDEX IF NOT EXISTS idx_tones_title   ON tones(title);
 CREATE INDEX IF NOT EXISTS idx_tones_gear    ON tones(gear);
 CREATE INDEX IF NOT EXISTS idx_tones_dl      ON tones(downloads_count DESC);
 CREATE INDEX IF NOT EXISTS idx_models_tone   ON models(tone_id);
+CREATE INDEX IF NOT EXISTS idx_local_models_pack ON local_models(pack_id);
+CREATE INDEX IF NOT EXISTS idx_local_models_path ON local_models(relative_path);
 """
 
 
@@ -219,6 +275,13 @@ def connect() -> sqlite3.Connection:
             }
             if "format" not in tone_columns:
                 conn.execute("ALTER TABLE tones ADD COLUMN format TEXT")
+            tone_migrations = {
+                "url": "ALTER TABLE tones ADD COLUMN url TEXT",
+                "user_url": "ALTER TABLE tones ADD COLUMN user_url TEXT",
+            }
+            for column, statement in tone_migrations.items():
+                if column not in tone_columns:
+                    conn.execute(statement)
             model_columns = {
                 row[1] for row in conn.execute(
                     "PRAGMA table_info(models)").fetchall()
@@ -235,7 +298,48 @@ def connect() -> sqlite3.Connection:
                     conn.execute(statement)
             conn.commit()
             _SCHEMA_READY.add(db_path)
+            with _LOCAL_SCAN_CACHE_LOCK:
+                _LOCAL_SCAN_CACHE.clear()
     return conn
+
+
+def _local_tree_token(root: Path | None = None) -> tuple:
+    """Return cheap direct-file signals for local Pack refresh gating.
+
+    Directory mtime alone misses edits to an existing model file. The scanner
+    uses the same shallow scope, so a content edit, rename, or manifest edit
+    invalidates the index without hashing every file on every TUI tick.
+    """
+    root = Path(root or TONES_DIR)
+    try:
+        directories = sorted(
+            path for path in root.iterdir()
+            if path.is_dir() and not path.name.startswith("."))
+    except OSError:
+        return ()
+    signals = []
+    for directory in directories:
+        try:
+            stat = directory.stat()
+        except OSError:
+            continue
+        signals.append((directory.name, stat.st_ino, stat.st_mtime_ns))
+        try:
+            children = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+        except OSError:
+            continue
+        for path in children:
+            if not path.is_file():
+                continue
+            if path.name != PACK_MANIFEST_NAME and path.suffix.casefold() not in _PACK_ASSET_FORMATS:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signals.append((f"{directory.name}/{path.name}", stat.st_ino,
+                            stat.st_size, stat.st_mtime_ns))
+    return tuple(signals)
 
 
 def database_change_token() -> tuple:
@@ -247,7 +351,12 @@ def database_change_token() -> tuple:
             return (0, 0, 0)
         return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
-    return stat_token(Path(DB_FILE)) + stat_token(Path(TONES_DIR))
+    preset_files = tuple(
+        (str(path), *stat_token(path))
+        for path in sorted(Path(PRESETS_DIR).glob("*.json"))
+    )
+    return (stat_token(Path(DB_FILE)) + stat_token(Path(TONES_DIR))
+            + (_local_tree_token(), preset_files))
 
 
 def chain_change_token() -> tuple:
@@ -268,10 +377,326 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
             except (TypeError, json.JSONDecodeError):
                 d[c] = None
     # REQ-035 portable：DB 存相对项目根，读取统一还原为绝对
-    for c in ("local_path", "local_dir"):
+    for c in ("local_path", "local_dir", "root_path"):
         if d.get(c):
             d[c] = _to_abs_path(d[c])
     return d
+
+
+def _json_value(raw, fallback):
+    if raw in (None, ""):
+        return fallback
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+    return value
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _path_key(path: Path) -> str:
+    """Return a normalized absolute path for local-index comparisons."""
+    return str(Path(path).resolve(strict=False))
+
+
+def _local_pack_id(directory: Path, manifest: dict | None) -> str:
+    pack = manifest.get("pack") if isinstance(manifest, dict) else None
+    candidate = pack.get("id") if isinstance(pack, dict) else None
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    digest = hashlib.sha256(_path_key(directory).encode("utf-8")).hexdigest()[:20]
+    return f"local-{digest}"
+
+
+def _local_manifest_fields(directory: Path) -> dict:
+    manifest, status = _read_pack_manifest(directory)
+    pack = manifest.get("pack") if isinstance(manifest, dict) else {}
+    pack = dict(pack) if isinstance(pack, dict) else {}
+    source = pack.get("source")
+    source = dict(source) if isinstance(source, dict) else {}
+    source_tone_id = source.get("tone_id")
+    if isinstance(source_tone_id, bool):
+        source_tone_id = None
+    try:
+        source_tone_id = int(source_tone_id) if source_tone_id is not None else None
+    except (TypeError, ValueError):
+        source_tone_id = None
+    def list_field(key: str) -> list:
+        value = pack.get(key)
+        return list(value) if isinstance(value, list) else []
+    manifest_path = directory / PACK_MANIFEST_NAME
+    return {
+        "manifest": manifest,
+        "status": status,
+        "manifest_sha256": _sha256_file(manifest_path) if manifest_path.is_file() else None,
+        "pack_id": _local_pack_id(directory, manifest),
+        "name": str(pack.get("name") or directory.name),
+        "author": str(pack.get("author") or "LOCAL"),
+        "gear": pack.get("gear") if isinstance(pack.get("gear"), str) else None,
+        "tags": list_field("tags"),
+        "makes": list_field("makes"),
+        "description": str(pack.get("description") or ""),
+        "source_kind": str(source.get("kind") or "local"),
+        "source_tone_id": source_tone_id,
+    }
+
+
+def _local_pack_model_entry(manifest: dict | None, filename: str) -> dict:
+    models = manifest.get("models") if isinstance(manifest, dict) else None
+    if not isinstance(models, list):
+        return {}
+    for item in models:
+        if isinstance(item, dict) and item.get("file") == filename:
+            return dict(item)
+    return {}
+
+
+def _remote_pack_roots(conn: sqlite3.Connection, root: Path) -> set[str]:
+    """Return imported remote Pack roots so the local scanner cannot duplicate them."""
+    result = set()
+    for row in conn.execute(
+            "SELECT local_dir FROM tones WHERE local_dir IS NOT NULL").fetchall():
+        if row[0]:
+            result.add(_path_key(Path(_to_abs_path(row[0]))))
+    return result
+
+
+def _local_pack_row(row: sqlite3.Row) -> dict:
+    result = _row_to_dict(row)
+    result["tags"] = _json_value(result.pop("tags_json", None), [])
+    result["makes"] = _json_value(result.pop("makes_json", None), [])
+    result["metadata"] = _json_value(result.pop("metadata_json", None), {})
+    result["source"] = result.get("source_kind") or "local"
+    result["local"] = True
+    result["id"] = None
+    result["title"] = result.get("name")
+    result["username"] = result.get("author") or "LOCAL"
+    result["local_dir"] = result.get("root_path")
+    return result
+
+
+def _local_model_row(row: sqlite3.Row | dict, pack: dict) -> dict:
+    result = _row_to_dict(row) if isinstance(row, sqlite3.Row) else dict(row)
+    result["pack_id"] = pack["pack_id"]
+    result["pack_name"] = pack.get("name")
+    result["title"] = pack.get("name")
+    result["username"] = pack.get("author") or "LOCAL"
+    result["tone_id"] = None
+    result["id"] = None
+    result["source"] = "local"
+    result["local"] = True
+    result["format"] = result.get("format") or "nam"
+    root = pack.get("root_path")
+    relative_path = result.get("relative_path")
+    if root and relative_path:
+        result["local_path"] = str(Path(root) / str(relative_path))
+    # A local .nam is an explicitly supported NAM asset. The extension remains
+    # the source of truth; this token only lets existing UI metadata helpers
+    # render it as a supported A2-like NAM row.
+    if result["format"] == "nam":
+        result["architecture"] = result.get("architecture") or "A2"
+        result["architecture_version"] = result.get("architecture_version") or "2"
+    elif result["format"] == "ir":
+        result["architecture"] = result.get("architecture") or "IR"
+    return result
+
+
+def scan_local_packs(*, force: bool = False) -> list[dict]:
+    """Scan direct ``data/tones/<pack>/*.nam|*.wav`` files into a rebuildable index.
+
+    Remote Pack directories already represented by ``tones.local_dir`` are
+    intentionally skipped. A missing/invalid/foreign manifest never hides a
+    valid asset; it only removes optional metadata from the view.
+    """
+    root = Path(TONES_DIR).resolve(strict=False)
+    cache_key = (Path(DB_FILE).resolve(strict=False), root)
+    token = _local_tree_token(root)
+    with _LOCAL_SCAN_CACHE_LOCK:
+        if not force and _LOCAL_SCAN_CACHE.get(cache_key) == token:
+            return list_local_packs(scan=False)
+    root.mkdir(parents=True, exist_ok=True)
+    with connect() as conn:
+        remote_roots = _remote_pack_roots(conn, root)
+        directories = []
+        try:
+            directories = sorted(
+                path for path in root.iterdir()
+                if path.is_dir() and not path.name.startswith("."))
+        except OSError:
+            directories = []
+        seen_roots: set[str] = set()
+        now = datetime.now(timezone.utc).isoformat()
+        for directory in directories:
+            directory_key = _path_key(directory)
+            if directory_key in remote_roots:
+                continue
+            files = [
+                path for path in directory.iterdir()
+                if path.is_file() and not path.name.startswith(".")
+                and path.name != PACK_MANIFEST_NAME
+                and path.suffix.casefold() in _PACK_ASSET_FORMATS
+            ]
+            if not files:
+                continue
+            fields = _local_manifest_fields(directory)
+            pack_id = fields["pack_id"]
+            root_value = _to_rel_path(directory_key)
+            existing_root = conn.execute(
+                "SELECT pack_id FROM local_packs WHERE root_path = ?",
+                (root_value,),
+            ).fetchone()
+            if existing_root and existing_root["pack_id"] != pack_id:
+                # A manifest may be removed, corrupted, or have its id edited.
+                # The directory remains the asset boundary; replace only its
+                # rebuildable index row so the root_path UNIQUE constraint does
+                # not make an otherwise valid Pack disappear.
+                conn.execute(
+                    "DELETE FROM local_packs WHERE pack_id = ?",
+                    (existing_root["pack_id"],),
+                )
+            collision = conn.execute(
+                "SELECT root_path FROM local_packs WHERE pack_id = ?", (pack_id,)
+            ).fetchone()
+            if collision and _path_key(Path(_to_abs_path(collision[0]))) != directory_key:
+                digest = hashlib.sha256(directory_key.encode("utf-8")).hexdigest()[:8]
+                pack_id = f"{pack_id}-{digest}"
+                fields["pack_id"] = pack_id
+            seen_roots.add(directory_key)
+            conn.execute(
+                "INSERT INTO local_packs (pack_id, root_path, name, author, gear, "
+                "tags_json, makes_json, description, source_kind, source_tone_id, "
+                "metadata_json, manifest_sha256, manifest_status, scanned_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(pack_id) DO UPDATE SET root_path=excluded.root_path, "
+                "name=excluded.name, author=excluded.author, gear=excluded.gear, "
+                "tags_json=excluded.tags_json, makes_json=excluded.makes_json, "
+                "description=excluded.description, source_kind=excluded.source_kind, "
+                "source_tone_id=excluded.source_tone_id, metadata_json=excluded.metadata_json, "
+                "manifest_sha256=excluded.manifest_sha256, manifest_status=excluded.manifest_status, "
+                "scanned_at=excluded.scanned_at",
+                (pack_id, root_value, fields["name"], fields["author"], fields["gear"],
+                 json.dumps(fields["tags"], ensure_ascii=False),
+                 json.dumps(fields["makes"], ensure_ascii=False), fields["description"],
+                 fields["source_kind"], fields["source_tone_id"],
+                 json.dumps(fields["manifest"] or {}, ensure_ascii=False),
+                 fields["manifest_sha256"], fields["status"], now),
+            )
+            conn.execute("DELETE FROM local_models WHERE pack_id = ?", (pack_id,))
+            for path in sorted(files, key=lambda item: item.name.casefold()):
+                relative_path = path.name
+                entry = _local_pack_model_entry(fields["manifest"], relative_path)
+                model_name = str(entry.get("name") or path.name)
+                model_format = _PACK_ASSET_FORMATS[path.suffix.casefold()]
+                metadata = entry.get("metadata")
+                if not isinstance(metadata, dict):
+                    metadata = entry
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = None
+                conn.execute(
+                    "INSERT INTO local_models (model_key, pack_id, relative_path, name, "
+                    "format, size, sha256, metadata_json, scanned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ",
+                    (f"{pack_id}:{relative_path}", pack_id, relative_path, model_name,
+                     model_format, size, _sha256_file(path),
+                     json.dumps(metadata, ensure_ascii=False), now),
+                )
+        stale = conn.execute(
+            "SELECT pack_id, root_path FROM local_packs"
+        ).fetchall()
+        for row in stale:
+            if _path_key(Path(_to_abs_path(row["root_path"]))) not in seen_roots:
+                conn.execute("DELETE FROM local_packs WHERE pack_id = ?", (row["pack_id"],))
+        conn.commit()
+    with _LOCAL_SCAN_CACHE_LOCK:
+        _LOCAL_SCAN_CACHE[cache_key] = token
+    return list_local_packs(scan=False)
+
+
+def list_local_packs(*, scan: bool = True) -> list[dict]:
+    """Return user-managed local Packs, including optional model rows."""
+    if scan:
+        scan_local_packs()
+    with connect() as conn:
+        packs = []
+        for row in conn.execute(
+                "SELECT * FROM local_packs ORDER BY LOWER(name), pack_id"
+        ).fetchall():
+            pack = _local_pack_row(row)
+            pack["models"] = []
+            packs.append(pack)
+        for pack in packs:
+            rows = conn.execute(
+                "SELECT * FROM local_models WHERE pack_id = ? "
+                "ORDER BY LOWER(name), relative_path", (pack["pack_id"],)
+            ).fetchall()
+            pack["models"] = [_local_model_row(row, pack) for row in rows]
+            pack["models_count"] = len(pack["models"])
+            pack["a2_models_count"] = sum(m["format"] == "nam" for m in pack["models"])
+            pack["irs_count"] = sum(m["format"] == "ir" for m in pack["models"])
+            pack["format"] = (
+                "nam" if pack["irs_count"] == 0 else
+                "ir" if pack["a2_models_count"] == 0 else None)
+        return packs
+
+
+def _local_model_rows_for_path(path: str) -> list[dict]:
+    if not path:
+        return []
+    target = _path_key(Path(_to_abs_path(path)))
+    packs = {pack["pack_id"]: pack for pack in list_local_packs()}
+    matches = []
+    for pack in packs.values():
+        root = _path_key(Path(pack["root_path"]))
+        for model in pack.get("models", []):
+            if _path_key(Path(root) / model["relative_path"]) == target:
+                matches.append(model)
+    return matches
+
+
+def local_model_for_path(path: str) -> dict | None:
+    """Resolve a local Pack model by path, without inventing a remote ID."""
+    rows = _local_model_rows_for_path(path)
+    return rows[0] if len(rows) == 1 else None
+
+
+def local_model_for_key(model_key: str) -> dict | None:
+    """Resolve one local model by its opaque Pack-scoped key."""
+    if not isinstance(model_key, str) or not model_key:
+        return None
+    for pack in list_local_packs():
+        for model in pack.get("models") or []:
+            if model.get("model_key") == model_key:
+                return model
+    return None
+
+
+def local_pack_for_path(path: str) -> dict | None:
+    model = local_model_for_path(path)
+    if not model:
+        return None
+    for pack in list_local_packs():
+        if pack["pack_id"] == model.get("pack_id"):
+            return pack
+    return None
+
+
+def local_pack_by_id(pack_id: str) -> dict | None:
+    """Resolve one local Pack by its stable string identity."""
+    if not isinstance(pack_id, str) or not pack_id:
+        return None
+    return next((pack for pack in list_local_packs()
+                 if pack.get("pack_id") == pack_id), None)
 
 
 def upsert_tone(conn: sqlite3.Connection, row: dict, *, commit: bool = True) -> None:
@@ -422,7 +847,7 @@ def list_tones(gear: str | None = None, limit: int | None = None,
             if not tone3000.is_supported_model(model, tone):
                 continue
             supported_ids.setdefault(tone_id, set()).add(model_id)
-            if model.get("local_path"):
+            if _local_file_exists(model.get("local_path")):
                 local_supported_ids.setdefault(tone_id, set()).add(model_id)
 
         requested_ids = set()
@@ -479,8 +904,15 @@ def list_local_models(kind: str = "amp", limit: int = 2000) -> list[dict]:
             "WHERE m.local_path IS NOT NULL "
             "ORDER BY t.downloads_count DESC, t.id, m.id").fetchall()
     models = []
+    seen_paths: set[str] = set()
     for row in rows:
         model = _row_to_dict(row)
+        if not _local_file_exists(model.get("local_path")):
+            continue
+        # A legacy SQLite row owns this physical file even when its
+        # architecture is unsupported; do not let the generic Pack scanner
+        # reintroduce the same path as an anonymous local model below.
+        seen_paths.add(_path_key(Path(model["local_path"])))
         tone = {key: model.get(key) for key in ("gear", "format", "platform")}
         classification_model = {
             key: model.get(key) for key in (
@@ -492,7 +924,21 @@ def list_local_models(kind: str = "amp", limit: int = 2000) -> list[dict]:
             continue
         models.append(model)
         if len(models) >= max_rows:
-            break
+            return models
+    for pack in list_local_packs():
+        for model in pack.get("models") or []:
+            is_ir = model.get("format") == "ir"
+            if is_ir != want_ir:
+                continue
+            if not _local_file_exists(model.get("local_path")):
+                continue
+            path_key = _path_key(Path(model["local_path"]))
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            models.append(model)
+            if len(models) >= max_rows:
+                return models
     return models
 
 
@@ -793,17 +1239,8 @@ def _publish_import_files(
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if staged.is_file():
-                if target.exists():
-                    if filecmp.cmp(staged, target, shallow=False):
-                        staged.unlink()
-                    else:
-                        backup = staging / f".rollback-{uuid4().hex}-{target.name}"
-                        shutil.copy2(target, backup)
-                        os.replace(staged, target)
-                        replaced.append((target, backup))
-                else:
-                    os.replace(staged, target)
-                    published.append(target)
+                _publish_import_artifact(
+                    staged, target, staging, published, replaced)
             record["local_path"] = str(target)
             records.append(record)
     except Exception:
@@ -811,6 +1248,198 @@ def _publish_import_files(
         _restore_replaced_files(replaced)
         raise
     return records, published, replaced
+
+
+def _publish_import_artifact(
+        staged: Path, target: Path, staging: Path,
+        published: list[Path], replaced: list[tuple[Path, Path]]) -> None:
+    """Atomically publish one staged file while retaining rollback state."""
+    if target.exists():
+        if filecmp.cmp(staged, target, shallow=False):
+            staged.unlink()
+            return
+        backup = staging / f".rollback-{uuid4().hex}-{target.name}"
+        shutil.copy2(target, backup)
+        os.replace(staged, target)
+        replaced.append((target, backup))
+        return
+    os.replace(staged, target)
+    published.append(target)
+
+
+def _read_pack_manifest(directory: Path) -> tuple[dict | None, str]:
+    """Read an optional manifest without making it a download prerequisite.
+
+    The status lets import distinguish a missing manifest (safe to create) from
+    malformed or foreign JSON (safe to preserve rather than overwrite).
+    """
+    path = Path(directory) / PACK_MANIFEST_NAME
+    if not path.is_file():
+        return None, "missing"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "invalid"
+    if not isinstance(value, dict):
+        return None, "invalid"
+    kind = value.get("kind")
+    if kind not in (None, "gigbuddy-tone-pack"):
+        return None, "foreign"
+    return value, "valid"
+
+
+def _write_json_atomic(path: Path, value: dict) -> None:
+    """Write JSON beside its destination and replace it without partial files."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _manifest_pack_value(value, fallback):
+    """Keep manifest fields JSON-safe while tolerating incomplete API rows."""
+    if isinstance(value, list):
+        return list(value)
+    return fallback
+
+
+def _tone_pack_manifest(
+        tone_id: int, tone: dict, destination: Path,
+        existing_records: list[dict], downloaded_records: list[dict],
+        existing_manifest: dict | None) -> dict:
+    """Build the portable manifest for a remote Pack.
+
+    The directory is the asset source of truth: only direct ``.nam``/``.wav``
+    files are listed. Known SQLite/download records add remote identity, while
+    entries and unknown fields already present in ``gigbuddy.json`` are kept.
+    """
+    old = existing_manifest if isinstance(existing_manifest, dict) else {}
+    manifest = dict(old)
+    manifest.update({"schema_version": 1, "kind": "gigbuddy-tone-pack"})
+
+    old_pack = old.get("pack")
+    pack = dict(old_pack) if isinstance(old_pack, dict) else {}
+    # Remote identity and source are authoritative. Human-editable display
+    # fields are defaults: a later re-import keeps user changes.
+    pack["id"] = f"tone3000-{int(tone_id)}"
+    defaults = {
+        "name": tone.get("title") or destination.name,
+        "author": tone.get("username") or "TONE3000",
+        "gear": tone.get("gear"),
+        "tags": _manifest_pack_value(tone.get("tags"), []),
+        "makes": _manifest_pack_value(tone.get("makes"), []),
+        "description": tone.get("description") or "",
+    }
+    for key, value in defaults.items():
+        if key not in pack or pack[key] is None:
+            pack[key] = value
+    pack["source"] = {
+        "kind": "tone3000",
+        "url": (tone.get("url") or
+                f"{tone3000.TONE3000_ORIGIN}/tones/"
+                f"{tone3000.slugify(tone.get('title'), 48)}-{int(tone_id)}"),
+        "tone_id": int(tone_id),
+    }
+    manifest["pack"] = pack
+
+    records_by_path: dict[str, dict] = {}
+    for record in [*existing_records, *downloaded_records]:
+        if not isinstance(record, dict) or not record.get("local_path"):
+            continue
+        path = Path(_to_abs_path(str(record["local_path"]))).resolve(strict=False)
+        try:
+            relative = path.relative_to(Path(destination).resolve(strict=False))
+        except ValueError:
+            continue
+        if len(relative.parts) != 1:
+            continue
+        normalized = dict(record)
+        records_by_path[relative.name] = normalized
+
+    old_models = old.get("models")
+    old_by_file: dict[str, dict] = {}
+    old_by_id: dict[str, dict] = {}
+    if isinstance(old_models, list):
+        for item in old_models:
+            if not isinstance(item, dict):
+                continue
+            filename = item.get("file")
+            if isinstance(filename, str) and filename:
+                old_by_file[filename] = item
+            if item.get("id") is not None:
+                old_by_id[str(item["id"])] = item
+
+    models: list[dict] = []
+    current_files: set[str] = set()
+    destination = Path(destination)
+    for path in sorted(destination.iterdir(), key=lambda item: item.name.casefold()):
+        if (not path.is_file() or path.name.startswith(".")
+                or path.name == PACK_MANIFEST_NAME):
+            continue
+        model_format = _PACK_ASSET_FORMATS.get(path.suffix.casefold())
+        if model_format is None:
+            continue
+        current_files.add(path.name)
+        record = records_by_path.get(path.name)
+        old_entry = old_by_file.get(path.name)
+        if old_entry is None and record and record.get("id") is not None:
+            old_entry = old_by_id.get(str(record["id"]))
+        entry = dict(old_entry) if isinstance(old_entry, dict) else {}
+        entry["file"] = path.name
+        if not entry.get("name"):
+            entry["name"] = (record.get("name") if record else None) or path.name
+        # The extension is a file fact; manifest data cannot change its type.
+        entry["format"] = model_format
+        if record and record.get("id") is not None:
+            entry["id"] = record["id"]
+            entry["tone_id"] = int(tone_id)
+        if record and record.get("model_url"):
+            source = entry.get("source")
+            source = dict(source) if isinstance(source, dict) else {}
+            source.update({
+                "kind": "tone3000",
+                "tone_id": int(tone_id),
+                "model_id": record.get("id"),
+                "url": record["model_url"],
+            })
+            entry["source"] = source
+        payload = record.get("model_json") if record else None
+        if isinstance(payload, dict):
+            for key in ("architecture", "architecture_version"):
+                if payload.get(key):
+                    entry[key] = payload[key]
+        entry.pop("missing", None)
+        models.append(entry)
+
+    # Keep descriptions for files the user removed; the scanner can ignore the
+    # marked entries, and a later re-download can restore them by filename/id.
+    if isinstance(old_models, list):
+        for item in old_models:
+            if not isinstance(item, dict):
+                continue
+            filename = item.get("file")
+            if not isinstance(filename, str) or filename in current_files:
+                continue
+            stale = dict(item)
+            stale["missing"] = True
+            models.append(stale)
+    manifest["models"] = models
+    if "metadata" not in manifest:
+        manifest["metadata"] = {}
+    return manifest
 
 
 def _remove_owned_files(paths: list[Path]) -> None:
@@ -877,7 +1506,9 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
     row is always complete. Returns the stored tone row (with models) or None if
     TONE3000 has no such tone. Files land in data/tones/<tone_id>-<title-slug>/ and
     keep TONE3000's semantic model name (models.name — same naming as the site's zip
-    download). IR tones (gear=cab/space) are recorded with architecture="IR".
+    download). The Pack also gets a portable ``gigbuddy.json`` manifest when the
+    existing manifest is missing or already a GigBuddy manifest. IR tones
+    (gear=cab/space) are recorded with architecture="IR".
     """
     row = tone3000.tone_by_id(tone_id)
     if not row:
@@ -897,6 +1528,7 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
         published: list[Path] = []
         replaced: list[tuple[Path, Path]] = []
         try:
+            existing_manifest, manifest_status = _read_pack_manifest(dest)
             _seed_import_directory(dest, staging)
             existing_models = _existing_import_models(tone_id)
             # A pack install is model-granular. Fetch A2 and IR rows only;
@@ -921,6 +1553,15 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
                 return None
             dest.mkdir(parents=True, exist_ok=True)
             paths, published, replaced = _publish_import_files(paths, staging, dest)
+            if manifest_status in {"missing", "valid"}:
+                manifest = _tone_pack_manifest(
+                    tone_id, row, dest, existing_models, paths,
+                    existing_manifest)
+                staged_manifest = staging / PACK_MANIFEST_NAME
+                _write_json_atomic(staged_manifest, manifest)
+                _publish_import_artifact(
+                    staged_manifest, dest / PACK_MANIFEST_NAME, staging,
+                    published, replaced)
             row["local_dir"] = _to_rel_path(str(dest))   # REQ-035 portable
             with connect() as conn:
                 upsert_tone(conn, row, commit=False)
@@ -1050,6 +1691,8 @@ def _preset_has_unsupported_registered_asset(chain: dict) -> bool:
                         for row in rows):
                     return True
                 continue
+            if local_model_for_path(path) is not None:
+                continue
             try:
                 if (Path(_to_abs_path(path)).is_file()
                         and not model_rows_for_id):
@@ -1109,6 +1752,22 @@ def _model_id_for_path(path: str) -> int | None:
     return supported[0]["id"] if len(supported) == len(rows) and supported else None
 
 
+def _local_model_ref_for_path(path: str) -> dict | None:
+    """Return the stable local Pack identity for one supported asset path."""
+    model = local_model_for_path(path)
+    if not model:
+        return None
+    if model.get("format") not in {"nam", "ir"}:
+        return None
+    return {
+        "source": "local",
+        "pack_id": model["pack_id"],
+        "relative_path": model["relative_path"],
+        "model_key": model["model_key"],
+        "local_path": model.get("local_path"),
+    }
+
+
 def tone_title_for_path(path: str) -> str | None:
     """Tone title owning the model at `path` (None if not a library file).
 
@@ -1124,7 +1783,10 @@ def tone_title_for_path(path: str) -> str | None:
             "FROM models m JOIN tones t ON t.id = m.tone_id "
             f"WHERE m.{clause}", forms).fetchone()
         model = _supported_model_from_row(row)
-        return row["tone_title"] if model else None
+        if model:
+            return row["tone_title"]
+    local = local_model_for_path(path)
+    return local.get("pack_name") if local else None
 
 
 def _model_path(model_id: int) -> str | None:
@@ -1250,8 +1912,16 @@ def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
                 f"Preset Slot {index + 1:02d} cannot have model_id without path")
         return {"model_id": model_id, "path": None, **gains,
                 **({"bypass": True} if item.get("bypass") else {})}
-    return {"model_id": model_id, **gains,
-            "path": _preset_storage_path(raw_path, index)}
+    stored_path = _preset_storage_path(raw_path, index)
+    local = local_model_for_path(raw_path)
+    if local is not None:
+        return {
+            "model_id": None, **gains, "path": stored_path,
+            "source": "local", "pack_id": local["pack_id"],
+            "relative_path": local["relative_path"],
+            "model_key": local["model_key"],
+        }
+    return {"model_id": model_id, **gains, "path": stored_path}
 
 
 def _legacy_slot(raw: dict, index: int, id_key: str,
@@ -1331,6 +2001,219 @@ def _preset_row(row: sqlite3.Row) -> dict | None:
     return d
 
 
+def _preset_file_key(preset_id: int) -> str:
+    return f"{_PRESET_FILE_SETTING_PREFIX}{preset_id}"
+
+
+def _preset_filename(preset_id: int, name: str) -> str:
+    return f"{preset_id}-{tone3000.slugify(name, 64)}.json"
+
+
+def _preset_file_path(preset_id: int, name: str) -> Path:
+    return Path(PRESETS_DIR) / _preset_filename(preset_id, name)
+
+
+def _preset_file_token(path: Path) -> str:
+    stat = path.stat()
+    return f"{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _preset_document(row: sqlite3.Row) -> dict:
+    raw_chain = json.loads(row["chain_json"])
+    return {
+        "schema_version": 1,
+        "kind": PRESET_DOCUMENT_KIND,
+        "id": row["id"],
+        "name": row["name"],
+        "note": _preset_note_value(row["note"]),
+        "chain": _canonical_preset_chain(raw_chain),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _preset_write_row_file(conn: sqlite3.Connection, row: sqlite3.Row) -> Path:
+    path = _preset_file_path(int(row["id"]), row["name"])
+    Path(PRESETS_DIR).mkdir(parents=True, exist_ok=True)
+    prefix = f"{int(row['id'])}-"
+    for other in Path(PRESETS_DIR).glob(f"{prefix}*.json"):
+        if other != path:
+            other.unlink(missing_ok=True)
+    _write_json_atomic(path, _preset_document(row))
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (_preset_file_key(int(row["id"])),
+         json.dumps({"file": path.name, "token": _preset_file_token(path)})),
+    )
+    return path
+
+
+def _preset_write_by_id(conn: sqlite3.Connection, preset_id: int) -> Path:
+    row = conn.execute(
+        "SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"Preset id {preset_id} no longer exists.")
+    return _preset_write_row_file(conn, row)
+
+
+def _preset_tracked_files(conn: sqlite3.Connection) -> dict[int, dict]:
+    rows = conn.execute(
+        "SELECT key, value FROM settings WHERE key LIKE ?",
+        (f"{_PRESET_FILE_SETTING_PREFIX}%",),
+    ).fetchall()
+    tracked: dict[int, dict] = {}
+    for row in rows:
+        try:
+            preset_id = int(row["key"][len(_PRESET_FILE_SETTING_PREFIX):])
+            value = json.loads(row["value"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict) and isinstance(value.get("file"), str):
+            tracked[preset_id] = value
+    return tracked
+
+
+def _preset_parse_document(path: Path) -> tuple[str, str, dict, str | None, str | None]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("document must be an object")
+    if document.get("kind") != PRESET_DOCUMENT_KIND:
+        raise ValueError(f"kind must be '{PRESET_DOCUMENT_KIND}'")
+    version = document.get("schema_version")
+    if version != 1:
+        raise ValueError("schema_version must be 1")
+    name = document.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty string")
+    chain = _canonical_preset_chain(document.get("chain"))
+    _validate_preset_draft_references(chain)
+    note = _preset_note_value(document.get("note"))
+    created_at = document.get("created_at")
+    updated_at = document.get("updated_at")
+    if created_at is not None and not isinstance(created_at, str):
+        raise ValueError("created_at must be a string or null")
+    if updated_at is not None and not isinstance(updated_at, str):
+        raise ValueError("updated_at must be a string or null")
+    return name.strip(), note, chain, created_at, updated_at
+
+
+def _preset_reconcile_files() -> None:
+    """Make editable JSON Presets and the SQLite index agree.
+
+    Tracked file edits win over SQLite. Deleting a tracked file deletes its
+    row. Legacy SQLite-only rows are exported, and untracked GigBuddy JSON
+    documents are imported. Invalid files are preserved and ignored.
+    """
+    global _PRESET_SYNC_ACTIVE
+    with _PRESET_SYNC_LOCK:
+        if _PRESET_SYNC_ACTIVE:
+            return
+        _PRESET_SYNC_ACTIVE = True
+        try:
+            Path(PRESETS_DIR).mkdir(parents=True, exist_ok=True)
+            with connect() as conn:
+                tracked = _preset_tracked_files(conn)
+                rows = conn.execute("SELECT * FROM presets ORDER BY id").fetchall()
+                rows_by_id = {int(row["id"]): row for row in rows}
+                claimed: set[Path] = set()
+
+                for preset_id, state in tracked.items():
+                    path = Path(PRESETS_DIR) / state["file"]
+                    claimed.add(path)
+                    row = rows_by_id.get(preset_id)
+                    if row is None:
+                        conn.execute("DELETE FROM settings WHERE key = ?",
+                                     (_preset_file_key(preset_id),))
+                        continue
+                    if not path.is_file():
+                        conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
+                        conn.execute("DELETE FROM settings WHERE key = ?",
+                                     (_preset_file_key(preset_id),))
+                        conn.execute(
+                            "DELETE FROM settings WHERE key='active_preset' AND value=?",
+                            (row["name"],),
+                        )
+                        rows_by_id.pop(preset_id, None)
+                        continue
+                    token = _preset_file_token(path)
+                    if token == state.get("token"):
+                        continue
+                    try:
+                        name, note, chain, created_at, _ = _preset_parse_document(path)
+                        conflict = conn.execute(
+                            "SELECT id FROM presets WHERE name = ? AND id != ?",
+                            (name, preset_id),
+                        ).fetchone()
+                        if conflict:
+                            raise ValueError(f"Preset '{name}' already exists")
+                        now = datetime.now(timezone.utc).isoformat()
+                        conn.execute(
+                            "UPDATE presets SET name=?, note=?, chain_json=?, "
+                            "created_at=COALESCE(?, created_at), updated_at=? WHERE id=?",
+                            (name, note, json.dumps(chain, ensure_ascii=False),
+                             created_at, now, preset_id),
+                        )
+                        if row["name"] != name:
+                            conn.execute(
+                                "UPDATE settings SET value=? "
+                                "WHERE key='active_preset' AND value=?",
+                                (name, row["name"]),
+                            )
+                        refreshed = conn.execute(
+                            "SELECT * FROM presets WHERE id=?", (preset_id,)).fetchone()
+                        new_path = _preset_write_row_file(conn, refreshed)
+                        claimed.discard(path)
+                        claimed.add(new_path)
+                        if new_path != path:
+                            path.unlink(missing_ok=True)
+                    except ValueError as exc:
+                        warnings.warn(
+                            f"Ignoring invalid Preset file {path}: {exc}",
+                            RuntimeWarning, stacklevel=2)
+
+                rows = conn.execute("SELECT * FROM presets ORDER BY id").fetchall()
+                tracked = _preset_tracked_files(conn)
+                for row in rows:
+                    preset_id = int(row["id"])
+                    if preset_id not in tracked:
+                        path = _preset_write_row_file(conn, row)
+                        claimed.add(path)
+
+                for path in sorted(Path(PRESETS_DIR).glob("*.json")):
+                    if path in claimed:
+                        continue
+                    try:
+                        name, note, chain, created_at, updated_at = (
+                            _preset_parse_document(path))
+                        if conn.execute(
+                                "SELECT 1 FROM presets WHERE name=?", (name,)).fetchone():
+                            raise ValueError(f"Preset '{name}' already exists")
+                        now = datetime.now(timezone.utc).isoformat()
+                        cur = conn.execute(
+                            "INSERT INTO presets "
+                            "(name, note, chain_json, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (name, note, json.dumps(chain, ensure_ascii=False),
+                             created_at or now, updated_at or now),
+                        )
+                        row = conn.execute(
+                            "SELECT * FROM presets WHERE id=?", (cur.lastrowid,)).fetchone()
+                        new_path = _preset_write_row_file(conn, row)
+                        if new_path != path:
+                            path.unlink(missing_ok=True)
+                    except ValueError as exc:
+                        warnings.warn(
+                            f"Ignoring invalid Preset file {path}: {exc}",
+                            RuntimeWarning, stacklevel=2)
+                conn.commit()
+        finally:
+            _PRESET_SYNC_ACTIVE = False
+
+
 def _live_preset_chain(cfg: dict) -> dict:
     """Convert the live path-only chain to a comparable Preset snapshot."""
     if "slots" in cfg:
@@ -1374,20 +2257,21 @@ def _preset_chain_from_live(cfg: dict) -> dict:
         path = item.get("path")
         if path is None:
             candidate = item.get("candidate")
+            candidate_ref = (_require_supported_model_ref(candidate, index)
+                             if candidate else {})
             slots.append({
-                # 与 active 槽一致：candidate 路径反查 model id（preset 槽
-                # 以 Model ID 为身份；外部文件反查不到时为 None）。
-                "model_id": (_require_supported_model_path(candidate, index)
-                             if candidate else None),
+                "model_id": candidate_ref.get("model_id"),
                 "path": None,
                 **_preset_slot_gains(item, index),
+                **({key: value for key, value in candidate_ref.items()
+                    if key != "model_id"} if candidate else {}),
                 **({"candidate": _preset_storage_path(candidate),
                     "bypass": True} if candidate else {}),
             })
             continue
-        model_id = _require_supported_model_path(path, index)
+        model_ref = _require_supported_model_ref(path, index)
         slots.append({
-            "model_id": model_id,
+            **model_ref,
             **_preset_slot_gains(item, index),
             "path": _preset_storage_path(path, index),
         })
@@ -1401,6 +2285,7 @@ def _preset_chain_from_live(cfg: dict) -> dict:
 
 def preset_save(name: str, note: str | None = None, *, set_active: bool = True) -> dict:
     """Snapshot the current live chain as a canonical ordered Slot Preset."""
+    _preset_reconcile_files()
     name = name.strip()
     if not name:
         raise ValueError("Preset name cannot be empty.")
@@ -1411,24 +2296,28 @@ def preset_save(name: str, note: str | None = None, *, set_active: bool = True) 
             "SELECT note FROM presets WHERE name = ?", (name,)).fetchone()
         stored_note = (_preset_note_value(existing["note"])
                        if note is None and existing else _preset_note_value(note))
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
             "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
             (name, stored_note, json.dumps(chain, ensure_ascii=False), now, now))
+        preset_id = int(conn.execute(
+            "SELECT id FROM presets WHERE name=?", (name,)).fetchone()["id"])
         if set_active:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES ('active_preset', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (name,),
             )
+        _preset_write_by_id(conn, preset_id)
         conn.commit()
     return preset_get(name)
 
 
 def preset_get(name: str) -> dict | None:
     """Return one Preset with its chain parsed to the in-memory Slot shape."""
+    _preset_reconcile_files()
     with connect() as conn:
         row = conn.execute("SELECT * FROM presets WHERE name = ?", (name,)).fetchone()
         return _preset_row(row) if row else None
@@ -1438,6 +2327,7 @@ def preset_get_by_id(preset_id: int) -> dict | None:
     """Return one Preset by its immutable SQLite identity."""
     if isinstance(preset_id, bool) or not isinstance(preset_id, int):
         raise ValueError("preset id must be an integer")
+    _preset_reconcile_files()
     with connect() as conn:
         row = conn.execute(
             "SELECT * FROM presets WHERE id = ?", (preset_id,)
@@ -1462,6 +2352,7 @@ def preset_list() -> list[dict]:
     Structurally invalid rows remain inspectable, while rows referencing a
     known unsupported library model stay hidden from product-facing views.
     """
+    _preset_reconcile_files()
     with connect() as conn:
         rows = conn.execute(
             "SELECT * FROM presets ORDER BY updated_at DESC").fetchall()
@@ -1471,13 +2362,22 @@ def preset_list() -> list[dict]:
 
 def preset_delete(name: str) -> bool:
     """Delete one preset; False if it did not exist."""
+    _preset_reconcile_files()
     with connect() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM presets WHERE name = ?", (name,)).fetchone()
         cur = conn.execute("DELETE FROM presets WHERE name = ?", (name,))
         active = conn.execute(
             "SELECT value FROM settings WHERE key='active_preset'").fetchone()
         if cur.rowcount and active and active["value"] == name:
             conn.execute("DELETE FROM settings WHERE key='active_preset'")
+        if row:
+            conn.execute("DELETE FROM settings WHERE key=?",
+                         (_preset_file_key(int(row["id"])),))
         conn.commit()
+        if row:
+            for path in Path(PRESETS_DIR).glob(f"{int(row['id'])}-*.json"):
+                path.unlink(missing_ok=True)
         return cur.rowcount > 0
 
 
@@ -1490,6 +2390,7 @@ def preset_delete_by_id(preset_id: int) -> dict[str, object]:
     """
     if isinstance(preset_id, bool) or not isinstance(preset_id, int):
         raise ValueError("preset id must be an integer")
+    _preset_reconcile_files()
     with connect() as conn:
         row = conn.execute(
             "SELECT id, name FROM presets WHERE id = ?", (preset_id,)
@@ -1504,7 +2405,13 @@ def preset_delete_by_id(preset_id: int) -> dict[str, object]:
         ).fetchone()
         if cur.rowcount and active and active["value"] == name:
             conn.execute("DELETE FROM settings WHERE key='active_preset'")
+        if cur.rowcount:
+            conn.execute("DELETE FROM settings WHERE key=?",
+                         (_preset_file_key(preset_id),))
         conn.commit()
+        if cur.rowcount:
+            for path in Path(PRESETS_DIR).glob(f"{preset_id}-*.json"):
+                path.unlink(missing_ok=True)
         return {"id": preset_id, "name": name, "deleted": cur.rowcount > 0,
                 "stale": cur.rowcount == 0}
 
@@ -1518,6 +2425,7 @@ def preset_rename_by_id(preset_id: int, new_name: str) -> dict:
     """Rename exactly the captured Preset row and keep active state attached."""
     if isinstance(preset_id, bool) or not isinstance(preset_id, int):
         raise ValueError("preset id must be an integer")
+    _preset_reconcile_files()
     new_name = new_name.strip()
     if not new_name:
         raise ValueError("Preset name cannot be empty.")
@@ -1539,6 +2447,7 @@ def preset_rename_by_id(preset_id: int, new_name: str) -> dict:
             "UPDATE settings SET value = ? WHERE key = 'active_preset' AND value = ?",
             (new_name, old_name),
         )
+        _preset_write_by_id(conn, preset_id)
         conn.commit()
     return preset_get_by_id(preset_id)
 
@@ -1552,6 +2461,7 @@ def preset_update_note_by_id(preset_id: int, note: str | None) -> dict:
     """Replace one captured Preset note without changing its chain snapshot."""
     if isinstance(preset_id, bool) or not isinstance(preset_id, int):
         raise ValueError("preset id must be an integer")
+    _preset_reconcile_files()
     now = datetime.now(timezone.utc).isoformat()
     note = _preset_note_value(note)
     with connect() as conn:
@@ -1561,6 +2471,7 @@ def preset_update_note_by_id(preset_id: int, note: str | None) -> dict:
         )
         if not cur.rowcount:
             raise ValueError(f"Preset id {preset_id} no longer exists.")
+        _preset_write_by_id(conn, preset_id)
         conn.commit()
     return preset_get_by_id(preset_id)
 
@@ -1611,6 +2522,14 @@ def _validate_preset_draft_references(chain: dict) -> None:
                         f"Preset Slot {index + 1:02d} {field} does not match "
                         f"model_id {model_id}: {path}")
                 continue
+            local = local_model_for_path(path)
+            if local is not None:
+                model_key = slot.get("model_key")
+                if model_key is not None and model_key != local.get("model_key"):
+                    raise ValueError(
+                        f"Preset Slot {index + 1:02d} {field} does not match "
+                        f"model_key {model_key}: {path}")
+                continue
             try:
                 exists = Path(_to_abs_path(path)).exists()
             except OSError:
@@ -1632,6 +2551,7 @@ def preset_update_draft_by_id(
     """
     if isinstance(preset_id, bool) or not isinstance(preset_id, int):
         raise ValueError("preset id must be an integer")
+    _preset_reconcile_files()
     canonical = _canonical_preset_chain(chain)
     _validate_preset_draft_references(canonical)
     stored_note = _preset_note_value(note)
@@ -1655,6 +2575,7 @@ def preset_update_draft_by_id(
                     raise PresetConflictError(
                         "preset changed externally; reopen it before saving")
             raise ValueError(f"Preset id {preset_id} no longer exists.")
+        _preset_write_by_id(conn, preset_id)
         conn.commit()
     return preset_get_by_id(preset_id)
 
@@ -1676,17 +2597,23 @@ def _validate_preset_file(path: str, index: int) -> str:
 
 def _resolve_preset_slot(slot: dict, index: int) -> str | None:
     model_id = slot.get("model_id")
+    model_key = slot.get("model_key")
     saved_path = slot.get("path")
-    if model_id is None and saved_path is None:
+    if model_id is None and model_key is None and saved_path is None:
         return None
+    local_model = (local_model_for_key(model_key)
+                   if isinstance(model_key, str) else None)
     supported_model = (_supported_model_by_id(model_id)
                        if model_id is not None else None)
     candidates: list[str] = []
-    if supported_model is not None:
+    if local_model is not None and local_model.get("local_path"):
+        candidates.append(local_model["local_path"])
+    elif supported_model is not None:
         current_path = _model_path(model_id)
         if current_path:
             candidates.append(current_path)
-    elif saved_path and _model_id_for_path(saved_path) is not None:
+    elif saved_path and (_model_id_for_path(saved_path) is not None
+                         or local_model_for_path(saved_path) is not None):
         candidates.append(saved_path)
     seen: set[str] = set()
     errors: list[str] = []
@@ -1700,20 +2627,40 @@ def _resolve_preset_slot(slot: dict, index: int) -> str | None:
             errors.append(str(exc))
     if not candidates:
         raise ValueError(
-            f"Slot {index + 1:02d} model file missing (model_id {model_id})")
+            f"Slot {index + 1:02d} model file missing "
+            f"(model_id {model_id}, model_key {model_key})")
     raise ValueError(
         f"Slot {index + 1:02d} model file missing or unsupported: "
         + " | ".join(errors))
 
 
-def _require_supported_model_path(path: str, index: int) -> int:
-    """Resolve a live path to a registered A2/IR model for preset storage."""
+def _require_supported_model_ref(path: str, index: int) -> dict:
+    """Resolve a live path to a remote ID or local Pack identity."""
+    local = local_model_for_path(path)
+    if local is not None:
+        return {
+            "model_id": None,
+            "source": "local",
+            "pack_id": local["pack_id"],
+            "relative_path": local["relative_path"],
+            "model_key": local["model_key"],
+        }
     model_id = _model_id_for_path(path)
     if model_id is None:
         raise ValueError(
             f"Slot {index + 1:02d} path is not a supported A2/IR library model: "
             f"{path}")
-    return model_id
+    return {"model_id": model_id}
+
+
+def _require_supported_model_path(path: str, index: int) -> int:
+    """Compatibility wrapper for callers that require a remote model ID."""
+    ref = _require_supported_model_ref(path, index)
+    if ref.get("model_id") is None:
+        raise ValueError(
+            f"Preset Slot {index + 1:02d} path is a local Pack model, not a remote model: "
+            f"{path}")
+    return ref["model_id"]
 
 
 def _resolved_preset_chain(preset: dict) -> dict:
@@ -1725,6 +2672,17 @@ def _resolved_preset_chain(preset: dict) -> dict:
     errors = []
     for index, slot in enumerate(ch["slots"]):
         model_id = slot.get("model_id")
+        model_key = slot.get("model_key")
+        if (model_id is None and model_key is not None
+                and local_model_for_key(model_key) is None):
+            errors.append(
+                f"Slot {index + 1:02d} model file missing or unsupported "
+                f"(model_key {model_key} is unavailable)")
+            slots.append({
+                "model_id": None, "model_key": model_key,
+                **_preset_slot_gains(slot, index), "path": None,
+            })
+            continue
         if (model_id is not None
                 and _supported_model_by_id(model_id) is None):
             errors.append(
@@ -1732,6 +2690,9 @@ def _resolved_preset_chain(preset: dict) -> dict:
                 f"(model_id {model_id} is unsupported)")
             slots.append({
                 "model_id": model_id,
+                **({key: slot[key] for key in
+                    ("source", "pack_id", "relative_path", "model_key")
+                    if key in slot}),
                 **_preset_slot_gains(slot, index),
                 "path": None,
             })
@@ -1762,6 +2723,9 @@ def _resolved_preset_chain(preset: dict) -> dict:
         try:
             slots.append({
                 "model_id": slot.get("model_id"),
+                **({key: slot[key] for key in
+                    ("source", "pack_id", "relative_path", "model_key")
+                    if key in slot}),
                 **_preset_slot_gains(slot, index),
                 "path": _resolve_preset_slot(slot, index),
             })
@@ -2110,7 +3074,8 @@ def _first_local_model(tone_id: int, ir: bool = False) -> int | None:
                 "architecture", "architecture_version", "local_path",
                 "name", "model_url", "url")
         }
-        if (tone3000.is_supported_model(model, tone)
+        if (_local_file_exists(model.get("local_path"))
+                and tone3000.is_supported_model(model, tone)
                 and model_is_ir(classification_model, tone) == ir):
             return model["id"]
     return None
@@ -2131,19 +3096,27 @@ def local_models_by_tone(path: str) -> list[dict] | None:
             "FROM models m JOIN tones t ON t.id = m.tone_id "
             f"WHERE m.{clause}", forms).fetchone()
         current = _supported_model_from_row(row)
-        if not current:
-            return None
-        rows = conn.execute(
-            "SELECT id, tone_id, name, architecture, architecture_version, local_path "
-            "FROM models "
-            "WHERE tone_id = ? AND local_path IS NOT NULL ORDER BY id",
-            (current["tone_id"],)).fetchall()
-        tone = conn.execute(
-            "SELECT gear, format, platform FROM tones WHERE id = ?",
-            (current["tone_id"],)).fetchone()
-        tone = _row_to_dict(tone) if tone else {}
-        return [m for m in (_row_to_dict(r) for r in rows)
-                if tone3000.is_supported_model(m, tone)]
+        if current:
+            rows = conn.execute(
+                "SELECT id, tone_id, name, architecture, architecture_version, local_path "
+                "FROM models "
+                "WHERE tone_id = ? AND local_path IS NOT NULL ORDER BY id",
+                (current["tone_id"],)).fetchall()
+            tone = conn.execute(
+                "SELECT gear, format, platform FROM tones WHERE id = ?",
+                (current["tone_id"],)).fetchone()
+            tone = _row_to_dict(tone) if tone else {}
+            return [m for m in (_row_to_dict(r) for r in rows)
+                    if _local_file_exists(m.get("local_path"))
+                    and tone3000.is_supported_model(m, tone)]
+    local = local_model_for_path(path)
+    if not local:
+        return None
+    pack_id = local["pack_id"]
+    for pack in list_local_packs():
+        if pack.get("pack_id") == pack_id:
+            return list(pack.get("models") or [])
+    return None
 
 
 def downloaded_model_ids_by_tone() -> dict[int, set[int]]:
@@ -2160,6 +3133,8 @@ def downloaded_model_ids_by_tone() -> dict[int, set[int]]:
     out: dict[int, set[int]] = {}
     for r in rows:
         model = _row_to_dict(r)
+        if not _local_file_exists(model.get("local_path")):
+            continue
         tone = {key: model.get(key) for key in ("gear", "format", "platform")}
         if tone3000.is_supported_model(model, tone):
             out.setdefault(r["tone_id"], set()).add(r["id"])
@@ -2169,7 +3144,7 @@ def downloaded_model_ids_by_tone() -> dict[int, set[int]]:
 def mark_download_state(hits: list[dict]) -> list[dict]:
     """Tag search hits with their local download state by comparing model ids.
 
-    Each hit gains `download_state` in {"all", "partial", "none"} and
+    Each hit gains `download_state` in {"all", "partial", "none", "unknown"} and
     `downloaded` (count of locally downloaded models). Tones with no local
     models are "none" without any API call; tones present locally are compared
     id-by-id against TONE3000's current model list (amp/pedal → A1/A2/custom
@@ -2187,7 +3162,7 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
             except tone3000.AuthenticationRequiredError:
                 raise
             except Exception:
-                return t["id"], "partial", set()
+                return t["id"], "unknown", set()
             ids = {m["id"] for m in ms
                    if tone3000.is_supported_model(m, t)}
             return t["id"], "all" if ids else "partial", ids
@@ -2216,11 +3191,18 @@ def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
     Chains whose model slots are not all in the library are skipped with a
     warning (never fails the rest). Returns the number of presets written.
     """
+    _preset_reconcile_files()
     if replace:
         with connect() as conn:
             conn.execute("DELETE FROM presets")
             conn.execute("DELETE FROM settings WHERE key = 'active_preset'")
+            conn.execute(
+                "DELETE FROM settings WHERE key LIKE ?",
+                (f"{_PRESET_FILE_SETTING_PREFIX}%",),
+            )
             conn.commit()
+        for path in Path(PRESETS_DIR).glob("*.json"):
+            path.unlink(missing_ok=True)
     made = 0
     for name, note, model_slots in SEED_CHAINS:
         slots = []
@@ -2246,12 +3228,16 @@ def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
             chain = _canonical_preset_chain(chain)
             now = datetime.now(timezone.utc).isoformat()
             with connect() as conn:
-                conn.execute(
+                cur = conn.execute(
                     "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
                     "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
                     (name, note, json.dumps(chain, ensure_ascii=False), now, now))
+                preset_id = int(conn.execute(
+                    "SELECT id FROM presets WHERE name=?", (name,)
+                ).fetchone()["id"])
+                _preset_write_by_id(conn, preset_id)
                 conn.commit()
             made += 1
             if not quiet:
@@ -2431,11 +3417,12 @@ def main(argv: list[str] | None = None) -> int:
             if gear == "full-rig":
                 gear_values = ["amp-cab"]
             elif gear == "ir":
-                gear_values = ["cab", "space"]
+                gear_values = None
             else:
                 gear_values = [gear] if gear else None
             hits = tone3000.search(args.query, page_size=args.limit,
                                    gear_filters=gear_values,
+                                   format_filter="ir" if gear == "ir" else None,
                                    usernames=args.author, tag_names=args.tag)
             payload = [_public_tone(hit) for hit in hits]
             print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else _fmt_table(hits))

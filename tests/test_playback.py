@@ -28,6 +28,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(library, "TONES_DIR", tmp_path / "data" / "tones")
+    monkeypatch.setattr(library, "PRESETS_DIR", tmp_path / "data" / "presets")
     monkeypatch.setattr(live, "ROOT", tmp_path)
     monkeypatch.setattr(live, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(live, "LEVEL_FILE", tmp_path / "level.json")

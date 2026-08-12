@@ -9,6 +9,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import tone3000  # noqa: E402
+import library  # noqa: E402
 from tui.app import GigBuddyApp  # noqa: E402
 from tui.presets import PresetPanel  # noqa: E402
 
@@ -19,6 +20,18 @@ def isolated_tone3000_credentials(monkeypatch, tmp_path):
     monkeypatch.delenv("TONE3000_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr(
         tone3000, "TOKEN_FILE", tmp_path / "tone3000_tokens.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_preset_documents(monkeypatch, tmp_path):
+    """Never let a test export or import the developer's real Preset files."""
+    monkeypatch.setattr(library, "PRESETS_DIR", tmp_path / "data" / "presets")
+
+
+@pytest.fixture(autouse=True)
+def isolated_local_pack_scan(monkeypatch, tmp_path):
+    """Keep repository-managed downloaded Packs out of isolated UI tests."""
+    monkeypatch.setattr(library, "TONES_DIR", tmp_path / "data" / "tones")
 
 
 @pytest.fixture(autouse=True)

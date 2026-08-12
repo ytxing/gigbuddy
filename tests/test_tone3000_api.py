@@ -172,17 +172,114 @@ def test_search_uses_authenticated_official_request(monkeypatch):
     monkeypatch.setattr(tone3000, "_open_json", fake_open_json)
     assert tone3000.search("plexi", page_size=10) == []
 
-    assert len(captured) == 2
-    queries = [urllib.parse.parse_qs(urllib.parse.urlparse(
-        request.full_url).query) for request in captured]
-    query = queries[0]
+    assert len(captured) == 1
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(
+        captured[0].full_url).query)
     assert query["query"] == ["plexi"]
     assert query["page"] == ["1"]
     assert query["page_size"] == ["25"]
-    assert [item.get("architecture") for item in queries] == [["2"], None]
+    assert query["sort"] == ["best-match"]
+    assert query["architecture"] == ["2"]
+    assert "format" not in query
     assert captured[0].get_header("Authorization") == "Bearer access-token"
     headers = {key.lower(): value for key, value in captured[0].header_items()}
     assert headers["content-type"] == "application/json"
+
+
+def test_empty_search_uses_official_trending_a2_defaults(monkeypatch):
+    monkeypatch.setenv("TONE3000_ACCESS_TOKEN", "access-token")
+    monkeypatch.setattr(tone3000, "_MIN_REQUEST_INTERVAL", 0)
+    captured = []
+
+    def fake_open_json(request):
+        captured.append(request)
+        return {"data": [], "total": 0, "total_pages": 0}
+
+    monkeypatch.setattr(tone3000, "_open_json", fake_open_json)
+    assert tone3000.search("", page_size=10) == []
+
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(
+        captured[0].full_url).query)
+    assert query["sort"] == ["trending"]
+    assert query["architecture"] == ["2"]
+    assert "format" not in query
+
+
+def test_ir_search_uses_format_filter_without_architecture(monkeypatch):
+    monkeypatch.setenv("TONE3000_ACCESS_TOKEN", "access-token")
+    monkeypatch.setattr(tone3000, "_MIN_REQUEST_INTERVAL", 0)
+    captured = []
+
+    def fake_open_json(request):
+        captured.append(request)
+        return {"data": [], "total": 0, "total_pages": 0}
+
+    monkeypatch.setattr(tone3000, "_open_json", fake_open_json)
+    assert tone3000.search("cab", page_size=10, format_filter="ir") == []
+
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(
+        captured[0].full_url).query)
+    assert query["sort"] == ["best-match"]
+    assert query["format"] == ["ir"]
+    assert "architecture" not in query
+
+
+def test_favorited_page_preserves_official_pagination(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        calls.append((url, params))
+        return {"data": [{"id": 9, "a2_models_count": 1}],
+                "total": 21, "total_pages": 3}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+    result = tone3000.favorited_page(page_size=10, page_number=2)
+
+    assert [row["id"] for row in result.rows] == [9]
+    assert result.page_number == 2
+    assert result.total_count == 21
+    assert result.total_pages == 3
+    assert result.has_more
+    assert calls == [(f"{tone3000.API}/tones/favorited",
+                      {"page": 2, "page_size": 10})]
+
+
+def test_favorited_page_forwards_official_gear_filter(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        calls.append((url, params))
+        return {"data": [{"id": 9, "irs_count": 1}],
+                "total": 1, "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+    result = tone3000.favorited_page(page_size=10, gear="ir")
+
+    assert [row["id"] for row in result.rows] == [9]
+    assert calls == [(f"{tone3000.API}/tones/favorited",
+                      {"page": 1, "page_size": 10, "gear": "ir"})]
+
+
+def test_top_creators_page_preserves_official_pagination(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        calls.append((url, params))
+        return {"data": [{"id": "u1", "username": "alice",
+                           "tones_count": 4}],
+                "total": 25, "total_pages": 3}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+    result = tone3000.top_creators_page(
+        sort_by="tones", page_size=10, page_number=2)
+
+    assert result.rows[0]["public_tones_count"] == 4
+    assert result.page_number == 2
+    assert result.total_count == 25
+    assert result.total_pages == 3
+    assert result.has_more
+    assert calls == [(f"{tone3000.API}/users",
+                      {"sort": "tones", "page": 2, "page_size": 10})]
 
 
 def test_authenticated_request_refreshes_once_after_401(monkeypatch):
@@ -308,20 +405,20 @@ def test_search_includes_supported_architectures_and_hides_a1_only(
 
     def fake_post(_url, body):
         calls.append(body)
-        source = body["architecture_filter"]
-        if source == "2":
-            data = [row(1, a2=1), row(3, a1=1, a2=1), row(2, custom=1)]
-        else:
-            data = [row(4, ir=1), row(5, a1=1), row(6, custom=1)]
-        return {"data": data, "total": len(data), "total_pages": 1}
+        data = [row(1, a2=1), row(3, a1=1, a2=1), row(2, custom=1),
+                row(4, ir=1), row(5, a1=1), row(6, custom=1)]
+        return {"data": data, "total": 3, "total_pages": 1}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
     rows = tone3000.search("keeley", page_size=20)
 
-    assert {row["id"] for row in rows} == {1, 3, 4}
+    assert [row["id"] for row in rows] == [1, 3, 4]
     assert len(rows) == 3
     assert all(row["total_count"] == 3 for row in rows)
-    assert [call["architecture_filter"] for call in calls] == ["2", None]
+    assert len(calls) == 1
+    assert calls[0]["architecture_filter"] == "2"
+    assert calls[0]["format_filter"] is None
+    assert calls[0]["gear_filters"] is None
 
 
 def test_ir_search_does_not_send_a_nam_architecture(monkeypatch):
@@ -338,7 +435,8 @@ def test_ir_search_does_not_send_a_nam_architecture(monkeypatch):
     assert [row["id"] for row in rows] == [7]
     assert len(calls) == 1
     assert calls[0]["architecture_filter"] is None
-    assert calls[0]["gear_filters"] == ("ir",)
+    assert calls[0]["format_filter"] == "ir"
+    assert calls[0]["gear_filters"] is None
 
 
 def test_search_keeps_a2_and_ir_rows_when_supported_counts_are_missing(
@@ -347,87 +445,94 @@ def test_search_keeps_a2_and_ir_rows_when_supported_counts_are_missing(
 
     def fake_post(_url, body):
         calls.append(body)
-        if body["architecture_filter"] == "2":
-            return {"data": [{"id": 11, "title": "A2 without count"}],
-                    "total_pages": 1}
-        return {"data": [{"id": 12, "title": "IR without count"}],
+        return {"data": [{"id": 11, "title": "A2 without count"},
+                          {"id": 12, "title": "IR without count"}],
                 "total_pages": 1}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
 
     rows = tone3000.search("keeley", page_size=10)
 
-    assert [row["id"] for row in rows] == [11, 12]
-    assert [row["total_count"] for row in rows] == [2, 2]
-    assert [call["architecture_filter"] for call in calls] == ["2", None]
+    assert rows == []
+    assert len(calls) == 1
+    assert calls[0]["architecture_filter"] == "2"
 
 
 def test_search_rejects_contradictory_ir_metadata_without_counts(monkeypatch):
     def fake_post(_url, body):
-        if body["architecture_filter"] == "2":
-            return {"data": [{"id": 21, "format": "ir"}],
-                    "total_pages": 1}
         return {"data": [
+            {"id": 21, "format": "ir"},
             {"id": 22, "format": "nam", "gear": "cab"},
             {"id": 23, "gear": "cab"},
+            {"id": 24, "a2_models_count": 1},
         ], "total_pages": 1}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
 
-    assert [row["id"] for row in tone3000.search("mixed", page_size=10)] == [23]
-    assert not tone3000._has_supported_tone_models({"id": 24, "gear": "cab"})
+    assert [row["id"] for row in tone3000.search("mixed", page_size=10)] == [24]
+    assert not tone3000._has_supported_tone_models(
+        {"id": 24, "gear": "cab"}, architecture_filter="2")
 
 
 def test_top_rejects_cab_rows_without_ir_evidence(monkeypatch):
+    calls = []
+
+    def fake_post(_url, body):
+        calls.append(body)
+        return {"data": [
+            {"id": 31, "gear": "cab", "format": "ir", "irs_count": 1},
+            {"id": 32, "gear": "cab", "a2_models_count": 1},
+        ], "total": 2, "total_pages": 1}
+
     monkeypatch.setattr(
-        tone3000, "_get",
-        lambda _url, **_params: [
-            {"id": 31, "gear": "cab"},
-            {"id": 32, "gear": "cab", "format": "ir"},
-        ])
-    monkeypatch.setattr(tone3000, "_attach_usernames",
-                        lambda rows, **_kwargs: None)
+        tone3000, "_post", fake_post)
 
-    assert [row["id"] for row in tone3000.top(10)] == [32]
+    assert [row["id"] for row in tone3000.top(10)] == [31, 32]
+    assert calls[0]["order_by"] == "downloads-all-time"
 
 
-def test_search_composes_25_item_pages_across_architectures(monkeypatch):
+def test_search_composes_pages_from_one_official_stream(monkeypatch):
     calls = []
 
     def fake_post(_url, body):
         calls.append(body)
         page = body["page_number"]
-        source = body["architecture_filter"]
-        base = {"2": 0, None: 1000}[source]
-        first = base + (page - 1) * 25
+        first = (page - 1) * 25
         data = [{
             "id": first + offset, "title": f"Tone {first + offset}",
-            "a2_models_count": 1 if source == "2" else 0,
-            "irs_count": 1 if source is None else 0,
+            "a2_models_count": 1,
         } for offset in range(25)]
-        return {"data": data, "total": 50, "total_pages": 2}
+        return {"data": data, "total": 100, "total_pages": 4}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
-    first_page = tone3000.search("plexi", page_size=40, page_number=1)
-    second_page = tone3000.search("plexi", page_size=40, page_number=2)
+    first_page = tone3000.search_page("plexi", page_size=40, page_number=1)
+    second_page = tone3000.search_page("plexi", page_size=40, page_number=2)
 
-    first_ids = {row["id"] for row in first_page}
-    second_ids = {row["id"] for row in second_page}
+    first_ids = {row["id"] for row in first_page.rows}
+    second_ids = {row["id"] for row in second_page.rows}
     assert len(first_ids) == len(second_ids) == 40
     assert first_ids.isdisjoint(second_ids)
-    assert all(row["total_count"] == 50 for row in first_page)
-    assert all(row["total_count"] == 100 for row in second_page)
-    assert len(calls) == 4  # each of 2 remote pages is fetched once per source
+    assert all(row["total_count"] == 100 for row in first_page.rows)
+    assert all(row["total_count"] == 100 for row in second_page.rows)
+    assert first_page.loaded_count == 50
+    assert first_page.total_count == 100
+    assert first_page.total_pages == 4
+    assert first_page.has_more
+    assert not first_page.exhausted
+    assert second_page.loaded_count == 100
+    assert second_page.total_count == 100
+    assert second_page.total_pages == 4
+    assert not second_page.has_more
+    assert second_page.exhausted
+    assert len(calls) == 4
     assert [(call["architecture_filter"], call["page_number"])
-            for call in calls] == [("2", 1), (None, 1), ("2", 2), (None, 2)]
+            for call in calls] == [("2", 1), ("2", 2), ("2", 3), ("2", 4)]
 
 
 def test_search_downloads_all_time_is_sorted_globally(monkeypatch):
     def fake_post(_url, body):
-        source = body["architecture_filter"]
-        data = ([{"id": 1, "downloads_count": 10, "a2_models_count": 1}]
-                if source == "2" else
-                [{"id": 2, "downloads_count": 100, "irs_count": 1}])
+        data = [{"id": 2, "downloads_count": 100, "a2_models_count": 1},
+                {"id": 1, "downloads_count": 10, "a2_models_count": 1}]
         return {"data": data, "total_pages": 1}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
@@ -440,12 +545,10 @@ def test_search_downloads_all_time_is_sorted_globally(monkeypatch):
 
 def test_search_newest_is_sorted_by_created_at(monkeypatch):
     def fake_post(_url, body):
-        source = body["architecture_filter"]
-        data = ([{"id": 1, "created_at": "2026-01-01T00:00:00Z",
-                  "a2_models_count": 1}]
-                if source == "2" else
-                [{"id": 2, "created_at": "2026-08-01T00:00:00Z",
-                  "irs_count": 1}])
+        data = [{"id": 2, "created_at": "2026-08-01T00:00:00Z",
+                 "a2_models_count": 1},
+                {"id": 1, "created_at": "2026-01-01T00:00:00Z",
+                 "a2_models_count": 1}]
         return {"data": data, "total_pages": 1}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
@@ -458,49 +561,42 @@ def test_search_newest_is_sorted_by_created_at(monkeypatch):
 def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):
     calls = []
 
-    def fake_get(url, **params):
-        calls.append((url, params))
-        return [{"id": 1, "user_id": "u1", "downloads_count": 10,
-                 "a2_models_count": 1}]
+    def fake_post(url, body):
+        calls.append((url, body))
+        return {"data": [{"id": 1, "downloads_count": 10,
+                           "a2_models_count": 1}],
+                "total": 1, "total_pages": 1}
 
-    monkeypatch.setattr(tone3000, "_get", fake_get)
-    monkeypatch.setattr(tone3000, "_attach_usernames",
-                        lambda rows, **_kwargs: None)
+    monkeypatch.setattr(tone3000, "_post", fake_post)
 
     rows = tone3000.top(30)
 
     assert [row["id"] for row in rows] == [1]
-    assert calls == [(
-        f"{tone3000.LEGACY_API}/tones_counts",
-        {
-            "select": (
-                "id,title,description,gear,downloads_count,favorites_count,"
-                "a1_models_count,a2_models_count,custom_models_count,"
-                "irs_count,models_count,created_at,user_id,platform"
-            ),
-            "order": "downloads_count.desc",
-            "limit": 30,
-        },
-    )]
+    assert calls == [(f"{tone3000.API}/tones/search", {
+        "query_term": "", "page_number": 1, "page_size": 25,
+        "order_by": "downloads-all-time", "tag_names": None,
+        "make_names": None, "gear_filters": None, "format_filter": None,
+        "is_calibrated": False, "size_filters": None, "usernames": None,
+        "architecture_filter": "2",
+    })]
 
 
 def test_top_fills_page_after_filtering_unsupported_tones(monkeypatch):
     calls = []
 
-    def fake_get(url, **params):
-        calls.append(params)
-        if params.get("offset") == 2:
-            return [{"id": 4, "a2_models_count": 1}]
-        return [{"id": 1, "custom_models_count": 2},
-                {"id": 3, "a2_models_count": 1}]
+    def fake_post(_url, body):
+        calls.append(body)
+        if body["page_number"] == 2:
+            return {"data": [{"id": 4, "a2_models_count": 1}],
+                    "total": 3, "total_pages": 2}
+        return {"data": [{"id": 1, "custom_models_count": 2},
+                          {"id": 3, "a2_models_count": 1}],
+                "total": 3, "total_pages": 2}
 
-    monkeypatch.setattr(tone3000, "_get", fake_get)
-    monkeypatch.setattr(tone3000, "_attach_usernames",
-                        lambda rows, **_kwargs: None)
+    monkeypatch.setattr(tone3000, "_post", fake_post)
 
     assert [row["id"] for row in tone3000.top(2)] == [3, 4]
-    assert calls[0]["limit"] == 2
-    assert calls[1]["offset"] == 2
+    assert [call["page_number"] for call in calls] == [1, 2]
 
 
 def test_models_honor_official_total_pages(monkeypatch):
@@ -651,23 +747,23 @@ def test_supported_model_classifier_rejects_conflicting_architecture_fields(mode
     assert not tone3000.is_supported_model(model)
 
 
-def test_search_uses_the_requested_supported_count_for_each_architecture_view(
+def test_search_uses_supported_count_for_unfiltered_and_ir_views(
         monkeypatch):
     def fake_post(_url, body):
-        if body["architecture_filter"] == "2":
+        if body["format_filter"] == "ir":
             return {"data": [
-                {"id": 1, "a2_models_count": 0, "irs_count": 2},
-                {"id": 2, "a2_models_count": 1, "irs_count": 0},
+                {"id": 3, "a2_models_count": 2, "irs_count": 0},
+                {"id": 4, "a2_models_count": 1, "irs_count": 1},
             ], "total_pages": 1}
         return {"data": [
-            {"id": 3, "a2_models_count": 2, "irs_count": 0},
-            {"id": 4, "a2_models_count": 1, "irs_count": 1},
+            {"id": 1, "a2_models_count": 0, "irs_count": 2},
+            {"id": 2, "a2_models_count": 1, "irs_count": 0},
         ], "total_pages": 1}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
 
     assert [row["id"] for row in tone3000.search("mixed", page_size=10)] == [
-        2, 4]
+        1, 2]
     assert [row["id"] for row in tone3000.search(
         "mixed", page_size=10, gear_filters=["ir"])] == [4]
 

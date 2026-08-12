@@ -62,21 +62,26 @@ architectures are hidden. A mixed Pack may therefore have a larger raw
 | architecture | Legacy backend token (`SlimmableContainer` / `WaveNet` / `IR`), retained for compatibility |
 | local_path (nullable) | downloaded file when imported；**存相对项目根路径**（`data/tones/...`，portable v0.1），读取时按项目根解析为绝对 |
 
-Imported assets are grouped under `data/tones/<tone-id>-<tone-title-slug>/`. Model
-files keep TONE3000's **semantic name** (`models.name`, same as the site's zip
-download — spaces preserved, no numbering). If an older API response has no
-`name`, the importer falls back to the URL basename (decoded and query-free);
-only a URL with no basename falls back to `model-<id>.<ext>`. Legacy rows
-imported from the model_url basename are migrated by
-`scripts/rename_semantic.py`. The TUI picker presents this relationship as
-expandable tone folders and shows model metadata for the highlighted file.
+Imported assets are grouped under `data/tones/<tone-id>-<tone-title-slug>/` as a
+Tone Pack. Model files are direct children of that folder and keep TONE3000's
+**semantic name** (`models.name`, the same as the site's zip download — spaces
+preserved, no numbering). Remote imports also generate an optional
+`gigbuddy.json` manifest beside the files; it is portable extra metadata, not
+the engine protocol. If an older API response has no `name`, the importer falls
+back to the URL basename (decoded and query-free); only a URL with no basename
+falls back to `model-<id>.<ext>`. Legacy rows imported from the model_url
+basename are migrated by `scripts/rename_semantic.py`. The TUI picker presents
+this relationship as expandable tone folders and shows model metadata for the
+highlighted file.
 TUI uninstall keeps these metadata rows, moves managed files to `data/.trash/<operation>/`
 with a manifest, and sets the affected `local_path` values to NULL.
 
 ## presets
 
 Named chain snapshots (CLI: `gigbuddy preset …`; external agents can add/query/
-update/delete). Model files are stored as **logic references** (`model_id`) resolved to
+update/delete). Each preset is also stored as an editable JSON document in
+`data/presets/<id>-<name-slug>.json`; SQLite remains the searchable index and
+compatibility layer. Model files are stored as **logic references** (`model_id`) resolved to
 the current `models.local_path` at load time, so library renames/migrations
 never break a preset; non-library paths are kept verbatim in `model_path`.
 路径语义（v0.1 portable）：`models.local_path` 与 `model_path`/`ir_path` 存相对项目根路径，
@@ -87,8 +92,17 @@ never break a preset; non-library paths are kept verbatim in `model_path`.
 | id (PK, autoincrement) | |
 | name (UNIQUE) | preset name |
 | note | optional description |
-| chain_json | `{model_id, model_path, ir_model_id, ir_path, gain, master, quality}` |
+| chain_json | canonical `{slots, gain, master, quality}` snapshot; legacy flat `model`/`ir` rows remain readable |
 | created_at, updated_at | ISO timestamps |
+
+The JSON document uses `schema_version: 1`, `kind: "gigbuddy-preset"`, and the
+fields `id`, `name`, `note`, `chain`, `created_at`, and `updated_at`. GigBuddy
+imports new documents from `data/presets/`, exports legacy SQLite-only rows on
+first read, and reconciles a hand-edited tracked document before returning it.
+The file wins when it changed; an invalid file is kept and ignored with a
+warning. Deleting a tracked file deletes its indexed preset. Rename, note,
+draft, delete, and seed operations update both representations atomically as
+far as the local SQLite/file boundary permits.
 
 Built-in chains (`gigbuddy preset seed`) use name prefixes and descriptions for
 the two categories and instrument. The default seed command downloads the exact

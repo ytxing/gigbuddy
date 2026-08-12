@@ -10,7 +10,8 @@ from rich.text import Text
 from tui.app import GigBuddyApp
 from tui.metadata import (DEFAULT_COLORS, architecture_label, gear_markup,
                           format_label, metadata_table, model_architecture,
-                          preset_metadata_table, signed_fixed, theme_colors)
+                          preset_metadata_table, signed_fixed, theme_colors,
+                          tone3000_url)
 from tui.panels import DetailPane
 
 
@@ -48,6 +49,13 @@ def test_metadata_table_colors_parameter():
     # default palette still renders without colors=
     plain = metadata_table(tone, model)
     assert DEFAULT_COLORS["section"] in str(plain.columns[0].cells.__next__().style)
+
+
+def test_tone3000_url_prefers_official_canonical_url():
+    assert tone3000_url({
+        "id": 7, "title": "Old title", "url":
+        "https://www.tone3000.com/tones/canonical-route",
+    }) == "https://www.tone3000.com/tones/canonical-route"
 
 
 def test_signed_fixed_reserves_minus_column():

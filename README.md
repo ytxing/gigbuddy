@@ -223,6 +223,11 @@ fresh, run the one-line uninstall:
 5. Save the result from **PRESETS**. Use `s` to update the active preset or `n`
    to save a new named rig with a note.
 
+Presets are editable JSON files in `data/presets/`, so rigs can be backed up or
+reviewed outside GigBuddy. SQLite remains the local index. A hand-edited JSON
+file is reconciled when GigBuddy reads the preset; invalid JSON is preserved and
+reported instead of replacing the last indexed snapshot.
+
 The global command palette (`ctrl+p`) can focus Presets, open audio settings,
 change the theme, or find the main commands without memorizing every key.
 
@@ -256,9 +261,22 @@ bin/gigbuddy tone list
 bin/gigbuddy tone show <tone-id>
 ```
 
-Import is idempotent. Files are stored under `data/tones/`, while metadata stays
-queryable in `data/gigbuddy.db`. NAM captures use `.nam`; cabinet and other IR
-assets use `.wav`.
+Import is idempotent. Every imported tone is one Pack folder under `data/tones/`:
+the downloaded NAM/IR files are direct children of that folder, and remote
+imports also write an optional `gigbuddy.json` manifest beside them. NAM
+captures use `.nam`; cabinet and other IR assets use `.wav`. SQLite remains
+GigBuddy's searchable index, while the Pack folder contains the actual files.
+
+```text
+data/tones/<tone-id>-<title-slug>/
+  gigbuddy.json       # optional Pack metadata; generated for remote imports
+  <model-name>.nam
+  <ir-name>.wav
+```
+
+See [GigBuddy tone file management](docs/local-tone-pack-design.md) for the
+remote download layout, local Tone Pack loading rules, preset files, and current
+format and path limits.
 
 ## Make a rig your own
 

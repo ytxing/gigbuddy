@@ -107,11 +107,13 @@ class TonePickerScreen(GigBuddyModal):
 
     def __init__(self, kind: str, tone_id: int | None = None,
                  tone_type: str | None = None,
+                 pack_id: str | None = None,
                  on_pick: Callable[[str | None], None] | None = None) -> None:
         super().__init__()
         self.kind = kind  # "amp" | "ir" | "slot"
         self.tone_id = tone_id
         self.tone_type = tone_type
+        self.pack_id = pack_id
         # Preset Edit uses the same local/remote picker surface but must return
         # the chosen path to its in-memory draft instead of mutating live Chain.
         self._on_pick = on_pick
@@ -121,13 +123,16 @@ class TonePickerScreen(GigBuddyModal):
             self.kind, "SLOT")
         box = ModalBox()
         box.border_title = f"PICK {title.upper()}"
-        if self.tone_id is not None:
-            tone = library.get_tone(self.tone_id) or {}
+        if self.tone_id is not None or self.pack_id is not None:
+            tone = (library.get_tone(self.tone_id)
+                    if self.tone_id is not None
+                    else library.local_pack_by_id(self.pack_id)) or {}
             if tone.get("title"):
                 box.border_title = f"{tone['title']}"
         with box:
-            hint = ("↑↓ browse files · enter pick · esc back" if self.tone_id
-                    is not None else "← search · ↑↓ browse · enter pick · esc cancel")
+            hint = ("↑↓ browse files · enter pick · esc back"
+                    if self.tone_id is not None or self.pack_id is not None
+                    else "← search · ↑↓ browse · enter pick · esc cancel")
             yield NonSelectableStatic(hint, classes="modal-hint")
             yield PickerSearchInput(
                 placeholder="Search TONE3000 (e.g. 'marshall plexi' / 'greenback 1960')",
@@ -144,9 +149,9 @@ class TonePickerScreen(GigBuddyModal):
     def on_mount(self) -> None:
         self._request_generation = 0
         self._last_query = ""
-        if self.tone_id is not None:
+        if self.tone_id is not None or self.pack_id is not None:
             self.query_one("#pick-search", Input).display = False
-        self._fill_local(expand_tone_id=self.tone_id)
+        self._fill_local(expand_tone_id=self.tone_id, expand_pack_id=self.pack_id)
         self.query_one("#pick-tree", Tree).focus()
         box = self.query_one(ModalBox)
         set_border_hint_layout(
@@ -155,11 +160,12 @@ class TonePickerScreen(GigBuddyModal):
     def on_unmount(self) -> None:
         self._request_generation = getattr(self, "_request_generation", 0) + 1
 
-    def _fill_local(self, expand_tone_id: int | None = None) -> None:
+    def _fill_local(self, expand_tone_id: int | None = None,
+                    expand_pack_id: str | None = None) -> None:
         tree = self.query_one("#pick-tree", Tree)
         tree.reset("Library")
         tree.root.expand()
-        if self.kind == "ir" and self.tone_id is None:
+        if self.kind == "ir" and self.tone_id is None and self.pack_id is None:
             tree.root.add_leaf("CAB — (none)", {"type": "bypass"})
         if self.kind == "slot":
             items = (library.list_local_models("amp")
@@ -169,23 +175,27 @@ class TonePickerScreen(GigBuddyModal):
                 "ir" if self.kind == "ir" else "amp")
         if self.tone_id is not None:
             items = [item for item in items if item["tone_id"] == self.tone_id]
+        if self.pack_id is not None:
+            items = [item for item in items if item.get("pack_id") == self.pack_id]
         folders = {}
         for model in items:
-            tone_id = model["tone_id"]
-            if tone_id not in folders:
+            pack_key = (f"tone:{model['tone_id']}" if model.get("tone_id") is not None
+                        else f"local:{model.get('pack_id')}")
+            if pack_key not in folders:
                 title = _escape(model.get("title") or "Untitled")
                 label = f"{title}  {self._author_label(
                     model.get('username'), self.app.theme_variables)}"
-                folders[tone_id] = tree.root.add(
-                    label, {"type": "tone", "tone_id": tone_id, "model": model},
-                    expand=tone_id == expand_tone_id)
-            folders[tone_id].add_leaf(
+                folders[pack_key] = tree.root.add(
+                    label, {"type": "pack", "model": model},
+                    expand=(model.get("tone_id") == expand_tone_id
+                            or model.get("pack_id") == expand_pack_id))
+            folders[pack_key].add_leaf(
                 Path(model["local_path"]).name, {"type": "model", "model": model})
         if self.kind != "ir" and not items:
             tree.root.add_leaf("(no local tones — search above)", None)
         if tree.root.children:
             first = tree.root.children[0]
-            if expand_tone_id is not None and len(first.children) > 0:
+            if (expand_tone_id is not None or expand_pack_id is not None) and len(first.children) > 0:
                 first.expand()
                 tree.call_after_refresh(tree.move_cursor, first.children[0])
             else:
@@ -206,11 +216,10 @@ class TonePickerScreen(GigBuddyModal):
             self.query_one("#pick-status", MarqueeBar).content = (
                 "Searching TONE3000…")
         try:
-            # IR picker searches both CAB and SPACE tones; both expose IR files.
             rows = await asyncio.to_thread(
                 library.tone3000.search,
                 query, page_size=50,
-                gear_filters=["cab", "space"] if self.kind == "ir" else None)
+                format_filter="ir" if self.kind == "ir" else None)
             rows = await asyncio.to_thread(library.mark_download_state, rows)
         except Exception as e:
             if self._request_alive(generation, query):
@@ -280,7 +289,7 @@ class TonePickerScreen(GigBuddyModal):
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
-        if data and data.get("type") == "tone":
+        if data and data.get("type") == "pack":
             event.node.toggle()
             return
         self._handle_data(data)
@@ -294,7 +303,7 @@ class TonePickerScreen(GigBuddyModal):
     # ---- clickable border hints --------------------------------------------
 
     def _border_hint_actions(self) -> list:
-        close_token = "esc back" if self.tone_id is not None else "esc cancel"
+        close_token = "esc back" if self.tone_id is not None or self.pack_id is not None else "esc cancel"
         return [("enter pick", self._confirm), (close_token, self.dismiss)]
 
     def on_click(self, event: MouseEvent) -> None:
@@ -396,7 +405,9 @@ class TonePickerScreen(GigBuddyModal):
             banner.content = None
             detail.update("")
             return
-        tone = library.get_tone(model.get("tone_id")) or model
+        tone = (library.get_tone(model.get("tone_id"))
+                if model.get("tone_id") is not None
+                else library.local_pack_by_id(model.get("pack_id"))) or model
         title = tone.get("title") or ""
         filename = Path(model.get("local_path") or model.get("name") or "").name
         banner.content = " · ".join(part for part in (title, filename) if part)

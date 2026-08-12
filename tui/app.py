@@ -2490,6 +2490,8 @@ class GigBuddyApp(App):
         BYPASS 节点按 d 被 "already empty" 守卫拒绝，看起来 delete 无效）。
         """
         key = "model" if event.kind == "amp" else "ir"
+        if event.kind == "slot":
+            key = "ir" if Path(event.path or "").suffix.casefold() == ".wav" else "model"
         panel = self.query_one(ChainPanel)
         node = next((n for n in panel.query(NodeWidget)
                      if n.kind == event.kind), None)
@@ -3027,7 +3029,9 @@ class GigBuddyApp(App):
         tone = {}
         if local_models:
             try:
-                tone = library.get_tone(local_models[0].get("tone_id")) or {}
+                tone = (library.get_tone(local_models[0].get("tone_id"))
+                        if local_models[0].get("tone_id") is not None
+                        else library.local_pack_for_path(path)) or {}
             except Exception:
                 tone = {}
         if not tone:
@@ -3373,7 +3377,9 @@ class GigBuddyApp(App):
             # 聚焦打开的是 pack 视图：换模型只移动 ▶ 标记，不替换整个视图
             detail.refresh_pack_active(cfg)
         else:
-            tone = library.get_tone(nxt["tone_id"])
+            tone = (library.get_tone(nxt.get("tone_id"))
+                    if nxt.get("tone_id") is not None
+                    else library.local_pack_for_path(nxt["local_path"]))
             detail.show_model(tone, nxt)
         self._publish_mutation(
             "slot-model", (f"chain:{key}",), persisted.get("revision"))
@@ -3543,6 +3549,22 @@ class GigBuddyApp(App):
     def on_tone_selected(self, event: ToneSelected) -> None:
         """Enter/double-click on a local Library row opens its PACK view."""
         self._remote_detail_request_id += 1
+        if event.pack_id:
+            t = library.local_pack_by_id(event.pack_id)
+            if not t:
+                return
+            if not self.query_one(ChainPanel)._legacy_mode:
+                self.query_one(DetailPane).show_library_pack(t)
+                return
+            picker_kind = (
+                "ir" if t.get("format") == "ir" else
+                "amp" if t.get("format") == "nam" else "slot")
+            self.push_screen(TonePickerScreen(
+                picker_kind,
+                pack_id=event.pack_id, tone_type=t.get("gear") or "amp"))
+            return
+        if event.tone_id is None:
+            return
         t = library.get_tone(event.tone_id)
         if t:
             if not self.query_one(ChainPanel)._legacy_mode:

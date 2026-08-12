@@ -200,6 +200,10 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/unins
    `enter` 即可 bypass 或恢复。
 5. 在 **PRESETS** 里保存：`s` 更新当前 preset，`n` 另存新名并附备注。
 
+preset 同时保存为 `data/presets/<id>-<name>.json`，可以直接备份和编辑；
+SQLite 继续作为本地索引。GigBuddy 读取 preset 时会同步已修改的 JSON，
+JSON 损坏时保留文件并提示，不会覆盖 SQLite 里最后一份可用快照。
+
 全局命令面板（`ctrl+p`）可以聚焦 Presets、打开音频设置、切换主题或查找
 主要命令，不必记忆快捷键。
 
@@ -232,8 +236,21 @@ bin/gigbuddy tone list
 bin/gigbuddy tone show <tone-id>
 ```
 
-导入操作是幂等的。文件存放在 `data/tones/`，元数据在 `data/gigbuddy.db`
-中随时可查。NAM 捕获使用 `.nam`，箱体及其他 IR 资产使用 `.wav`。
+导入操作是幂等的。每个导入的 Tone 都是 `data/tones/` 下的一个 Pack
+文件夹：下载下来的 NAM/IR 文件直接放在 Pack 文件夹里，远程导入还会在
+旁边生成可选的 `gigbuddy.json` 元数据文件。NAM 捕获使用 `.nam`，箱体及
+其他 IR 资产使用 `.wav`。SQLite 是 GigBuddy 的搜索索引，Pack 文件夹才是
+实际音色文件所在的位置。
+
+```text
+data/tones/<tone-id>-<title-slug>/
+  gigbuddy.json       # 可选；远程导入默认生成
+  <model-name>.nam
+  <ir-name>.wav
+```
+
+音色文件的完整管理规则见 [GigBuddy 音色文件管理](docs/local-tone-pack-design.md)，
+包括远程下载、本地 Tone Pack 加载、preset 文件以及格式和路径限制。
 
 ## 搭建自己的设备
 

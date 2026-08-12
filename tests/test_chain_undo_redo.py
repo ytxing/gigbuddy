@@ -32,6 +32,7 @@ def _make_env(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(library, "DB_FILE", root / "data" / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", root / "data" / "live_chain.json")
     monkeypatch.setattr(library, "TONES_DIR", tones)
+    monkeypatch.setattr(library, "PRESETS_DIR", root / "data" / "presets")
     monkeypatch.setattr(lib, "ROOT", root)
     monkeypatch.setattr(lib, "CHAIN_FILE", root / "data" / "live_chain.json")
     monkeypatch.setattr(lib, "TONES_DIR", tones)

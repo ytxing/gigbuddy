@@ -15,10 +15,12 @@ CLI:
 """
 import base64
 from dataclasses import dataclass, field
+import html
 import json
 import hashlib
 import http.client
 import http.server
+import math
 import os
 import re
 import secrets
@@ -40,21 +42,44 @@ class SearchPage:
     loaded_count: int
     has_more: bool
     exhausted: bool
+    total_count: int | None = None
+    total_pages: int | None = None
+
+
+@dataclass
+class TonePage:
+    rows: list[dict]
+    page_number: int
+    has_more: bool
+    total_count: int | None = None
+    total_pages: int | None = None
+
+
+@dataclass
+class CreatorPage:
+    rows: list[dict]
+    page_number: int
+    has_more: bool
+    total_count: int | None = None
+    total_pages: int | None = None
 
 
 @dataclass
 class _SearchSourceState:
     architecture_filter: str | None
+    format_filter: str | None
     gear_filters: tuple[str, ...] | None
     next_page: int = 1
     rows: list[dict] = field(default_factory=list)
     seen_ids: set[int] = field(default_factory=set)
     exhausted: bool = False
+    total_count: int | None = None
+    total_pages: int | None = None
 
 
 @dataclass
 class _SearchState:
-    sources: list[_SearchSourceState]
+    source: _SearchSourceState
 
 
 _SEARCH_STATES: dict[tuple, _SearchState] = {}
@@ -414,7 +439,14 @@ def login(*, timeout: float = 300, open_browser: bool = True,
             self.send_response(200 if "code" in result else 400)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(_CALLBACK_PAGE.encode("utf-8"))
+            if "code" in result:
+                page = _CALLBACK_PAGE
+            else:
+                detail = html.escape(result.get("error", "Login failed"))
+                page = _CALLBACK_PAGE.replace(
+                    "<p>Login successful</p>\n<p>You can return to GigBuddy now.</p>",
+                    f"<p>Login failed</p>\n<p>{detail}</p>")
+            self.wfile.write(page.encode("utf-8"))
 
         def log_message(self, *_args):
             return
@@ -832,14 +864,23 @@ def _canonical_creator(row: dict) -> dict:
 def _post(url, body):
     """POST helper; search bodies are translated to official REST query params."""
     if url == f"{API}/tones/search":
-        gears = list(body.get("gear_filters") or ())
-        format_filter = "ir" if "ir" in gears else None
-        gears = [gear for gear in gears if gear != "ir"]
+        gears = [str(gear).strip().casefold()
+                 for gear in (body.get("gear_filters") or ()) if gear]
+        format_filter = body.get("format_filter")
+        if "ir" in gears:
+            # ``ir`` was accepted by the old CLI as a format alias. Keep the
+            # compatibility boundary here, but never send it as a gear.
+            format_filter = format_filter or "ir"
+            gears = [gear for gear in gears if gear != "ir"]
+        order_by = body.get("order_by") or "trending"
+        order_by = {
+            "downloads": "downloads-all-time",
+        }.get(str(order_by).casefold(), order_by)
         params = {
             "query": body.get("query_term", ""),
             "page": body.get("page_number", 1),
-            "page_size": 25,
-            "sort": body.get("order_by", "trending"),
+            "page_size": body.get("page_size", 25),
+            "sort": order_by,
             "gears": "_".join(gears or ()),
             "format": format_filter,
             "tags": "_".join(body.get("tag_names") or ()),
@@ -858,37 +899,54 @@ _SUPPORTED_MODEL_COUNTS = ("a2_models_count", "irs_count")
 
 def _has_supported_tone_models(
         row: dict, *, architecture_filter: str | None = None,
-        gear_filters=None) -> bool:
-    """Keep tones with at least one model the product can expose."""
+        format_filter: str | None = None, gear_filters=None) -> bool:
+    """Keep tones visible in the requested official catalog view."""
     row = row if isinstance(row, dict) else {}
     format_token = str(
         row.get("format") or row.get("platform") or ""
     ).strip().casefold()
     if format_token and format_token not in _SUPPORTED_TONE_FORMATS:
         return False
+    architecture_token = str(architecture_filter or "").strip().casefold()
+    format_token_filter = str(format_filter or "").strip().casefold()
     models = row.get("models")
     if isinstance(models, (list, tuple)):
-        return any(
-            is_supported_model(model, row)
-            for model in models if isinstance(model, dict)
-        )
-    architecture_token = str(architecture_filter or "").strip().casefold()
-    source_gears = {
-        str(value).strip().casefold() for value in (gear_filters or ()) if value
-    }
-    # A source-specific aggregate must prove the architecture represented by
-    # that source. This matters for mixed Packs and for exact ``--gear ir``
-    # searches: a positive A2 count alone must not make an IR-only view visible,
-    # and vice versa.
-    if architecture_token in {"2", "a2"}:
-        if "a2_models_count" in row:
-            try:
-                return int(row.get("a2_models_count") or 0) > 0
-            except (TypeError, ValueError):
-                return False
-        if any(key in row for key in _SUPPORTED_MODEL_COUNTS):
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            if format_token_filter == "ir":
+                if _is_ir_model(model, row):
+                    return True
+                continue
+            if architecture_token in {"2", "a2"}:
+                family = _architecture_family(model)
+                # TONE3000's architecture filter applies to NAM models only.
+                # The official all-format stream still contains IR rows, so
+                # retain supported IR models alongside A2 models here.
+                if family in {"a2", "ir"} and is_supported_model(model, row):
+                    return True
+                # The explicit A2 endpoint can omit architecture metadata;
+                # a NAM suffix is enough only without contradictory metadata.
+                if family is None and _model_file_suffix(model) in _NAM_SUFFIXES:
+                    return True
+                if family is None and is_supported_model(model, row):
+                    return True
+                continue
+            if format_token_filter == "nam":
+                if is_supported_model(model, row) and not _is_ir_model(model, row):
+                    return True
+                continue
+            if is_supported_model(model, row):
+                return True
+        return False
+
+    # Format and architecture are independent official filters. A CAB/SPACE
+    # gear is not evidence that a row is an IR.
+    if format_token_filter == "ir":
+        if format_token == "nam":
             return False
-    if source_gears & _IR_GEAR_FILTERS and architecture_filter is None:
+        if format_token == "ir" and "irs_count" not in row:
+            return True
         if "irs_count" in row:
             try:
                 return int(row.get("irs_count") or 0) > 0
@@ -896,33 +954,57 @@ def _has_supported_tone_models(
                 return False
         if any(key in row for key in _SUPPORTED_MODEL_COUNTS):
             return False
+        return False
+    if architecture_token in {"2", "a2"}:
+        # ``architecture`` is a NAM-only filter in the official API. The
+        # website's default A2 view therefore keeps IR tones in the same
+        # ranked stream; only an explicit ``format=nam`` view excludes them.
+        if format_token == "nam":
+            try:
+                return int(row.get("a2_models_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        if format_token == "ir":
+            try:
+                return int(row.get("irs_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        counts = []
+        for key in _SUPPORTED_MODEL_COUNTS:
+            if key not in row:
+                continue
+            try:
+                counts.append(int(row.get(key) or 0))
+            except (TypeError, ValueError):
+                continue
+        return any(value > 0 for value in counts)
+    if format_token_filter == "nam":
+        if format_token == "ir":
+            return False
+        if "a2_models_count" in row:
+            try:
+                return int(row.get("a2_models_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        if "irs_count" in row:
+            return False
+        return False
+    if format_token == "ir":
+        if "irs_count" in row:
+            try:
+                return int(row.get("irs_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        return True
     supported_counts = []
     for key in _SUPPORTED_MODEL_COUNTS:
-        if key not in row:
-            continue
-        try:
-            supported_counts.append(int(row.get(key) or 0))
-        except (TypeError, ValueError):
-            continue
+        if key in row:
+            try:
+                supported_counts.append(int(row.get(key) or 0))
+            except (TypeError, ValueError):
+                continue
     if supported_counts:
         return any(value > 0 for value in supported_counts)
-    # The A2 search view is already an authoritative server-side filter. Do
-    # not drop a valid result merely because an older response omitted the
-    # aggregate a2_models_count field.
-    if str(architecture_filter or "").strip().casefold() in {"2", "a2"}:
-        return format_token in {"", "nam"}
-    if format_token == "ir":
-        return True
-    # A NAM row cannot be admitted to the IR view just because its gear is
-    # cab/space. The server-side filter is useful evidence only when the row
-    # does not carry contradictory format metadata.
-    if format_token == "nam":
-        return False
-    # _post sends format=ir for CAB/SPACE/IR sources. Trust that explicit
-    # server-side view when older responses omit both format and irs_count;
-    # the model-level classifier still guards the Pack and download paths.
-    if source_gears & _IR_GEAR_FILTERS:
-        return True
     return False
 
 
@@ -970,88 +1052,59 @@ def supported_tone_model_count(row: dict | None) -> int:
     return model_count or 0
 
 
-def _search_sources(gear_filters):
-    """Return the supported catalog views needed for one search."""
-    gears = tuple(str(value).strip().casefold()
-                  for value in (gear_filters or ()) if value)
-    if not gears:
-        return [("2", None), (None, ("ir",))]
-
-    nam_gears = tuple(value for value in gears
-                      if value not in _IR_GEAR_FILTERS)
-    ir_gears = tuple(value for value in gears
-                     if value in _IR_GEAR_FILTERS)
-    if any(value in {"cab", "space"} for value in gears):
-        ir_gears = tuple(dict.fromkeys(ir_gears + tuple(
-            value for value in gears if value in {"cab", "space"})))
-    sources = []
-    if nam_gears:
-        sources.append(("2", nam_gears))
-    if ir_gears:
-        sources.append((None, ir_gears))
-    return sources
+def _normalize_search_filters(gear_filters, format_filter):
+    """Normalize independent gear and format filters at the API boundary."""
+    gears = []
+    for value in (gear_filters or ()):
+        token = str(value).strip().casefold()
+        if token and token not in gears:
+            gears.append(token)
+    format_token = str(format_filter or "").strip().casefold() or None
+    if "ir" in gears:
+        # ``ir`` was accepted by the old CLI as a format alias. It is not a
+        # gear value and must not be sent as one to the official API.
+        format_token = format_token or "ir"
+        gears = [value for value in gears if value != "ir"]
+    if format_token not in {None, "nam", "ir"}:
+        raise ValueError("format_filter must be 'nam', 'ir', or None")
+    return tuple(gears) or None, format_token
 
 
-def _fetch_search_prefix(query, limit, order_by, gear_filters, usernames,
-                         tag_names, make_names, architecture_filter):
-    """Fetch a bounded supported prefix from one official catalog view."""
-    rows: list[dict] = []
-    total = None
-    page = 1
-    exhausted = False
-    while len(rows) < limit:
-        response = _post(f"{API}/tones/search", {
-            "query_term": query,
-            "page_number": page,
-            "page_size": 25,
-            "order_by": order_by,
-            "tag_names": tag_names,
-            "make_names": make_names,
-            "gear_filters": gear_filters,
-            "is_calibrated": False,
-            "size_filters": None,
-            "usernames": usernames,
-            "architecture_filter": architecture_filter,
-        })
-        if isinstance(response, dict):
-            page_rows = response.get("data") or []
-            total = response.get("total", total)
-            total_pages = response.get("total_pages")
-        else:
-            page_rows = response or []
-            total_pages = None
-        if not isinstance(page_rows, list):
-            page_rows = []
-        if not page_rows:
-            exhausted = True
-            break
-        rows.extend(
-            row for row in _canonical_tones(page_rows)
-            if isinstance(row, dict) and _has_supported_tone_models(
-                row, architecture_filter=architecture_filter,
-                gear_filters=gear_filters)
-        )
-        if total_pages is not None:
-            try:
-                if page >= int(total_pages):
-                    exhausted = True
-                    break
-            except (TypeError, ValueError):
-                pass
-        if len(page_rows) < 25:
-            exhausted = True
-            break
-        page += 1
-    return (rows if exhausted else rows[:limit]), total, exhausted
+def _effective_order(query, order_by):
+    """Match the official defaults while preserving an explicit selection."""
+    if order_by not in (None, ""):
+        return str(order_by).strip().casefold()
+    return "trending" if not str(query or "").strip() else "best-match"
 
 
-def _search_identity(query, order_by, gear_filters, usernames, tag_names,
-                     make_names):
+def _effective_architecture(format_filter, architecture_filter):
+    """Use A2 by default; an IR-only view has no NAM architecture filter."""
+    if architecture_filter not in (None, ""):
+        return str(architecture_filter).strip().casefold()
+    if str(format_filter or "").strip().casefold() == "ir":
+        return None
+    return "2"
+
+
+def _search_sources(gear_filters, format_filter=None, architecture_filter=None):
+    """Return the one official ranked stream used for a search."""
+    gears, normalized_format = _normalize_search_filters(
+        gear_filters, format_filter)
+    return [_SearchSourceState(
+        _effective_architecture(normalized_format, architecture_filter),
+        normalized_format,
+        gears,
+    )]
+
+
+def _search_identity(query, order_by, architecture_filter, format_filter,
+                     gear_filters, usernames, tag_names, make_names):
     def normalized(values):
         return tuple(sorted(str(value).strip().casefold()
                             for value in (values or ()) if value))
 
     return (str(query or ""), str(order_by or "trending"),
+            str(architecture_filter or ""), str(format_filter or ""),
             normalized(gear_filters), normalized(usernames),
             normalized(tag_names), normalized(make_names))
 
@@ -1068,6 +1121,7 @@ def _fetch_next_source_page(state, *, query, order_by, usernames, tag_names,
         "tag_names": tag_names,
         "make_names": make_names,
         "gear_filters": state.gear_filters,
+        "format_filter": state.format_filter,
         "is_calibrated": False,
         "size_filters": None,
         "usernames": usernames,
@@ -1075,15 +1129,31 @@ def _fetch_next_source_page(state, *, query, order_by, usernames, tag_names,
     })
     if isinstance(response, dict):
         page_rows = response.get("data") or []
+        state.total_count = response.get(
+            "total", response.get("total_count", state.total_count))
         total_pages = response.get("total_pages")
     else:
         page_rows, total_pages = response or [], None
+    if state.total_count is None and page_rows:
+        first = page_rows[0] if isinstance(page_rows[0], dict) else {}
+        state.total_count = first.get("total_count")
+    if total_pages is None and state.total_count is not None:
+        try:
+            total_pages = math.ceil(int(state.total_count) / 25)
+        except (TypeError, ValueError):
+            total_pages = None
+    if total_pages is not None:
+        try:
+            state.total_pages = int(total_pages)
+        except (TypeError, ValueError):
+            state.total_pages = None
     if not isinstance(page_rows, list) or not page_rows:
         state.exhausted = True
         return
     canonical = [row for row in _canonical_tones(page_rows)
                  if isinstance(row, dict) and _has_supported_tone_models(
                      row, architecture_filter=state.architecture_filter,
+                     format_filter=state.format_filter,
                      gear_filters=state.gear_filters)]
     for row in canonical:
         try:
@@ -1095,21 +1165,18 @@ def _fetch_next_source_page(state, *, query, order_by, usernames, tag_names,
             if tone_id is not None:
                 state.seen_ids.add(tone_id)
     state.next_page += 1
-    try:
-        state.exhausted = state.next_page > int(total_pages)
-    except (TypeError, ValueError):
+    if state.total_pages is not None:
+        state.exhausted = state.next_page > state.total_pages
+    else:
         state.exhausted = len(page_rows) < 25
 
 
 def _merge_search_sources(source_rows):
-    """Interleave source rankings while removing mixed-pack duplicates."""
+    """Keep the official stream order while removing duplicate tone IDs."""
     merged: list[dict] = []
     seen: set[int] = set()
-    for index in range(max((len(rows) for rows in source_rows), default=0)):
-        for rows in source_rows:
-            if index >= len(rows):
-                continue
-            row = rows[index]
+    for rows in source_rows:
+        for row in rows:
             try:
                 tone_id = int(row["id"])
             except (KeyError, TypeError, ValueError):
@@ -1120,35 +1187,6 @@ def _merge_search_sources(source_rows):
                 seen.add(tone_id)
             merged.append(row)
     return merged
-
-
-def _sort_search_rows(rows, order_by):
-    field = {
-        "downloads": "downloads_count",
-        "downloads-all-time": "downloads_count",
-        "downloads_count": "downloads_count",
-        "favorites": "favorites_count",
-        "favorites_count": "favorites_count",
-        "newest": "created_at",
-        "created": "created_at",
-        "name": "title",
-        "title": "title",
-    }.get(str(order_by or "trending").casefold())
-    if not field:
-        return rows
-
-    def value(row):
-        item = row.get(field)
-        if field == "title":
-            return str(item or "").casefold()
-        if field == "created_at":
-            # TONE3000 timestamps are ISO-8601 strings; lexical order is
-            # chronological for the normalized server representation.
-            return str(item or "")
-        return item if isinstance(item, (int, float)) else 0
-
-    return sorted(rows, key=lambda row: (value(row), int(row.get("id", 0))),
-                  reverse=field != "title")
 
 
 def _fetch_supported_aggregate(fetch, requested: int) -> list[dict]:
@@ -1177,118 +1215,140 @@ def _fetch_supported_aggregate(fetch, requested: int) -> list[dict]:
     return visible[:requested]
 
 
-def search(query="", page_size=50, order_by="trending", gear_filters=None,
-           usernames=None, tag_names=None, make_names=None, page_number=1):
+def search(query="", page_size=50, order_by=None, gear_filters=None,
+           format_filter=None, architecture_filter=None, usernames=None,
+           tag_names=None, make_names=None, page_number=1):
     """Search the official paginated tone catalog.
 
-    TONE3000's documented default excludes A2 and its architecture filter only
-    accepts one architecture at a time. Search the supported A2 and IR views,
-    then merge and deduplicate the bounded prefixes. A1-only, Custom-only,
-    and other unsupported tones are omitted; mixed packs remain visible with
-    only their usable model counts.
+    The unfiltered path follows the official search page's single ranked
+    stream. Explicit IR and gear filters retain their narrower catalog views.
+    A1-only, Custom-only, and other unsupported tones are omitted; mixed packs
+    remain visible with only their usable model counts.
     """
     return search_page(query, page_size=page_size, order_by=order_by,
-                       gear_filters=gear_filters, usernames=usernames,
+                       gear_filters=gear_filters, format_filter=format_filter,
+                       architecture_filter=architecture_filter,
+                       usernames=usernames,
                        tag_names=tag_names, make_names=make_names,
                        page_number=page_number).rows
 
 
-def search_page(query="", page_size=50, order_by="trending", gear_filters=None,
-                usernames=None, tag_names=None, make_names=None, page_number=1):
-    """Return a page while incrementally advancing each remote source."""
+def search_page(query="", page_size=50, order_by=None, gear_filters=None,
+                format_filter=None, architecture_filter=None, usernames=None,
+                tag_names=None, make_names=None, page_number=1):
+    """Return a page from the single official ``search_tones_a2`` stream."""
     requested = max(0, int(page_size))
     if requested == 0:
         return SearchPage([], 0, False, True)
     logical_page = max(1, int(page_number))
-    key = _search_identity(query, order_by, gear_filters, usernames,
-                           tag_names, make_names)
+    order_by = _effective_order(query, order_by)
+    gear_filters, format_filter = _normalize_search_filters(
+        gear_filters, format_filter)
+    architecture_filter = _effective_architecture(
+        format_filter, architecture_filter)
+    key = _search_identity(query, order_by, architecture_filter, format_filter,
+                           gear_filters, usernames, tag_names, make_names)
     if logical_page == 1 or key not in _SEARCH_STATES:
-        _SEARCH_STATES[key] = _SearchState([
-            _SearchSourceState(architecture, gears)
-            for architecture, gears in _search_sources(gear_filters)
-        ])
+        _SEARCH_STATES[key] = _SearchState(_search_sources(
+            gear_filters, format_filter, architecture_filter)[0])
     state = _SEARCH_STATES[key]
     target = logical_page * requested
-    while len(_merge_search_sources([source.rows for source in state.sources])) < target:
-        before = sum(len(source.rows) for source in state.sources)
-        for source in state.sources:
-            _fetch_next_source_page(source, query=query, order_by=order_by,
-                                    usernames=usernames, tag_names=tag_names,
-                                    make_names=make_names)
-        after = sum(len(source.rows) for source in state.sources)
-        if after == before or all(source.exhausted for source in state.sources):
+    while len(_merge_search_sources([state.source.rows])) < target:
+        before = len(state.source.rows)
+        _fetch_next_source_page(state.source, query=query, order_by=order_by,
+                                usernames=usernames, tag_names=tag_names,
+                                make_names=make_names)
+        if len(state.source.rows) == before or state.source.exhausted:
             break
-    merged = _sort_search_rows(
-        _merge_search_sources([source.rows for source in state.sources]), order_by)
-    exhausted = all(source.exhausted for source in state.sources)
+    merged = _merge_search_sources([state.source.rows])
+    exhausted = state.source.exhausted
     start = (logical_page - 1) * requested
     rows = merged[start:start + requested]
     for row in rows:
-        row["total_count"] = len(merged)
-    return SearchPage(rows, len(merged), not exhausted, exhausted)
+        if state.source.total_count is not None:
+            row["total_count"] = state.source.total_count
+    return SearchPage(rows, len(merged), not exhausted, exhausted,
+                      state.source.total_count, state.source.total_pages)
 
 
 def top(limit=50):
-    """Return the public all-time downloads aggregate ordering."""
+    """Return the official all-time downloads ordering."""
     requested = max(0, int(limit))
     if requested == 0:
         return []
-    select = ("id,title,description,gear,downloads_count,favorites_count,"
-              "a1_models_count,a2_models_count,custom_models_count,"
-              "irs_count,models_count,created_at,user_id,platform")
-
-    def fetch(offset):
-        params = dict(select=select, order="downloads_count.desc",
-                      limit=requested)
-        if offset:
-            params["offset"] = offset
-        return _get(f"{LEGACY_API}/tones_counts", **params)
-
-    rows = _fetch_supported_aggregate(fetch, requested)
-    _attach_usernames(rows, api=LEGACY_API)
-    return rows
+    return search("", page_size=requested, order_by="downloads-all-time")
 
 
-def top_favorites(limit=50, text=None, usernames=None):
-    """收藏排行：search_tones_a2 RPC 无收藏排序（400），走 tones_counts 聚合表。
+def favorited_page(page_size=50, page_number=1, gear=None):
+    """Return one official page of tones favorited by the current user."""
+    requested = min(max(1, int(page_size)), 100)
+    page = max(1, int(page_number))
+    params = {"page": page, "page_size": requested}
+    if gear not in (None, ""):
+        params["gear"] = gear
+    response = _get(f"{API}/tones/favorited", **params)
+    rows = [row for row in _canonical_tones(_response_rows(response))
+            if isinstance(row, dict) and _has_supported_tone_models(row)]
+    total = response.get("total") if isinstance(response, dict) else None
+    total_pages = (response.get("total_pages")
+                   if isinstance(response, dict) else None)
+    try:
+        total = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total = None
+    try:
+        total_pages = int(total_pages) if total_pages is not None else None
+    except (TypeError, ValueError):
+        total_pages = None
+    if total_pages is None and total is not None:
+        total_pages = math.ceil(total / requested)
+    has_more = (page < total_pages if total_pages is not None
+                else len(_response_rows(response)) >= requested)
+    return TonePage(rows, page, bool(has_more), total, total_pages)
 
-    行形状与 search 结果兼容。REQ-023：行缺 username/avatar_url（此前表格
-    显示 @?）——按 user_id 批量联查 users 补上（一次 in 过滤请求）。
 
-    text: 关键词，title/description 走 PostgREST ``or=(...ilike...)`` 过滤。
-    usernames: 作者名列表（精确），先按 username 联查 users 表拿 user_id，
-         再用 ``user_id=in.(...)`` 过滤；作者不存在时直接返回空列表。
-    tones_counts 无 tag/make 字段，favorites 视图不支持 tag:/make: 过滤
-    （与 search RPC 不同），调用方需自行忽略这两个维度。
+def favorited(limit=50, text=None, usernames=None, gear=None):
+    """Return the current user's favorited tones through the official API.
+
+    The endpoint is paginated but does not expose search-text or creator
+    predicates. When those optional compatibility filters are supplied, fetch
+    the bounded official result set and filter its canonical rows locally.
     """
-    params = dict(
-        select="id,title,description,gear,downloads_count,favorites_count,"
-               "a1_models_count,a2_models_count,custom_models_count,"
-               "irs_count,models_count,created_at,user_id",
-        order="favorites_count.desc", limit=limit)
-    if usernames:
-        user_response = _get(
-            f"{LEGACY_API}/users", username=f"in.({','.join(usernames)})",
-            select="id", limit=300)
-        user_ids = [u["id"] for u in _response_rows(user_response)]
-        if not user_ids:
-            return []  # 作者不存在，无需再查排行
-        params["user_id"] = f"in.({','.join(user_ids)})"
-    if text:
-        # ilike 通配符（*、%）与转义符（\）剔除，or= 表达式结构字符
-        # （( ) ,）一并替换为空格，用户输入按字面匹配、不破坏过滤表达式
-        safe = re.sub(r"[*%\\(),]", " ", text).strip()
-        if safe:
-            params["or"] = f"(title.ilike.*{safe}*,description.ilike.*{safe}*)"
-    def fetch(offset):
-        page_params = dict(params)
-        if offset:
-            page_params["offset"] = offset
-        return _get(f"{LEGACY_API}/tones_counts", **page_params)
+    requested = max(0, int(limit))
+    if requested == 0:
+        return []
+    rows: list[dict] = []
+    page = 1
+    while len(rows) < requested:
+        result = favorited_page(page_size=min(100, max(requested, 50)),
+                                page_number=page, gear=gear)
+        rows.extend(result.rows)
+        if not result.has_more:
+            break
+        page += 1
+    usernames_set = {str(name).casefold() for name in (usernames or ())}
+    text_value = str(text or "").casefold().strip()
+    filtered = []
+    for row in rows:
+        username = str(row.get("username") or "").casefold()
+        haystack = " ".join((str(row.get("title") or ""),
+                              str(row.get("description") or ""))).casefold()
+        if usernames_set and username not in usernames_set:
+            continue
+        if text_value and text_value not in haystack:
+            continue
+        filtered.append(row)
+        if len(filtered) >= requested:
+            break
+    return filtered
 
-    rows = _fetch_supported_aggregate(fetch, max(0, int(limit)))
-    _attach_usernames(rows, api=LEGACY_API)
-    return rows
+
+def top_favorites(limit=50, text=None, usernames=None, gear=None):
+    """Compatibility alias for :func:`favorited`.
+
+    This is the current user's list, not a site-wide favorites leaderboard.
+    """
+    return favorited(limit, text=text, usernames=usernames, gear=gear)
 
 
 def top_creators(sort_by="tones", page_size=100, page_number=1):
@@ -1321,6 +1381,31 @@ def top_creators(sort_by="tones", page_size=100, page_number=1):
             break
     return [_canonical_creator(row) for row in rows[skip:skip + requested]
             if isinstance(row, dict)]
+
+
+def top_creators_page(sort_by="tones", page_size=10, page_number=1):
+    """Return one official creator leaderboard page with its metadata."""
+    requested = min(max(1, int(page_size)), 10)
+    page = max(1, int(page_number))
+    response = _get(f"{API}/users", sort=sort_by, page=page,
+                    page_size=requested)
+    rows = [_canonical_creator(row) for row in _response_rows(response)
+            if isinstance(row, dict)]
+    total = response.get("total") if isinstance(response, dict) else None
+    total_pages = response.get("total_pages") if isinstance(response, dict) else None
+    try:
+        total = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total = None
+    try:
+        total_pages = int(total_pages) if total_pages is not None else None
+    except (TypeError, ValueError):
+        total_pages = None
+    if total_pages is None and total is not None:
+        total_pages = math.ceil(total / requested)
+    has_more = (page < total_pages if total_pages is not None
+                else len(_response_rows(response)) >= requested)
+    return CreatorPage(rows, page, bool(has_more), total, total_pages)
 
 
 def _attach_usernames(rows: list[dict], *, api: str = API) -> None:

@@ -15,6 +15,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "DB_FILE", root / "data" / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", root / "data" / "live_chain.json")
     monkeypatch.setattr(library, "TONES_DIR", root / "data" / "tones")
+    monkeypatch.setattr(library, "PRESETS_DIR", root / "data" / "presets")
     (root / "data" / "tones").mkdir(parents=True)
     (root / "data" / "dry_inputs").mkdir(parents=True)
     (root / "data" / "dry_inputs" / "one.wav").write_bytes(b"dry")

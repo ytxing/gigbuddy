@@ -22,6 +22,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr(library, "TONES_DIR", tmp_path / "data" / "tones")
+    monkeypatch.setattr(library, "PRESETS_DIR", tmp_path / "data" / "presets")
     (tmp_path / "data" / "tones").mkdir(parents=True)
     yield
 
@@ -80,7 +81,7 @@ def test_tone3000_search_forwards_make_filters(monkeypatch):
     assert captured["usernames"] == ["coretonecaptures"]
     assert captured["tag_names"] == ["clean"]
     assert captured["make_names"] == ["Two Rock Traditional Clean"]
-    assert captured["architecture_filter"] is None
+    assert captured["architecture_filter"] == "2"
 
 
 def test_tone3000_model_id_lookup_returns_its_parent_tone(monkeypatch):
@@ -438,6 +439,13 @@ def test_list_filters_accept_multi_value_search_spec():
 
 
 def test_models_and_local_listing():
+    amp_path = library.ROOT / "data" / "tones" / "19-01.nam"
+    ir_path = library.ROOT / "data" / "tones" / "19-01.wav"
+    custom_path = library.ROOT / "data" / "tones" / "19-custom.nam"
+    amp_path.parent.mkdir(parents=True, exist_ok=True)
+    amp_path.write_bytes(b"amp")
+    ir_path.write_bytes(b"ir")
+    custom_path.write_bytes(b"custom")
     with library.connect() as conn:
         library.upsert_tone(conn, SAMPLE)
         library.upsert_model(conn, {"id": 51, "tone_id": 19, "model_url": "u1",
@@ -502,6 +510,10 @@ def test_local_listing_infers_architectureless_ir_and_keeps_a1_amp():
            "title": "Blue Cabinet"}
     amp = {**SAMPLE, "id": 21, "gear": "amp", "platform": "nam",
            "title": "Legacy Amp"}
+    (library.ROOT / "data" / "tones" / "20-blue").mkdir(parents=True)
+    (library.ROOT / "data" / "tones" / "20-blue" / "Blue 1.wav").write_bytes(b"ir")
+    (library.ROOT / "data" / "tones" / "21-legacy").mkdir(parents=True)
+    (library.ROOT / "data" / "tones" / "21-legacy" / "Legacy.nam").write_bytes(b"a1")
     with library.connect() as conn:
         library.upsert_tone(conn, cab)
         library.upsert_tone(conn, amp)
@@ -755,6 +767,108 @@ def test_import_tone_mocked(monkeypatch, capsys):
     assert len(library.list_tones()) == 1
 
 
+def test_remote_import_writes_a_portable_tone_pack_manifest(monkeypatch):
+    remote = {**SAMPLE, "url": "https://www.tone3000.com/tones/canonical-19"}
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(remote))
+
+    def fake_download(_tone_id, dest, **kwargs):
+        assert kwargs["return_paths"] is True
+        amp = dest / "Clean Capture.nam"
+        ir = dest / "V30.wav"
+        amp.write_bytes(b"nam")
+        ir.write_bytes(b"ir")
+        return [
+            {"id": 51, "tone_id": 19, "model_url": "https://x/amp",
+             "name": amp.name,
+             "model_json": {"architecture": "SlimmableContainer"},
+             "local_path": str(amp)},
+            {"id": 52, "tone_id": 19, "model_url": "https://x/ir",
+             "name": ir.name, "model_json": None,
+             "local_path": str(ir)},
+        ]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    imported = library.import_tone(19, quiet=True)
+
+    pack = library.TONES_DIR / "19-fender-super-reverb-1977"
+    manifest_path = pack / library.PACK_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert imported["local_dir"] == str(pack)
+    assert sorted(path.name for path in pack.iterdir()) == [
+        "Clean Capture.nam", "V30.wav", "gigbuddy.json"
+    ]
+    assert manifest["kind"] == "gigbuddy-tone-pack"
+    assert manifest["pack"]["source"] == {
+        "kind": "tone3000",
+        "url": "https://www.tone3000.com/tones/canonical-19",
+        "tone_id": 19,
+    }
+    assert [(model["file"], model["format"]) for model in manifest["models"]] == [
+        ("Clean Capture.nam", "nam"), ("V30.wav", "ir")
+    ]
+
+
+def test_remote_import_preserves_user_manifest_fields(monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+
+    def fake_download(_tone_id, dest, **_kwargs):
+        path = dest / "Clean Capture.nam"
+        path.write_bytes(b"nam")
+        return [{
+            "id": 51, "tone_id": 19, "model_url": "https://x/amp",
+            "name": path.name,
+            "model_json": {"architecture": "SlimmableContainer"},
+            "local_path": str(path),
+        }]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    library.import_tone(19, quiet=True)
+    manifest_path = library.TONES_DIR / "19-fender-super-reverb-1977" / "gigbuddy.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pack"]["name"] = "My renamed pack"
+    manifest["pack"]["description"] = "My notes"
+    manifest["metadata"] = {"favorite": True}
+    manifest["models"][0]["metadata"] = {"mic": "SM57", "setting": "clean"}
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    library.import_tone(19, quiet=True)
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert refreshed["pack"]["name"] == "My renamed pack"
+    assert refreshed["pack"]["description"] == "My notes"
+    assert refreshed["metadata"] == {"favorite": True}
+    assert refreshed["models"][0]["metadata"] == {
+        "mic": "SM57", "setting": "clean"
+    }
+
+
+def test_remote_import_does_not_overwrite_foreign_manifest(monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+    destination = library.TONES_DIR / "19-fender-super-reverb-1977"
+    destination.mkdir(parents=True)
+    foreign = destination / library.PACK_MANIFEST_NAME
+    foreign.write_text('{"kind": "other-tool", "keep": true}\n', encoding="utf-8")
+
+    def fake_download(_tone_id, dest, **_kwargs):
+        path = dest / "Clean Capture.nam"
+        path.write_bytes(b"nam")
+        return [{
+            "id": 51, "tone_id": 19, "model_url": "https://x/amp",
+            "name": path.name,
+            "model_json": {"architecture": "SlimmableContainer"},
+            "local_path": str(path),
+        }]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
+    library.import_tone(19, quiet=True)
+
+    assert json.loads(foreign.read_text(encoding="utf-8")) == {
+        "kind": "other-tool", "keep": True
+    }
+
+
 def test_import_staging_copy_does_not_share_destination_inode(tmp_path):
     source_dir = library.TONES_DIR / "existing"
     source_dir.mkdir()
@@ -854,6 +968,7 @@ def test_import_restores_replaced_file_when_db_persistence_fails(monkeypatch):
         library.import_tone(19, quiet=True)
 
     assert target.read_bytes() == b"old model"
+    assert not (destination / library.PACK_MANIFEST_NAME).exists()
     assert library.get_tone(19) is None
 
 
@@ -1099,6 +1214,102 @@ def test_preset_list_and_delete(tmp_path):
     assert library.preset_get("a") is None
 
 
+def test_preset_save_writes_editable_json_and_external_edit_reconciles(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+
+    saved = library.preset_save("Clean Rig", note="original")
+    preset_path = library.PRESETS_DIR / f"{saved['id']}-clean-rig.json"
+    document = json.loads(preset_path.read_text(encoding="utf-8"))
+
+    assert document == {
+        "schema_version": 1,
+        "kind": "gigbuddy-preset",
+        "id": saved["id"],
+        "name": "Clean Rig",
+        "note": "original",
+        "chain": saved["chain"],
+        "created_at": saved["created_at"],
+        "updated_at": saved["updated_at"],
+    }
+
+    document["note"] = "edited by hand"
+    document["chain"]["gain"] = 0.25
+    preset_path.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    reconciled = library.preset_get_by_id(saved["id"])
+    assert reconciled["note"] == "edited by hand"
+    assert reconciled["chain"]["gain"] == 0.25
+    assert reconciled["updated_at"] != saved["updated_at"]
+
+
+def test_preset_mutations_keep_json_filename_and_content_in_sync(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+    saved = library.preset_save("Old Name", note="old")
+    old_path = library.PRESETS_DIR / f"{saved['id']}-old-name.json"
+
+    renamed = library.preset_rename_by_id(saved["id"], "New Name")
+    new_path = library.PRESETS_DIR / f"{saved['id']}-new-name.json"
+    assert not old_path.exists()
+    assert new_path.is_file()
+    assert json.loads(new_path.read_text(encoding="utf-8"))["name"] == "New Name"
+
+    updated = library.preset_update_note_by_id(saved["id"], "new note")
+    document = json.loads(new_path.read_text(encoding="utf-8"))
+    assert updated["note"] == "new note"
+    assert document["note"] == "new note"
+
+    result = library.preset_delete_by_id(saved["id"])
+    assert result["deleted"] is True
+    assert not new_path.exists()
+
+
+def test_preset_reconcile_imports_new_json_and_tracks_external_delete(tmp_path):
+    library.PRESETS_DIR.mkdir(parents=True)
+    source = library.PRESETS_DIR / "my-rig.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-preset",
+        "name": "My Rig",
+        "note": "local file",
+        "chain": {"slots": [], "gain": 0.5, "master": 1.0, "quality": 1.0},
+    }), encoding="utf-8")
+
+    imported = library.preset_get("My Rig")
+    assert imported is not None
+    assert imported["chain"]["gain"] == 0.5
+    tracked_path = library.PRESETS_DIR / f"{imported['id']}-my-rig.json"
+    assert tracked_path.is_file()
+    assert not source.exists()
+
+    tracked_path.unlink()
+    assert library.preset_get("My Rig") is None
+
+
+def test_legacy_sqlite_preset_is_exported_without_rewriting_chain(tmp_path):
+    legacy_chain = {"model_id": None, "model_path": None, "gain": 0.4}
+    with library.connect() as conn:
+        conn.execute(
+            "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
+            "VALUES ('legacy', 'keep', ?, 'created', 'updated')",
+            (json.dumps(legacy_chain),),
+        )
+        conn.commit()
+
+    preset = library.preset_get("legacy")
+    preset_path = library.PRESETS_DIR / f"{preset['id']}-legacy.json"
+    assert preset_path.is_file()
+    with library.connect() as conn:
+        stored = conn.execute(
+            "SELECT chain_json FROM presets WHERE id = ?", (preset["id"],)
+        ).fetchone()[0]
+    assert json.loads(stored) == legacy_chain
+
+
 def test_preset_group_is_derived_from_name_only():
     assert library.preset_group("band-guitar-rhcp") == ("Band Gear", "Guitar")
     assert library.preset_group("classic-bass-ampeg-svt") == ("Classic Pairing", "Bass")
@@ -1217,31 +1428,44 @@ def test_mark_download_state(monkeypatch, tmp_path):
 
 
 def test_top_favorites_attaches_usernames(monkeypatch):
-    """REQ-023: favorites 排行端点按 user_id 批量联查 users 补 username，
-    表格不再显示 @?。"""
+    """The compatibility name reads the current user's official favorites."""
     import tone3000
 
-    selects = []
-
     def fake_get(url, **params):
-        if "tones_counts" in url:
-            selects.append(params.get("select", ""))
-            return [{"id": 1, "title": "T1", "user_id": "u1",
-                     "a2_models_count": 1},
-                    {"id": 2, "title": "T2", "user_id": "u2",
-                     "irs_count": 1}]
-        if "users" in url:
-            assert "in.(" in params.get("id", ""), "应使用批量 in 过滤"
-            return [{"id": "u1", "username": "alice", "avatar_url": "a"},
-                    {"id": "u2", "username": "bob", "avatar_url": "b"}]
-        return []
+        assert url == f"{tone3000.API}/tones/favorited"
+        assert params == {"page": 1, "page_size": 50}
+        return {"data": [
+            {"id": 1, "title": "T1", "user": {
+                "id": "u1", "username": "alice", "avatar_url": "a"},
+             "a2_models_count": 1},
+            {"id": 2, "title": "T2", "user": {
+                "id": "u2", "username": "bob", "avatar_url": "b"},
+             "irs_count": 1},
+        ], "total": 2, "total_pages": 1}
 
     monkeypatch.setattr("tone3000._get", fake_get)
     rows = tone3000.top_favorites(2)
     assert [r["username"] for r in rows] == ["alice", "bob"]
     assert rows[0]["avatar_url"] == "a"
-    assert "a1_models_count" in selects[0]
-    assert "custom_models_count" in selects[0]
+
+
+def test_mark_download_state_reports_unknown_when_model_probe_fails(monkeypatch):
+    path = library.ROOT / "data" / "tones" / "probe.nam"
+    path.write_bytes(b"nam")
+    with library.connect() as conn:
+        library.upsert_tone(conn, {**SAMPLE, "id": 201})
+        library.upsert_model(conn, {
+            "id": 2011, "tone_id": 201, "model_url": "u",
+            "architecture": "SlimmableContainer", "local_path": str(path),
+        })
+
+    def fail_probe(*_args, **_kwargs):
+        raise TimeoutError("network down")
+
+    monkeypatch.setattr(tone3000, "models", fail_probe)
+    rows = library.mark_download_state([{"id": 201, "a2_models_count": 1}])
+    assert rows[0]["download_state"] == "unknown"
+    assert rows[0]["downloaded"] == 1
 
 
 def test_backfill_tone_usernames(monkeypatch, tmp_path):
@@ -1399,6 +1623,72 @@ def test_old_absolute_local_path_rows_still_resolve(monkeypatch, tmp_path):
                                     "local_path": rel_path})
     assert library.tone_title_for_path(str(tmp_path / rel_path)) == "JCM800"
     assert library._model_id_for_path(str(tmp_path / rel_path)) == 2
+
+
+def test_local_pack_scanner_indexes_files_without_manifest(tmp_path):
+    pack_dir = library.TONES_DIR / "my-local-pack"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "clean.nam").write_bytes(b"nam")
+    (pack_dir / "v30.wav").write_bytes(b"ir")
+    (pack_dir / "notes.txt").write_text("ignored", encoding="utf-8")
+    (pack_dir / ".hidden.nam").write_bytes(b"ignored")
+
+    packs = library.scan_local_packs(force=True)
+
+    assert len(packs) == 1
+    pack = packs[0]
+    assert pack["name"] == "my-local-pack"
+    assert pack["source_kind"] == "local"
+    assert [model["format"] for model in pack["models"]] == ["nam", "ir"]
+    assert all(model["id"] is None for model in pack["models"])
+    assert all(model["model_key"].startswith(pack["pack_id"] + ":")
+               for model in pack["models"])
+    assert len(library.list_local_models("amp")) == 1
+    assert len(library.list_local_models("ir")) == 1
+    assert library.local_models_by_tone(str(pack_dir / "clean.nam"))
+
+
+def test_local_pack_manifest_fields_and_invalid_json_are_non_blocking(tmp_path):
+    pack_dir = library.TONES_DIR / "manifest-pack"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "capture.nam").write_bytes(b"nam")
+    manifest = {
+        "kind": "gigbuddy-tone-pack",
+        "pack": {"id": "local-manifest-pack", "name": "Edited Pack",
+                 "author": "Me", "description": "notes"},
+        "models": [{"file": "capture.nam", "name": "Clean capture",
+                    "metadata": {"mic": "SM57"}}],
+    }
+    (pack_dir / library.PACK_MANIFEST_NAME).write_text(
+        json.dumps(manifest), encoding="utf-8")
+    pack = library.scan_local_packs(force=True)[0]
+    assert pack["pack_id"] == "local-manifest-pack"
+    assert pack["name"] == "Edited Pack"
+    assert pack["models"][0]["name"] == "Clean capture"
+    assert pack["models"][0]["metadata_json"] == json.dumps(
+        {"mic": "SM57"}, ensure_ascii=False)
+
+    (pack_dir / library.PACK_MANIFEST_NAME).write_text("{broken", encoding="utf-8")
+    refreshed = library.scan_local_packs(force=True)[0]
+    assert refreshed["manifest_status"] == "invalid"
+    assert refreshed["models"][0]["name"] == "capture.nam"
+
+
+def test_local_pack_preset_uses_pack_identity_and_resolves(tmp_path):
+    pack_dir = library.TONES_DIR / "preset-pack"
+    pack_dir.mkdir(parents=True)
+    amp = pack_dir / "amp.nam"
+    amp.write_bytes(b"nam")
+    pack = library.scan_local_packs(force=True)[0]
+
+    library.chain_set({"slots": [{"path": str(amp)}]})
+    saved = library.preset_save("Local Rig")
+    slot = saved["chain"]["slots"][0]
+    assert slot["model_id"] is None
+    assert slot["pack_id"] == pack["pack_id"]
+    assert slot["relative_path"] == "amp.nam"
+    assert slot["model_key"] == f"{pack['pack_id']}:amp.nam"
+    assert library.preset_resolved_chain_by_id(saved["id"])["slots"][0]["path"] == str(amp)
 
 
 def test_uninstall_plan_matches_active_chain_for_relative_rows(monkeypatch, tmp_path):

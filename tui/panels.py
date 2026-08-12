@@ -2004,7 +2004,9 @@ class ChainPanel(Vertical):
                 model = next(
                     (item for item in models
                      if item.get("local_path") == path), models[0])
-                tone = library.get_tone(model.get("tone_id")) or {}
+                tone = (library.get_tone(model.get("tone_id"))
+                        if model.get("tone_id") is not None
+                        else library.local_pack_for_path(path)) or {}
                 title = tone.get("title") or title
                 gear = tone.get("gear") or None
                 quality_unsupported = (
@@ -3284,6 +3286,9 @@ class DetailPane(Vertical):
         tone_id = tone.get("id")
         if tone_id is not None:
             return f"tone:{tone_id}"
+        pack_id = tone.get("pack_id")
+        if pack_id:
+            return f"local-pack:{pack_id}"
         return "tone:{title}:{author}".format(
             title=tone.get("title") or "",
             author=tone.get("username") or "")
@@ -3601,7 +3606,11 @@ class DetailPane(Vertical):
 
     def action_expand_pack(self) -> None:
         """Open the larger pack screen without changing the current target."""
-        if self._view_mode != "selection" or not self._pack_tone:
+        if (self._view_mode != "selection" or not self._pack_tone
+                or self._pack_tone.get("id") is None):
+            if self._pack_tone and self._pack_tone.get("id") is None:
+                self.app.notify("Local folder Packs are already available here",
+                                severity="warning")
             return
         self.post_message(self.PackExpandedRequested(dict(self._pack_tone)))
 
@@ -3718,7 +3727,8 @@ class DetailPane(Vertical):
         tone = self._pack_tone or self._current_tone or {}
         tone_id = tone.get("id")
         if tone_id is None:
-            self.app.notify("No tone selected", severity="warning")
+            self.app.notify("Local folder Packs are managed as files",
+                            severity="warning")
             return
         picked = self._selected_pack_keys()
         todo = [m for m in (self._pack_rows.get(k) for k in picked)
@@ -3796,6 +3806,10 @@ class DetailPane(Vertical):
         引用需再次按 u 确认；卸载走模型粒度（元数据保留）。
         """
         if self._pack_busy is not None or not getattr(self, "_pack_mode", False):
+            return
+        if (self._pack_tone or self._current_tone or {}).get("id") is None:
+            self.app.notify("Local folder Packs are managed as files",
+                            severity="warning")
             return
         picked = self._selected_pack_keys()
         todo = [m for m in (self._pack_rows.get(k) for k in picked)
@@ -4376,7 +4390,8 @@ class DetailPane(Vertical):
             normalized = normalize_model_architecture(model, tone=tone)
             model = normalized
             model_id = model.get("id")
-            key = f"m{model_id}"
+            key = (f"m{model_id}" if model_id is not None
+                   else f"local:{model.get('model_key')}")
             self._pack_rows[key] = model
             self._pack_status_markers[key] = ""
             local_path = model.get("local_path")
@@ -4860,11 +4875,14 @@ class DetailPane(Vertical):
                 return []
             actions = [
                 ("enter load", self._pack_table.action_select_cursor),
-                ("i install", self._pack_install_selected),
-                ("u uninstall", self._pack_uninstall_selected),
-                ("x expand", self.action_expand_pack),
                 ("esc back", self.action_back_from_creator),
             ]
+            if (self._pack_tone or self._current_tone or {}).get("id") is not None:
+                actions[1:1] = [
+                    ("i install", self._pack_install_selected),
+                    ("u uninstall", self._pack_uninstall_selected),
+                    ("x expand", self.action_expand_pack),
+                ]
             if self._pack_error and not self._pack_loading:
                 actions.insert(0, ("r retry", self.retry_remote_pack))
             return [*actions, *view_actions]

@@ -29,6 +29,7 @@ def _seed_active_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(library, "DB_FILE", data / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", chain_file)
     monkeypatch.setattr(library, "TONES_DIR", tones)
+    monkeypatch.setattr(library, "PRESETS_DIR", data / "presets")
     monkeypatch.setattr("tui.app.live.ROOT", root)
     monkeypatch.setattr("tui.app.live.CHAIN_FILE", chain_file)
     monkeypatch.setattr("tui.app.live.TONES_DIR", tones)

@@ -339,11 +339,13 @@ def _compact_path(value: str | None, limit: int = 76) -> str:
 def tone3000_url(tone: dict | None) -> str | None:
     """Return the public TONE3000 page for a tone row.
 
-    Search responses do not expose the web slug, but the public route is
-    deterministic: ``/tones/<title-slug>-<tone-id>``.  Keep this helper local
-    to the TUI so metadata rendering does not turn into a network request.
+    Prefer the canonical URL from the official response. Older local rows do
+    not have it, so retain the deterministic route as a compatibility fallback.
     """
     tone = tone or {}
+    official_url = tone.get("url")
+    if isinstance(official_url, str) and official_url.strip():
+        return official_url.strip()
     tone_id = tone.get("tone_id", tone.get("id"))
     if tone_id is None:
         return None
