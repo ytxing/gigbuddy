@@ -55,8 +55,8 @@ from .library_panel import (LibraryPanel, LibraryTable, RemoteToneSelected,
                             VerifiedAuthor)  # noqa: E402
 from .marquee import MarqueeBar  # noqa: E402
 from .metadata import signed_fixed  # noqa: E402
-from .mutations import (MutationCommitted, MutationRefreshCoordinator,
-                        ViewAnchor)  # noqa: E402
+from .mutations import (ModelsDownloaded, MutationCommitted,
+                        MutationRefreshCoordinator, ViewAnchor)  # noqa: E402
 from .panels import (AudioActionButton, AudioSettingsScreen, ChainPanel,
                      DetailPane, DeviceBar, AddSlotButton, ChainSlotWidget,
                      DeviceChanged, InterfaceBar, MeterBar, NodeSwitchButton,
@@ -1221,6 +1221,12 @@ class GigBuddyApp(App):
     def on_mutation_committed(self, event: MutationCommitted) -> None:
         self._mutation_refresh.receive(event)
 
+    def on_models_downloaded(self, event: ModelsDownloaded) -> None:
+        """Show one global completion notice regardless of the active view."""
+        count = max(0, int(event.count))
+        noun = "model" if count == 1 else "models"
+        self.notify(f"Downloaded {count} {noun}")
+
     def _registered_mutation_pages(self) -> tuple[object, ...]:
         """Return retained main-surface pages, including inactive panes."""
         pages = self._mutation_pages
@@ -1850,7 +1856,6 @@ class GigBuddyApp(App):
 
     def on_pack_install_screen_installed(self, event: PackInstallScreen.Installed) -> None:
         """Pack installed: preserve the existing detail flow and reconcile once."""
-        self.notify(f"Installed {event.count} file(s) from tone {event.tone_id}")
         # Canonical v0.2 opens PackInstallScreen from Remote Pack; dismissing
         # it must leave that Pack view in place so the coordinator can update
         # the installed marker without changing the user's context. Legacy
@@ -3389,8 +3394,8 @@ class GigBuddyApp(App):
             self.push_screen(PackInstallScreen(event.tone))
 
     def on_detail_pane_pack_files_installed(self, event) -> None:
-        """pack 表 i 键批量安装完成：toast + one coordinated refresh."""
-        self.notify(f"Installed {event.count} file(s) from tone {event.tone_id}")
+        """Compatibility hook; completion toast is App-level."""
+        return
 
     def on_detail_pane_pack_files_uninstalled(self, event) -> None:
         """pack 表 u 键批量卸载完成：toast + one coordinated refresh."""

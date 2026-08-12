@@ -249,7 +249,7 @@ def test_dirty_distinguishes_order_and_parameters_but_ignores_mute_and_input():
     assert library.preset_is_dirty("dirty") is True
 
 
-def test_model_id_resolution_falls_back_to_saved_path():
+def test_model_id_resolution_does_not_fall_back_to_saved_path():
     amp, _cab = _seed_models()
     library.chain_set({"slots": [{"path": str(amp)}]})
     library.preset_save("fallback")
@@ -257,22 +257,24 @@ def test_model_id_resolution_falls_back_to_saved_path():
         conn.execute("UPDATE models SET local_path=NULL WHERE id=101")
         conn.commit()
 
-    resolved = library.preset_resolved_chain("fallback")
-
-    assert resolved["slots"] == [{"model_id": 101, "path": str(amp)}]
+    with pytest.raises(ValueError, match="model file missing"):
+        library.preset_resolved_chain("fallback")
 
 
 def test_model_id_resolution_has_priority_over_stale_saved_path():
     amp, cab = _seed_models()
+    replacement = library.ROOT / "data" / "tones" / "replacement.nam"
+    replacement.write_bytes(b"replacement")
     library.chain_set({"slots": [{"path": str(amp)}]})
     library.preset_save("priority")
     with library.connect() as conn:
-        conn.execute("UPDATE models SET local_path=? WHERE id=101", (str(cab),))
+        conn.execute(
+            "UPDATE models SET local_path=? WHERE id=101", (str(replacement),))
         conn.commit()
 
     resolved = library.preset_resolved_chain("priority")
 
-    assert resolved["slots"] == [{"model_id": 101, "path": str(cab)}]
+    assert resolved["slots"] == [{"model_id": 101, "path": str(replacement)}]
 
 
 def test_note_whitespace_is_stored_as_empty_string():

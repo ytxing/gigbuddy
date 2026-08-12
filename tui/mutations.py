@@ -29,6 +29,17 @@ class MutationCommitted(Message):
         self.revision = revision
 
 
+class ModelsDownloaded(Message):
+    """A tone download completed, independent of the originating view."""
+
+    def __init__(self, tone_id: int, count: int,
+                 model_ids: Iterable[int] = ()) -> None:
+        super().__init__()
+        self.tone_id = int(tone_id)
+        self.count = int(count)
+        self.model_ids = tuple(int(model_id) for model_id in model_ids)
+
+
 @dataclass(frozen=True)
 class ViewAnchor:
     """Stable view position captured before a page reconciles its rows."""

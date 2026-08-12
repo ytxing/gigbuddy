@@ -45,16 +45,14 @@ from .view_controls import SearchBar, ViewTabStrip  # noqa: E402
 
 
 def _arch(t: dict) -> str:
-    """Show NAM architectures; IR is a Tone format, not an architecture.
+    """Show the only NAM architecture GigBuddy supports.
 
-    A1 (WaveNet) 是废弃架构，产品不浏览不展示：即使本地库/远程行带有
-    a1_models_count 也不出现在标签里。
+    IR is a Tone format, not an architecture. A1 and Custom are deliberately
+    omitted from the product-facing catalog label.
     """
     labels = []
     if t.get("a2_models_count"):
         labels.append("A2")
-    if t.get("custom_models_count"):
-        labels.append("Custom")
     return "/".join(labels) if labels else "—"
 
 
@@ -1386,6 +1384,10 @@ class LibraryPanel(Vertical):
             # the previous tab. Force one highlight publication below.
             self._highlighted_key = None
         if active == "pane-tone":
+            if self.query_one("#lib-table-tone", DataTable).row_count:
+                # A completed import may have arrived while another tone was
+                # focused. Reapply the local DB fact before reusing the table.
+                self._apply_local_download_states()
             if not self.query_one("#lib-table-tone", DataTable).row_count:
                 self.run_worker(partial(self._reload_tone_table),
                                 name="search", exclusive=True)
@@ -1742,81 +1744,74 @@ class LibraryPanel(Vertical):
         except Exception:
             self._fingerprint = None
 
-    def _mutation_download_candidates(self,
-                                      affected_ids: set[int]) -> list[dict]:
-        """Snapshot visible remote rows before leaving the UI thread.
+    @staticmethod
+    def _attach_local_download_states(tones: list[dict]) -> list[dict]:
+        """Mark remote rows from the local tone index during rendering.
 
-        ``mark_download_state`` may query TONE3000 once per locally known tone,
-        so it must receive detached dictionaries and run outside Textual's
-        event loop. The current and cached views are deduplicated here; the
-        returned rows are applied back to every matching cache after the
-        worker completes.
+        TONE3000 owns the result set; SQLite owns whether this machine has any
+        files for the same tone ID. No remote model-list request is needed for
+        the list marker.
         """
+        try:
+            local_by_tone = library.downloaded_model_ids_by_tone()
+        except Exception:
+            local_by_tone = {}
+        for tone in tones:
+            try:
+                tone_id = int(tone["id"])
+            except (KeyError, TypeError, ValueError):
+                tone["downloaded"] = 0
+                tone["download_state"] = "none"
+                continue
+            downloaded = len(local_by_tone.get(tone_id, ()))
+            tone["downloaded"] = downloaded
+            tone["download_state"] = "partial" if downloaded else "none"
+        return tones
+
+    def _apply_local_download_states(self) -> None:
+        """Apply persisted download facts to remote rows and cached views."""
+        try:
+            local_by_tone = library.downloaded_model_ids_by_tone()
+        except Exception:
+            return
         maps: list[dict[int, dict]] = [self._remote_tones]
         maps.extend(entry.get("tones", {})
                     for entry in self._tone_cache.values())
-        known: dict[int, dict] = {}
+        updated: dict[int, dict] = {}
         for tone_map in maps:
             for raw_id, tone in tone_map.items():
                 try:
                     tone_id = int(raw_id)
                 except (TypeError, ValueError):
                     continue
-                if tone_id in affected_ids and isinstance(tone, dict):
-                    known.setdefault(tone_id, dict(tone))
-        return list(known.values())
-
-    def _apply_download_state_updates(self, updated: list[dict]) -> None:
-        """Apply worker results on the UI loop and repaint loaded rows."""
-        by_id: dict[int, dict] = {}
-        for tone in updated:
-            try:
-                by_id[int(tone["id"])] = tone
-            except (KeyError, TypeError, ValueError):
-                continue
-        if not by_id:
+                if not isinstance(tone, dict):
+                    continue
+                downloaded = len(local_by_tone.get(tone_id, ()))
+                tone["downloaded"] = downloaded
+                tone["download_state"] = "partial" if downloaded else "none"
+                updated[tone_id] = tone
+        if not updated:
             return
-        maps: list[dict[int, dict]] = [self._remote_tones]
-        maps.extend(entry.get("tones", {})
-                    for entry in self._tone_cache.values())
-        for tone_map in maps:
-            for tone_id, tone in by_id.items():
-                if tone_id in tone_map:
-                    tone_map[tone_id] = tone
         try:
             tone_table = self.query_one("#lib-table-tone", DataTable)
         except Exception:
             tone_table = None
-        for tone_id, tone in by_id.items():
-            if tone_id in self._remote_tones and tone_table is not None:
+        if tone_table is None:
+            return
+        for tone_id, tone in updated.items():
+            if tone_id in self._remote_tones:
                 self._update_remote_row(
-                    tone_table, f"remote:{tone_id}", self._row_cells(tone))
+                    tone_table, f"remote:{tone_id}",
+                    self._row_cells(tone, tone_table))
 
     async def _reconcile_mutation_worker(self, tone_ids: set[int],
                                          generation: int,
                                          request_id: int) -> None:
-        """Refresh mutation-dependent remote state without blocking Textual."""
+        """Refresh local rows after a committed mutation."""
         if not (self._screen_alive(generation)
                 and request_id == self._mutation_request_id):
             return
-        candidates = self._mutation_download_candidates(tone_ids)
-        try:
-            updated = (await asyncio.to_thread(
-                library.mark_download_state, candidates)
-                       if candidates else [])
-        except Exception:
-            # The committed filesystem/DB mutation remains valid even when a
-            # remote state probe fails. Continue with the local reconciliation;
-            # the next normal search can retry the remote probe.
-            updated = []
-        if not (self._screen_alive(generation)
-                and request_id == self._mutation_request_id):
-            return
-
-        # Everything below this point is UI/cache work and therefore runs
-        # after the blocking state probe has returned to the event loop.
         self._reconcile_local_rows(tone_ids)
-        self._apply_download_state_updates(updated)
         # The mutation coordinator captures every retained Library view. The
         # async worker must restore every tab-local anchor after its incremental
         # update, not only LOCAL; remote rows and TOP CREATORS may be inactive
@@ -2048,6 +2043,7 @@ class LibraryPanel(Vertical):
         self._tone_page = entry["page"]
         self._tone_total = entry["total"]
         self._tone_has_more = entry["has_more"]
+        self._apply_local_download_states()
         table = self._table_for_pane("pane-tone")
         if table is None:
             return
@@ -2170,31 +2166,22 @@ class LibraryPanel(Vertical):
             return
         if not self._tone_alive(generation, request_id):
             return
-        # Exact model lookups already identify the requested files. Resolve
-        # their local state from SQLite directly instead of issuing another
-        # remote model-list request before rendering the result.
-        # A normal search must render its remote rows before probing each
-        # locally known tone's model list.  The latter is an optional status
-        # enrichment and can take several seconds when many visible tones are
-        # installed.  Keep exact model lookup and silent prefetch unchanged so
-        # their cache/state semantics remain deterministic.
-        if spec.model_ids or silent:
+        # Exact model lookups identify specific files; keep their model-level
+        # matching semantics. Normal remote results only need a local tone-ID
+        # lookup before the rows are rendered.
+        if spec.model_ids:
             try:
-                if spec.model_ids:
-                    local_by_tone = await asyncio.to_thread(
-                        library.downloaded_model_ids_by_tone)
-                    for hit in hits:
-                        matched = set(
-                            hit.get("matched_model_ids") or spec.model_ids)
-                        downloaded = matched & local_by_tone.get(
-                            int(hit["id"]), set())
-                        hit["downloaded"] = len(downloaded)
-                        hit["download_state"] = (
-                            "all" if matched and downloaded >= matched else
-                            "partial" if downloaded else "none")
-                else:
-                    hits = await asyncio.to_thread(
-                        library.mark_download_state, hits)
+                local_by_tone = await asyncio.to_thread(
+                    library.downloaded_model_ids_by_tone)
+                for hit in hits:
+                    matched = set(
+                        hit.get("matched_model_ids") or spec.model_ids)
+                    downloaded = matched & local_by_tone.get(
+                        int(hit["id"]), set())
+                    hit["downloaded"] = len(downloaded)
+                    hit["download_state"] = (
+                        "all" if matched and downloaded >= matched else
+                        "partial" if downloaded else "none")
             except library.tone3000.AuthenticationRequiredError:
                 if not self._tone_alive(generation, request_id):
                     return
@@ -2209,6 +2196,9 @@ class LibraryPanel(Vertical):
                     self._show_status_if_empty(
                         table, self._network_error("TONE3000 search", e))
                 return
+        else:
+            hits = await asyncio.to_thread(
+                self._attach_local_download_states, hits)
         if not self._tone_alive(generation, request_id):
             return
         self._tone_loading = False
@@ -2230,9 +2220,18 @@ class LibraryPanel(Vertical):
                 self._remote_tones[tone_id] = t
                 table.add_row(*self._row_cells(t, table), key=f"remote:{tone_id}")
         self._sync_type_search_options(table)
-        self._tone_has_more = not spec.model_ids and (
-            len(self._remote_tones) < self._tone_total
-            if self._tone_total is not None else len(hits) == REMOTE_PAGE_SIZE)
+        if spec.model_ids:
+            self._tone_has_more = False
+        elif not hits or len(hits) < REMOTE_PAGE_SIZE:
+            # The adapter returns a short page only after all supported
+            # architecture views are exhausted. This also closes the loop
+            # when a lower-bound total required one final empty request.
+            self._tone_total = len(self._remote_tones)
+            self._tone_has_more = False
+        else:
+            self._tone_has_more = (
+                len(self._remote_tones) < self._tone_total
+                if self._tone_total is not None else True)
         if key is not None:
             self._save_tone_cache(key)
         if silent:
@@ -2254,19 +2253,6 @@ class LibraryPanel(Vertical):
         self._publish_highlight(table)
         if not append:
             self._focus_if_pane_active(table)
-
-        if not spec.model_ids:
-            # Keep the list usable while the optional download-state probe
-            # checks the remote model sets for locally known tones.
-            try:
-                updated = await asyncio.to_thread(
-                    library.mark_download_state,
-                    [dict(tone) for tone in hits])
-            except Exception:
-                return
-            if not self._tone_alive(generation, request_id):
-                return
-            self._apply_download_state_updates(updated)
 
     async def _load_more_tones(self) -> None:
         """Fetch the next remote page without moving the cursor or clearing rows."""
@@ -2391,17 +2377,8 @@ class LibraryPanel(Vertical):
                 return
             if not self._tone_alive(generation, request_id):
                 return
-            # The public favorites rows are usable without the optional local
-            # download-state probe.  Keep startup prefetch deterministic, but
-            # let an active view render before probing each installed tone.
-            if silent:
-                try:
-                    hits = await asyncio.to_thread(
-                        library.mark_download_state, hits)
-                except Exception:
-                    if self._tone_alive(generation, request_id):
-                        self._tone_loading = False
-                    return
+            hits = await asyncio.to_thread(
+                self._attach_local_download_states, hits)
             if not self._tone_alive(generation, request_id):
                 return
             self._tone_loading = False
@@ -2428,15 +2405,6 @@ class LibraryPanel(Vertical):
             self._restore_view_anchor("pane-tone")
             self._publish_highlight(table)
             self._focus_if_pane_active(table)
-            try:
-                updated = await asyncio.to_thread(
-                    library.mark_download_state,
-                    [dict(tone) for tone in hits])
-            except Exception:
-                return
-            if not self._tone_alive(generation, request_id):
-                return
-            self._apply_download_state_updates(updated)
         else:
             order = self._selected_order()
             await self._show_search(self._query or "", order_by=order,
@@ -2767,20 +2735,17 @@ class LibraryPanel(Vertical):
             "[bold $success]✓[/] "
             if state in ("all", "partial") else "")
         title = f"{marker_markup}{escape(title)}"
-        # Files 只数可用模型（A2 + Custom + IR）；A1（WaveNet）已从产品
-        # 过滤，算进总数会让下载状态永远显示 partial。
-        total = ((t.get("a2_models_count") or 0)
-                 + (t.get("custom_models_count") or 0)
-                 + (t.get("irs_count") or 0))
+        # Files only counts product-supported models (A2 + IR). When a local
+        # detail row carries model metadata, the classifier takes precedence
+        # over aggregate counters that may include A1/Custom.
+        total = library.tone3000.supported_tone_model_count(t)
         models = t.get("models")
         if isinstance(models, (list, tuple)):
             usable_models = [
                 model for model in models
                 if isinstance(model, dict)
-                and not library.tone3000._is_a1_model(model)
+                and library.tone3000.is_supported_model(model, t)
             ]
-            if not total:
-                total = len(usable_models)
             if t.get("downloaded") is None:
                 t["downloaded"] = sum(
                     bool(model.get("local_path")) for model in usable_models)
@@ -3035,6 +3000,11 @@ class LibraryPanel(Vertical):
                      if isinstance(a, TabPane)), None)
         if pane is None or pane.id != self._active_pane:
             return
+        if pane.id == "pane-tone":
+            # A local import may finish while the remote list remains mounted.
+            # Reconcile from SQLite when the user changes the visible tone;
+            # this does not couple the list marker to the installer lifecycle.
+            self._apply_local_download_states()
         # table.clear() fires a highlight with no row key — that's a repaint
         # artifact, not a user action; ignore it so the detail pane isn't blanked
         # behind a freshly filled table (row_key can be None here).

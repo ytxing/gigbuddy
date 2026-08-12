@@ -103,6 +103,56 @@ def test_slow_load_stays_when_still_on_tone_tab(monkeypatch, tmp_path):
     run(scenario())
 
 
+def test_remote_row_switch_rechecks_local_tone_id(monkeypatch, tmp_path):
+    """Changing the focused remote tone refreshes local download markers."""
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
+
+    hits = [
+        {"id": 7, "title": "Tone A", "gear": "amp", "username": "alice",
+         "a2_models_count": 1, "total_count": 2},
+        {"id": 8, "title": "Tone B", "gear": "amp", "username": "bob",
+         "a2_models_count": 1, "total_count": 2},
+    ]
+    local = {"by_tone": {}}
+    monkeypatch.setattr(
+        library.tone3000, "search",
+        lambda *_args, **_kwargs: [dict(hit) for hit in hits])
+    monkeypatch.setattr(
+        library.tone3000, "top_creators", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        library, "downloaded_model_ids_by_tone",
+        lambda: local["by_tone"])
+    monkeypatch.setattr(
+        library.tone3000, "models",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("remote model probe is not part of row switching")))
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            panel = app.query_one(LibraryPanel)
+            panel.activate_view_tab("pane-tone")
+            table = app.query_one("#lib-table-tone")
+            for _ in range(20):
+                if table.row_count == 2:
+                    break
+                await pilot.pause(0.05)
+            assert table.row_count == 2
+            assert "✓" not in str(table.get_cell("remote:7", "title"))
+
+            local["by_tone"] = {7: {101}}
+            table.move_cursor(row=1, animate=False)
+            await pilot.pause()
+
+            assert table.ordered_rows[table.cursor_row].key.value == "remote:8"
+            assert "✓" in str(table.get_cell("remote:7", "title"))
+
+    run(scenario())
+
+
 def _creator_hits(offset: int, count: int, total: int) -> list[dict]:
     """A page from TONE3000's official creator leaderboard."""
     return [
@@ -247,5 +297,50 @@ def test_tone_load_more_does_not_restore_stale_cursor(monkeypatch, tmp_path):
             assert calls["n"] == 2
             assert table.row_count == 80
             assert table.ordered_rows[table.cursor_row].key.value == "remote:38"
+
+    run(scenario())
+
+
+def test_tone_empty_final_page_stops_pagination(monkeypatch, tmp_path):
+    """A dynamic lower-bound total must not cause repeated empty loads."""
+    monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
+
+    calls = []
+
+    def paged_search(_query, *, page_number, page_size, **_kwargs):
+        calls.append(page_number)
+        if page_number > 1:
+            return []
+        return [
+            {"id": i, "title": f"Tone {i}", "gear": "amp",
+             "downloads_count": i, "username": "tester",
+             "total_count": page_size * 2}
+            for i in range(page_size)
+        ]
+
+    monkeypatch.setattr(library.tone3000, "search", paged_search)
+    monkeypatch.setattr(library.tone3000, "top_creators",
+                        lambda **_kwargs: [])
+    monkeypatch.setattr(
+        "tui.library_panel.library.downloaded_model_ids_by_tone",
+        lambda: {})
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.1)
+            panel = app.query_one(LibraryPanel)
+            panel.activate_view_tab("pane-tone")
+            await pilot.pause(0.5)
+            table = app.query_one("#lib-table-tone")
+            table.focus()
+            table.move_cursor(row=table.row_count - 1, animate=False)
+            await pilot.pause(0.8)
+            assert calls == [1, 2]
+            assert table.row_count == 40
+            assert panel._tone_total == 40
+            assert not panel._tone_has_more
 
     run(scenario())

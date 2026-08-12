@@ -244,8 +244,8 @@ def test_managed_move_does_not_block_ui_and_publishes_after_worker(
         app = GigBuddyApp(spawn_engine=False)
         app._managed_engine_active = lambda: True
         async with app.run_test(size=(140, 40)) as pilot:
-            await pilot.pause(0.1)
             panel = app.query_one(ChainPanel)
+            await _wait_for_slots(pilot, panel)
             before = [slot.path for slot in panel.state.slots]
             started = time.perf_counter()
             app._move_slot(1, -1)
@@ -597,6 +597,112 @@ def test_dynamic_panel_io_buttons_and_calibration_are_clickable(
             await pilot.click(io, offset=(23, 1))
             await pilot.pause(0.15)
             assert panel.state.slot(0).output_gain_db == pytest.approx(4.5)
+
+    asyncio.run(scenario())
+
+
+def test_input_focus_does_not_change_target_slot(monkeypatch, tmp_path):
+    """Focusing INPUT or its selected Slot's input value preserves the target."""
+    pytest.importorskip("textual", reason="input focus regression needs Textual")
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel, ChainSlotIOWidget
+
+    current = {"chain": _chain([
+        str(tmp_path / "a.nam"), str(tmp_path / "b.nam")
+    ], revision=1)}
+    monkeypatch.setattr("tui.app.live.read_chain",
+                        lambda: dict(current["chain"]))
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(ChainPanel)
+            assert len(panel.slot_widgets) == 2
+
+            panel.slot_widgets[0].focus()
+            await pilot.pause()
+            assert panel.state.target_index == 0
+
+            # ChainPanel asks every Slot row whether a bubbled click is a
+            # border-hint action. A non-hint click must not focus those rows.
+            input_click = SimpleNamespace(
+                screen_x=panel.input_node.region.x + 1,
+                screen_y=panel.input_node.region.y,
+                stop=lambda: None,
+            )
+            assert panel.handle_slot_hint_click(input_click) is False
+            assert panel.state.target_index == 0
+
+            await pilot.click(panel.input_node)
+            await pilot.pause()
+            assert app.focused is panel.input_node
+            assert panel.state.target_index == 0
+
+            io_widgets = list(panel.query(ChainSlotIOWidget))
+            slot = panel.slot_widgets[0]
+            value_x = (slot.IO_LABEL_WIDTH + slot.IO_BUTTON_WIDTH
+                       + slot.IO_GAP + 1)
+            await pilot.click(io_widgets[0], offset=(value_x, 0))
+            await pilot.pause()
+            assert app.focused is slot
+            assert panel.state.target_index == 0
+
+    asyncio.run(scenario())
+
+
+def test_dynamic_recompose_preserves_input_focus(monkeypatch, tmp_path):
+    """A background Slot-list rebuild must not steal focus from INPUT."""
+    pytest.importorskip("textual", reason="recompose focus regression needs Textual")
+    from tui.app import GigBuddyApp
+    from tui.panels import ChainPanel
+
+    current = {"chain": _chain([
+        str(tmp_path / "a.nam"), str(tmp_path / "b.nam")
+    ], revision=1)}
+    monkeypatch.setattr("tui.app.live.read_chain",
+                        lambda: dict(current["chain"]))
+    monkeypatch.setattr("tui.app.live.chain_file_fingerprint", lambda: None)
+    monkeypatch.setattr("tui.app.live.last_chain_write_fingerprint",
+                        lambda: None)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(ChainPanel)
+            panel.slot_widgets[1].focus()
+            await pilot.pause()
+            assert panel.state.target_index == 1
+
+            panel.input_node.focus()
+            await pilot.pause()
+            assert app.focused is panel.input_node
+
+            current["chain"] = _chain([
+                str(tmp_path / "a.nam"), str(tmp_path / "b.nam"),
+                str(tmp_path / "c.nam"),
+            ], revision=2)
+            panel.chain = dict(current["chain"])
+            await pilot.pause(0.2)
+
+            assert app.focused is panel.input_node
+            assert len(panel.slot_widgets) == 3
+
+            search = app.query_one("#local-search")
+            search.focus()
+            await pilot.pause()
+            assert app.focused is search
+
+            current["chain"] = _chain([
+                str(tmp_path / "a.nam"), str(tmp_path / "b.nam"),
+                str(tmp_path / "c.nam"), str(tmp_path / "d.nam"),
+            ], revision=3)
+            panel.chain = dict(current["chain"])
+            await pilot.pause(0.2)
+
+            assert app.focused is search
+            assert len(panel.slot_widgets) == 4
 
     asyncio.run(scenario())
 

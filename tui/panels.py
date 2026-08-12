@@ -48,7 +48,7 @@ from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      set_border_hint_layout)  # noqa: E402
 from .library_panel import VerifiedAuthor
 from .selection import NonSelectableStatic  # noqa: E402
-from .mutations import (ViewAnchor, focused_widget_key,
+from .mutations import (ModelsDownloaded, ViewAnchor, focused_widget_key,
                         view_context)  # noqa: E402
 from .view_controls import ViewTabStrip  # noqa: E402
 
@@ -1806,9 +1806,10 @@ class ChainSlotRow(Horizontal):
         slot = self.slot
         if slot is None:
             return False
-        # A border click can blur the Slot before Click is dispatched. Restore
-        # focus first so the visible hint and its hit map stay in sync.
-        self._focus_slot_now()
+        # Test the coordinates before restoring focus. This method is called
+        # for every Slot row while a click bubbles through ChainPanel; focusing
+        # each row before hit-testing would make an unrelated click (for
+        # example INPUT) leave the last Slot as the target.
         hit = border_hint_hit(self, event.screen_x, event.screen_y)
         if hit is None:
             return False
@@ -1817,6 +1818,9 @@ class ChainSlotRow(Horizontal):
             span = hint_span(label, token)
             if span is None or not span[0] <= offset < span[1]:
                 continue
+            # A border click can blur the Slot before Click is dispatched.
+            # Restore focus only after confirming this row owns the action.
+            self._focus_slot_now()
             event.stop()
             action()
             return True
@@ -2390,13 +2394,63 @@ class ChainPanel(Vertical):
         except Exception:
             return
 
+    def _capture_recompose_focus(self) -> tuple[str, int | None]:
+        """Capture semantic focus before Textual replaces dynamic children."""
+        focused = getattr(self.app, "focused", None)
+        if focused is None:
+            return "none", None
+        try:
+            in_panel = focused is self or any(
+                ancestor is self for ancestor in focused.ancestors_with_self)
+        except AttributeError:
+            in_panel = False
+        if not in_panel:
+            return "external", None
+        if isinstance(focused, InputNodeWidget):
+            return "input", None
+        if isinstance(focused, ChainSlotWidget):
+            return "slot", focused.index
+        if isinstance(focused, AddSlotButton):
+            return "add", None
+        if isinstance(focused, ChainParams):
+            return "params", None
+        return "panel", None
+
+    def _restore_recompose_focus(
+            self, focus_state: tuple[str, int | None],
+            fallback_index: int | None) -> None:
+        """Restore the pre-recompose focus without stealing external focus."""
+        kind, index = focus_state
+        if kind == "external":
+            return
+        target = None
+        if kind == "input":
+            target = getattr(self, "input_node", None)
+        elif kind == "slot" and index is not None:
+            target = self._slot_widgets.get(index)
+            if target is None and fallback_index is not None:
+                target = self._slot_widgets.get(fallback_index)
+        elif kind == "add":
+            # Adding a Slot explicitly changes the destination; keep the
+            # existing add-button flow that opens the new Slot's detail view.
+            target = (self._slot_widgets.get(fallback_index)
+                      if fallback_index is not None else None)
+            if target is None:
+                target = getattr(self, "add_slot", None)
+        elif kind == "params":
+            target = getattr(self, "params", None)
+        elif kind == "panel":
+            target = self
+        elif kind == "none" and fallback_index is not None:
+            target = self._slot_widgets.get(fallback_index)
+        if target is not None:
+            target.focus()
+
     async def _recompose_dynamic(self, focus_index: int | None = None) -> None:
+        focus_state = self._capture_recompose_focus()
         await self.recompose()
         self._refresh_dynamic_slots()
-        if focus_index is not None:
-            slot = self._slot_widgets.get(focus_index)
-            if slot is not None:
-                slot.focus()
+        self._restore_recompose_focus(focus_state, focus_index)
 
     def _schedule_dynamic_recompose(self, focus_index: int | None = None) -> None:
         if self._legacy_mode or not getattr(self, "is_mounted", False):
@@ -3039,7 +3093,10 @@ class DetailPane(Vertical):
         fmt = tone_format(tone)
         if fmt:
             parts.append(f"[b $text-muted]{_escape(fmt)}[/]")
-        models = tone.get("models_count")
+        models = (tone3000.supported_tone_model_count(tone)
+                  if any(key in tone for key in
+                         ("a2_models_count", "irs_count", "models"))
+                  else None)
         if models is not None:
             parts.append(f"[b]{models}[/] [dim]MODELS[/dim]")
         if tone.get("downloads_count") is not None:
@@ -3520,15 +3577,7 @@ class DetailPane(Vertical):
         if getattr(self, "_pack_remote", False):
             return 0
         tone = self._pack_tone or self._current_tone or {}
-        count_keys = ("a2_models_count", "custom_models_count", "irs_count")
-        try:
-            if any(key in tone and tone.get(key) is not None
-                   for key in count_keys):
-                total = sum(int(tone.get(key) or 0) for key in count_keys)
-            else:
-                total = int(tone.get("models_count"))
-        except (TypeError, ValueError):
-            return 0
+        total = tone3000.supported_tone_model_count(tone)
         return max(total - len(self._pack_rows), 0) if total > 0 else 0
 
     def _update_pack_hint(self) -> None:
@@ -3689,9 +3738,9 @@ class DetailPane(Vertical):
             return
         self._pack_progress_status = f"installing 0/{len(ids)}"
         self._update_pack_hint()
-        self.run_worker(partial(self._pack_install_models, int(tone_id), ids,
-                                generation),
-                        name="pack-install", exclusive=True)
+        self.app.run_worker(
+            partial(self._pack_install_models, int(tone_id), ids, generation),
+            name="tone-download", group="tone-download", exclusive=False)
 
     async def _pack_install_models(self, tone_id: int, model_ids: list[int],
                                    generation: int) -> None:
@@ -3730,18 +3779,20 @@ class DetailPane(Vertical):
             # Narrow test doubles may not populate the local model table even
             # though import_tone returned successfully.
             actual_ids = tuple(sorted(set(model_ids)))
+        self.app.post_message(
+            ModelsDownloaded(tone_id, len(actual_ids), actual_ids))
         publish = getattr(self.app, "_publish_mutation", None)
         if callable(publish):
             publish("install", tuple(f"model:{model_id}" for model_id in actual_ids),
                     imported.get("revision"))
+        self.app.post_message(
+            self.PackFilesInstalled(tone_id, len(actual_ids), actual_ids))
         if not self._pack_operation_alive(generation, tone_id):
             return
         self._pack_busy = None
         self._pack_operation_target = None
         self._pack_uninstall_confirmed = False
         self._pack_uninstall_target = ()
-        self.post_message(
-            self.PackFilesInstalled(tone_id, len(actual_ids), actual_ids))
 
     def _pack_uninstall_selected(self) -> None:
         """u：卸载选中的已下载模型（未勾选时 = 光标单行）。
@@ -4325,9 +4376,9 @@ class DetailPane(Vertical):
         self._pack_synced_ir = None
         tone = self._pack_tone or self._current_tone or {}
         for model in models:
-            normalized = normalize_model_architecture(model, tone=tone)
-            if not model_architecture(normalized, tone=tone):
+            if not tone3000.is_supported_model(model, tone):
                 continue
+            normalized = normalize_model_architecture(model, tone=tone)
             model = normalized
             model_id = model.get("id")
             key = f"m{model_id}"
@@ -4477,8 +4528,8 @@ class DetailPane(Vertical):
                                    generation: int | None = None) -> None:
         generation = self._view_generation if generation is None else generation
         try:
-            # The table is the complete pack view: A1, A2, and IR rows all
-            # need to arrive before the shared resolver classifies them.
+            # Fetch the complete remote pack, then keep only the product's
+            # supported A2 and IR rows. Mixed packs may also contain A1/Custom.
             ms = await asyncio.to_thread(tone3000.models, tone_id,
                                          a2_only=False)
         except Exception as e:
@@ -4496,9 +4547,10 @@ class DetailPane(Vertical):
                 or self._view_mode != "selection"
                 or int(self._pack_tone.get("id") or 0) != tone_id):
             return  # 视图已切走：晚到的回答不覆盖
-        # A1 (WaveNet) 是废弃架构：pack 视图不浏览、不展示旧模型。
+        # Keep this boundary at the UI as well as in the API adapter. It also
+        # protects the view when a test/legacy adapter returns extra rows.
         ms = [m for m in ms
-              if model_architecture(m, tone=self._pack_tone) != "A1"]
+              if tone3000.is_supported_model(m, self._pack_tone)]
         ms = self._merge_remote_local_models(tone_id, ms)
         self._remote_models_cache[tone_id] = list(ms)
         self._pack_loading = False

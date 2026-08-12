@@ -73,6 +73,17 @@ v1 embedded the agent (Claude Agent SDK) inside the Textual TUI. User decision: 
 
 Indexes: tones(title), tones(gear), tones(downloads_count).
 
+### Product-visible model boundary
+
+GigBuddy exposes and downloads only NAM A2 (`architecture_version=2`) and IR
+models. A1, Custom, AIDA-X, AA-SNAPSHOT, Proteus, and unknown architectures are
+filtered out at the TONE3000 adapter boundary and again before local persistence.
+Mixed Tone Packs remain searchable, but their Pack rows, file counts, download
+state, pickers, and chain/preset model references contain only the supported
+A2/IR subset. The raw `a1_models_count`, `custom_models_count`, and
+`models_count` fields remain stored for source fidelity; they are not product
+availability counts.
+
 ## 4. CLI — Agent-facing interface (src/library.py CLI / gigbuddy)
 
 ```
@@ -119,7 +130,8 @@ Layout: left = library browser 60% | right = chain + metadata 40%; bottom = mete
 ## 8. Open questions
 
 - Import UX: auto-import on download (in download()) vs explicit `tone import`? → default: both paths write DB.
-- IR tones use `format=ir`; legacy rows may infer IR from `gear=cab` or `gear=space`.
-  Their models have `architecture_version=NULL` and local `.wav` paths. `IR` is
-  not an architecture value.
+- IR tones use `format=ir`; legacy rows may infer IR from `gear=cab` or `gear=space`
+  only when the model has no explicit architecture. Their models have
+  `architecture_version=NULL` and local `.wav` paths. `IR` is not an
+  architecture value.
 - Agent querying SQLite directly vs only CLI: allow both (document schema in docs/library-schema.md).

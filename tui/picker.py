@@ -236,7 +236,7 @@ class TonePickerScreen(GigBuddyModal):
                 f"gear={_escape(t.get('gear', '?'))}[/dim] "
                 f"{self._author_label(t.get('username'), variables)}"
                 + (f" [dim]downloaded {t.get('downloaded')}/"
-                   f"{t.get('models_count', '?')}[/dim]"
+                   f"{library.tone3000.supported_tone_model_count(t)}[/dim]"
                    if state in {"all", "partial"} else ""),
                 {"type": "remote", "tone": t})
         self.query_one("#pick-status", MarqueeBar).content = (

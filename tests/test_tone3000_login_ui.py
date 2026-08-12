@@ -1,7 +1,6 @@
 """Regression coverage for the TONE3000 login state in LibraryPanel."""
 
 import asyncio
-import threading
 
 from textual.widgets import Button, DataTable, Select
 
@@ -190,30 +189,26 @@ def test_header_auth_button_logs_in_and_out(monkeypatch):
     run(scenario())
 
 
-def test_tone_rows_render_before_download_state_probe(monkeypatch, tmp_path):
-    """The remote page must remain usable while local status is enriched."""
+def test_tone_rows_use_local_tone_id_at_render(monkeypatch, tmp_path):
+    """Remote rows use the local tone ID without a remote model probe."""
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
-    release_probe = threading.Event()
-    probe_started = threading.Event()
 
     def search(*_args, **_kwargs):
         return [{"id": 7, "title": "Visible tone", "gear": "amp",
                  "username": "tester", "downloads_count": 1,
                  "favorites_count": 0, "a2_models_count": 1}]
 
-    def slow_mark(rows):
-        if rows:
-            probe_started.set()
-        release_probe.wait(2)
-        return [{**row, "download_state": "all", "downloaded": 1}
-                for row in rows]
-
     monkeypatch.setattr(library.tone3000, "search", search)
     monkeypatch.setattr(library.tone3000, "top_creators",
                         lambda **_kwargs: [])
-    monkeypatch.setattr(library, "mark_download_state", slow_mark)
+    monkeypatch.setattr(library, "downloaded_model_ids_by_tone",
+                        lambda: {7: {7001}})
+    monkeypatch.setattr(
+        library.tone3000, "models",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("remote model probe is not part of list rendering")))
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -222,41 +217,34 @@ def test_tone_rows_render_before_download_state_probe(monkeypatch, tmp_path):
             app.query_one(LibraryPanel).activate_view_tab("pane-tone")
             await pilot.pause(0.3)
             table = app.query_one("#lib-table-tone", DataTable)
-            assert probe_started.is_set()
             assert table.ordered_rows[0].key.value == "remote:7"
             assert not app.query_one(LibraryPanel)._tone_loading
-            release_probe.set()
-            await pilot.pause(0.3)
             assert "✓" in str(table.get_cell("remote:7", "title"))
 
     run(scenario())
 
 
-def test_favorite_rows_render_before_download_state_probe(monkeypatch, tmp_path):
-    """The favorites view uses the same non-blocking enrichment boundary."""
+def test_favorite_rows_use_local_tone_id_at_render(monkeypatch, tmp_path):
+    """The favorites view uses the same local tone-ID lookup."""
     monkeypatch.setattr(library, "DB_FILE", tmp_path / "gigbuddy.db")
     monkeypatch.setattr(library, "CHAIN_FILE", tmp_path / "live_chain.json")
     monkeypatch.setattr("tui.app.live.CHAIN_FILE", tmp_path / "live_chain.json")
-    release_probe = threading.Event()
-    probe_started = threading.Event()
 
     tone = {"id": 8, "title": "Visible favorite", "gear": "amp",
             "username": "tester", "downloads_count": 2,
             "favorites_count": 3, "a2_models_count": 1}
-
-    def slow_mark(rows):
-        if rows:
-            probe_started.set()
-        release_probe.wait(2)
-        return [{**row, "download_state": "all", "downloaded": 1}
-                for row in rows]
 
     monkeypatch.setattr(library.tone3000, "search", lambda *_a, **_k: [])
     monkeypatch.setattr(library.tone3000, "top_favorites",
                         lambda *_a, **_k: [dict(tone)])
     monkeypatch.setattr(library.tone3000, "top_creators",
                         lambda **_kwargs: [])
-    monkeypatch.setattr(library, "mark_download_state", slow_mark)
+    monkeypatch.setattr(library, "downloaded_model_ids_by_tone",
+                        lambda: {8: {8001}})
+    monkeypatch.setattr(
+        library.tone3000, "models",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("remote model probe is not part of list rendering")))
 
     async def scenario():
         app = GigBuddyApp(spawn_engine=False)
@@ -268,11 +256,8 @@ def test_favorite_rows_render_before_download_state_probe(monkeypatch, tmp_path)
             app.query_one("#sort-filter", Select).value = "favorites"
             await pilot.pause(0.3)
             table = app.query_one("#lib-table-tone", DataTable)
-            assert probe_started.is_set()
             assert table.ordered_rows[0].key.value == "remote:8"
             assert not panel._tone_loading
-            release_probe.set()
-            await pilot.pause(0.3)
             assert "✓" in str(table.get_cell("remote:8", "title"))
 
     run(scenario())

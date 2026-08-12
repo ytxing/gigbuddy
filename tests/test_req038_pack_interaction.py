@@ -35,6 +35,7 @@ def _remote_models():
         {"id": 1, "name": "one.nam", "architecture": "SlimmableContainer"},
         {"id": 2, "name": "two.nam", "architecture": "SlimmableContainer"},
         {"id": 3, "name": "cab.wav", "architecture": "IR"},
+        {"id": 4, "name": "custom.nam", "architecture": "custom"},
     ]
 
 
@@ -48,7 +49,7 @@ def _monkey_remote(monkeypatch):
 
 
 def test_detail_pack_filters_a1_rows(monkeypatch):
-    """Remote Detail PACK must drop WaveNet (A1) rows and keep A2."""
+    """Remote Detail PACK must keep A2 and drop A1/Custom rows."""
     monkeypatch.setattr(GigBuddyApp, "action_open_chain_save_menu",
                         lambda self: None, raising=False)
     monkeypatch.setattr(GigBuddyApp, "action_clear_all_slots",
@@ -56,6 +57,7 @@ def test_detail_pack_filters_a1_rows(monkeypatch):
     models = [
         {"id": 1, "name": "legacy.nam", "architecture": "WaveNet"},
         {"id": 2, "name": "modern.nam", "architecture": "SlimmableContainer"},
+        {"id": 3, "name": "custom.nam", "architecture": "custom"},
     ]
     fetch_flags = []
     monkeypatch.setattr("tui.panels.tone3000.models",
@@ -79,7 +81,7 @@ def test_detail_pack_filters_a1_rows(monkeypatch):
     run(scenario())
 
 def test_install_pack_filters_a1_rows(monkeypatch):
-    """AMP Install PACK must drop WaveNet (A1); only A2 is installable."""
+    """AMP Install PACK must keep A2 and drop A1/Custom rows."""
     monkeypatch.setattr(GigBuddyApp, "action_open_chain_save_menu",
                         lambda self: None, raising=False)
     monkeypatch.setattr(GigBuddyApp, "action_clear_all_slots",
@@ -87,6 +89,7 @@ def test_install_pack_filters_a1_rows(monkeypatch):
     models = [
         {"id": 1, "name": "legacy.nam", "architecture": "WaveNet"},
         {"id": 2, "name": "modern.nam", "architecture": "SlimmableContainer"},
+        {"id": 3, "name": "custom.nam", "architecture": "custom"},
     ]
     fetch_flags = []
     monkeypatch.setattr(

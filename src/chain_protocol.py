@@ -11,6 +11,7 @@ import json
 import hashlib
 import math
 import os
+import sqlite3
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -38,6 +39,44 @@ SLOT_GAIN_MIN_DB = -24.0
 SLOT_GAIN_MAX_DB = 24.0
 PLAY_STATES = {"playing", "paused", "stopped"}
 SUPPORTED_EXTENSIONS = {".nam", ".wav"}
+
+
+def _known_library_model_is_supported(path: Path, root: Path) -> bool | None:
+    """Classify a path when the local library has an exact model record.
+
+    A real GigBuddy root has a library database, so an exact model row is
+    required before a file can enter ``live_chain.json``. Returning ``None`` is
+    reserved for standalone protocol callers that have no database at all.
+    """
+    database = root / "data" / "gigbuddy.db"
+    if not database.is_file():
+        return None
+    try:
+        resolved = path.resolve(strict=False)
+        relative = resolved.relative_to(root.resolve(strict=False)).as_posix()
+        with sqlite3.connect(database) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT m.*, t.gear, t.format, t.platform "
+                "FROM models m JOIN tones t ON t.id = m.tone_id "
+                "WHERE m.local_path IN (?, ?)",
+                (relative, str(resolved)),
+            ).fetchall()
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    if not rows:
+        return False
+    # Imported lazily so the protocol's standalone tests and callers do not
+    # pay for the TONE3000 adapter unless a local library database is present.
+    import tone3000
+
+    return all(
+        tone3000.is_supported_model(
+            dict(row),
+            {key: row[key] for key in ("gear", "format", "platform")},
+        )
+        for row in rows
+    )
 
 
 class ChainProtocolError(ValueError):
@@ -127,6 +166,11 @@ def _allowed_file(path: Any, *, root: Path, directory: str,
             raise ChainProtocolError(f"path cannot be inspected: {path}") from exc
     if resolved.suffix.lower() not in extensions:
         raise ChainProtocolError(f"unsupported file format: {path}")
+    if (directory == TONES_DIR_NAME
+            and _known_library_model_is_supported(resolved, root) is False):
+        raise ChainProtocolError(
+            f"unsupported model architecture; GigBuddy accepts only supported "
+            f"A2/IR models: {path}")
     return resolved, str(resolved.relative_to(root))
 
 

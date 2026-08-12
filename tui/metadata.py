@@ -460,20 +460,18 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
             row("POPULARITY", "Favorites", tone.get("favorites_count", 0))
 
         if any(key in tone for key in (
-                "a2_models_count", "custom_models_count",
-                "irs_count", "models_count", "model_name")):
-            # A1 (WaveNet) 是废弃架构：MODEL SET 不显示 A1 计数，即使
-            # 远程 tone 带 a1_models_count（A1-only 的 tone 无 MODEL SET 区）。
+                "a2_models_count", "irs_count", "models_count", "model_name")):
+            # GigBuddy's MODEL SET is deliberately limited to A2 and IR.
             row("MODEL SET", "A2",
                 f"{tone.get('a2_models_count') or 0}")
-            row("MODEL SET", "Custom / IR",
-                f"{tone.get('custom_models_count') or 0} / {tone.get('irs_count') or 0}")
+            row("MODEL SET", "IR",
+                f"{tone.get('irs_count') or 0}")
             if tone.get("model_name"):
                 row("MODEL SET", "Default name", tone.get("model_name"))
         if not model and tone.get("models") is not None:
             downloaded = sum(
                 1 for item in tone.get("models") or []
-                if model_architecture(item, tone=tone))
+                if tone3000.is_supported_model(item, tone))
             row("MODEL SET", "Downloaded", downloaded)
             row("MODEL SET", "Local folder", _compact_path(tone.get("local_dir")))
 

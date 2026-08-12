@@ -39,9 +39,6 @@ __version__ = "1.1.4"
 
 ROOT = Path(__file__).resolve().parent.parent
 
-_IR_SUFFIXES = frozenset({".wav", ".wave", ".flac", ".aif", ".aiff"})
-_NAM_SUFFIXES = frozenset({".nam", ".aida-x", ".aa-snapshot", ".proteus"})
-_IR_GEAR_TOKENS = frozenset({"cab", "space", "ir"})
 _PRESET_UPDATED_UNSET = object()
 
 
@@ -50,48 +47,8 @@ class PresetConflictError(ValueError):
 
 
 def model_is_ir(model: dict | None, tone: dict | None = None) -> bool:
-    """Classify a local/remote model as an IR without trusting one field.
-
-    Older library rows can have a null architecture, while TONE3000 CAB rows
-    often expose no architecture at all.  The file/URL suffix is authoritative
-    when present; the parent tone is the final fallback for architecture-less
-    CAB/IR rows.  WaveNet, SlimmableContainer, and other NAM architectures stay
-    on the AMP side.
-    """
-    model = model if isinstance(model, dict) else {}
-    tone = tone if isinstance(tone, dict) else {}
-    model_format = str(model.get("format") or "").strip().casefold()
-    if model_format:
-        return model_format == "ir"
-
-    architecture = str(
-        model.get("architecture_version") or model.get("architecture") or ""
-    ).strip().casefold()
-    if architecture == "ir":
-        return True
-    canonical_tone_format = str(
-        (tone or {}).get("format") or ""
-    ).strip().casefold()
-    if canonical_tone_format:
-        return canonical_tone_format == "ir"
-    if str((tone or {}).get("platform") or "").strip().casefold() == "ir":
-        return True
-    if architecture in {
-        "1", "2", "custom", "a1", "a2", "wavenet",
-        "wave", "slimmablecontainer",
-    }:
-        return False
-    for key in ("local_path", "name", "model_url", "url"):
-        raw = str(model.get(key) or "").strip()
-        if not raw:
-            continue
-        source = raw.split("?", 1)[0].casefold()
-        suffix = Path(source).suffix
-        if suffix in _IR_SUFFIXES:
-            return True
-        if suffix in _NAM_SUFFIXES:
-            return False
-    return str(tone.get("gear") or "").strip().casefold() in _IR_GEAR_TOKENS
+    """Return the shared TONE3000 classification for a local model row."""
+    return tone3000._is_ir_model(model, tone)
 
 
 def _to_rel_path(path: str) -> str:
@@ -393,9 +350,6 @@ def list_tones(gear: str | None = None, limit: int | None = None,
     with connect() as conn:
         sql = "SELECT * FROM tones"
         where, args = [], []
-        if has_files:
-            where.append("EXISTS (SELECT 1 FROM models m "
-                         "WHERE m.tone_id = tones.id AND m.local_path IS NOT NULL)")
         if gear:
             gear_token = str(gear).strip().casefold()
             if gear_token == "full-rig":
@@ -441,16 +395,67 @@ def list_tones(gear: str | None = None, limit: int | None = None,
             "downloads": "downloads_count DESC",
         }.get(str(sort_by), "downloads_count DESC")
         sql += f" ORDER BY {order_by}"
+        tones = [_row_to_dict(r) for r in conn.execute(sql, args).fetchall()]
+
+        # Apply the same model classifier used by remote search/import. This
+        # final Python gate is deliberate: SQL cannot safely infer architecture
+        # from every legacy URL/name representation.
+        tone_by_id = {int(tone["id"]): tone for tone in tones}
+        supported_ids: dict[int, set[int]] = {}
+        local_supported_ids: dict[int, set[int]] = {}
+        model_tone_ids: set[int] = set()
+        model_rows = conn.execute(
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id"
+        ).fetchall()
+        for raw_model in model_rows:
+            model = _row_to_dict(raw_model)
+            try:
+                tone_id = int(model["tone_id"])
+                model_id = int(model["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tone_id not in tone_by_id:
+                continue
+            model_tone_ids.add(tone_id)
+            tone = tone_by_id.get(tone_id, {})
+            if not tone3000.is_supported_model(model, tone):
+                continue
+            supported_ids.setdefault(tone_id, set()).add(model_id)
+            if model.get("local_path"):
+                local_supported_ids.setdefault(tone_id, set()).add(model_id)
+
+        requested_ids = set()
+        for value in model_id_values:
+            try:
+                requested_ids.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        visible = []
+        for tone in tones:
+            try:
+                tone_id = int(tone["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tone_id in model_tone_ids:
+                # Once local model rows exist, their model-level classifier is
+                # authoritative. Aggregate counters can include unsupported
+                # A1/Custom rows or belong to a different remote snapshot.
+                if not supported_ids.get(tone_id):
+                    continue
+            elif not tone3000._has_supported_tone_models(tone):
+                continue
+            if has_files and not local_supported_ids.get(tone_id):
+                continue
+            if requested_ids and not (
+                    requested_ids & supported_ids.get(tone_id, set())):
+                continue
+            visible.append(tone)
+
+        start = max(0, int(offset))
         if limit:
-            sql += " LIMIT ?"
-            args.append(limit)
-            if offset:
-                sql += " OFFSET ?"
-                args.append(max(0, int(offset)))
-        elif offset:
-            sql += " LIMIT -1 OFFSET ?"
-            args.append(max(0, int(offset)))
-        return [_row_to_dict(r) for r in conn.execute(sql, args).fetchall()]
+            return visible[start:start + max(0, int(limit))]
+        return visible[start:]
 
 
 def list_local_models(kind: str = "amp", limit: int = 2000) -> list[dict]:
@@ -483,11 +488,7 @@ def list_local_models(kind: str = "amp", limit: int = 2000) -> list[dict]:
                 "name", "model_url", "url")
         }
         is_ir = model_is_ir(classification_model, tone)
-        if is_ir != want_ir:
-            continue
-        # A1 (WaveNet) 是废弃架构：AMP picker 不提供旧模型，本地库老数据
-        # 也只算下载状态，不进入浏览/使用路径。
-        if not want_ir and tone3000._is_a1_model(classification_model):
+        if is_ir != want_ir or not tone3000.is_supported_model(model, tone):
             continue
         models.append(model)
         if len(models) >= max_rows:
@@ -506,9 +507,10 @@ def get_tone(tone_id: int) -> dict | None:
                 "SELECT * FROM models WHERE tone_id = ?",
                 (tone_id,)).fetchall():
             m = _row_to_dict(r)
-            # A1 架构的产品要求：不浏览、不使用（下载路径同样过滤）。
-            if not tone3000._is_a1_model(m):
+            if tone3000.is_supported_model(m, d):
                 local_models.append(m)
+        d["model_name"] = next(
+            (m.get("name") for m in local_models if m.get("name")), None)
         d["models"] = local_models
         return d
 
@@ -588,11 +590,15 @@ def local_uninstall_plan(tone_ids: list[int]) -> dict:
     marks = ",".join("?" for _ in ids)
     with connect() as conn:
         rows = conn.execute(
-            f"SELECT id, tone_id, name, local_path FROM models "
-            f"WHERE tone_id IN ({marks}) AND local_path IS NOT NULL ORDER BY tone_id, id",
+            f"SELECT m.*, t.gear, t.format, t.platform FROM models m "
+            f"JOIN tones t ON t.id = m.tone_id "
+            f"WHERE m.tone_id IN ({marks}) AND m.local_path IS NOT NULL "
+            "ORDER BY m.tone_id, m.id",
             ids,
         ).fetchall()
-    return _uninstall_plan_for_models([dict(row) for row in rows])
+    models = [model for row in rows
+              if (model := _supported_model_from_row(row)) is not None]
+    return _uninstall_plan_for_models(models)
 
 
 def local_uninstall_models_plan(model_ids: list[int]) -> dict:
@@ -607,11 +613,15 @@ def local_uninstall_models_plan(model_ids: list[int]) -> dict:
     marks = ",".join("?" for _ in ids)
     with connect() as conn:
         rows = conn.execute(
-            f"SELECT id, tone_id, name, local_path FROM models "
-            f"WHERE id IN ({marks}) AND local_path IS NOT NULL ORDER BY tone_id, id",
+            f"SELECT m.*, t.gear, t.format, t.platform FROM models m "
+            f"JOIN tones t ON t.id = m.tone_id "
+            f"WHERE m.id IN ({marks}) AND m.local_path IS NOT NULL "
+            "ORDER BY m.tone_id, m.id",
             ids,
         ).fetchall()
-    return _uninstall_plan_for_models([dict(row) for row in rows])
+    models = [model for row in rows
+              if (model := _supported_model_from_row(row)) is not None]
+    return _uninstall_plan_for_models(models)
 
 
 def _uninstall_files(plan: dict, *, allow_preset_references: bool,
@@ -817,6 +827,20 @@ def _existing_import_models(tone_id: int) -> list[dict]:
             "SELECT id, model_url, name, local_path, local_size, local_sha256 "
             "FROM models WHERE tone_id = ?", (tone_id,)).fetchall()]
 
+
+def _supported_download_record(record: dict, tone: dict) -> bool:
+    """Apply the A2/IR boundary to downloader records before persistence."""
+    if not isinstance(record, dict):
+        return False
+    model = dict(record)
+    payload = model.get("model_json")
+    if isinstance(payload, dict):
+        for key in ("architecture", "architecture_version", "format"):
+            if not model.get(key) and payload.get(key):
+                model[key] = payload[key]
+    return tone3000.is_supported_model(model, tone)
+
+
 def backfill_tone_usernames(*, quiet: bool = True) -> int:
     """历史数据回填：username 为占位（'tone3000'）或空的 tone 重新联查补真名。
 
@@ -860,6 +884,10 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
         if not quiet:
             print(f"TONE3000 has no tone {tone_id}.")
         return None
+    if not tone3000._has_supported_tone_models(row):
+        if not quiet:
+            print(f"TONE3000 tone {tone_id} has no supported A2/IR models.")
+        return None
     is_ir = model_is_ir({}, row)
     slug = tone3000.slugify(row.get("title"), 40)
     dest = TONES_DIR / f"{tone_id}-{slug}"
@@ -871,14 +899,26 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
         try:
             _seed_import_directory(dest, staging)
             existing_models = _existing_import_models(tone_id)
-            # A pack install is model-granular.  Fetch the complete remote set
-            # so selected A1/WaveNet rows are available as well as A2 and IR.
+            # A pack install is model-granular. Fetch A2 and IR rows only;
+            # Custom/A1 rows must never reach the local asset database.
             paths = tone3000.download(tone_id, staging, tag=slug,
                                       a2_only=False,
                                       ext="wav" if is_ir else None,
                                       return_paths=True, progress=progress, quiet=quiet,
                                       model_ids=model_ids,
-                                      existing_records=existing_models)
+                                      existing_records=existing_models,
+                                      tone=row)
+            paths = [path for path in paths
+                     if _supported_download_record(path, row)]
+            if not paths:
+                existing = get_tone(tone_id)
+                shutil.rmtree(staging, ignore_errors=True)
+                if existing and any(model.get("local_path")
+                                    for model in existing.get("models", [])):
+                    return existing
+                if not quiet:
+                    print(f"TONE3000 tone {tone_id} produced no supported A2/IR files.")
+                return None
             dest.mkdir(parents=True, exist_ok=True)
             paths, published, replaced = _publish_import_files(paths, staging, dest)
             row["local_dir"] = _to_rel_path(str(dest))   # REQ-035 portable
@@ -930,7 +970,9 @@ def chain_get() -> dict:
         CHAIN_FILE.stat()
     except FileNotFoundError:
         return {}
-    return chain_protocol.read_chain_file(CHAIN_FILE, root=ROOT)
+    chain = chain_protocol.read_chain_file(CHAIN_FILE, root=ROOT)
+    _validate_known_chain_assets(chain)
+    return chain
 
 
 def chain_set(cfg: dict) -> None:
@@ -939,20 +981,132 @@ def chain_set(cfg: dict) -> None:
     Validate and atomically write canonical ``slots[]`` through the shared
     protocol boundary.
     """
+    _validate_known_chain_assets(cfg)
     chain_protocol.write_chain_file(CHAIN_FILE, cfg, root=ROOT)
 
 
 # ---- presets (named chain snapshots, logic references into the library) ----
 
-def _model_id_for_path(path: str) -> int | None:
-    """Reverse-lookup models.local_path → model id (None if not a library file)."""
-    if not path:
+def _supported_model_from_row(row: sqlite3.Row | None) -> dict | None:
+    """Normalize a joined model row and enforce the A2/IR asset boundary."""
+    if row is None:
         return None
+    model = _row_to_dict(row)
+    tone = {key: model.get(key) for key in ("gear", "format", "platform")}
+    return model if tone3000.is_supported_model(model, tone) else None
+
+
+def _model_rows_for_path(path: str) -> list[dict]:
+    """Return every library model row owning one local path."""
+    if not path:
+        return []
     clause, forms = _local_path_clause(path)
     with connect() as conn:
+        rows = conn.execute(
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            f"WHERE m.{clause} ORDER BY m.id", forms).fetchall()
+    return [_row_to_dict(row) for row in rows]
+
+
+def _model_rows_for_id(model_id: int) -> list[dict]:
+    """Return the raw library model row for a preset boundary check."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            "WHERE m.id = ?", (model_id,)).fetchall()
+    return [_row_to_dict(row) for row in rows]
+
+
+def _preset_has_unsupported_registered_asset(chain: dict) -> bool:
+    """Detect unsupported assets in a legacy preset without hiding missing ones."""
+    for slot in chain.get("slots", []):
+        if not isinstance(slot, dict):
+            continue
+        model_id = slot.get("model_id")
+        model_rows_for_id: list[dict] = []
+        if model_id is not None:
+            try:
+                model_rows_for_id = _model_rows_for_id(int(model_id))
+            except (TypeError, ValueError):
+                model_rows_for_id = []
+            if model_rows_for_id and any(
+                    not tone3000.is_supported_model(
+                        row, {key: row.get(key)
+                              for key in ("gear", "format", "platform")})
+                    for row in model_rows_for_id):
+                return True
+        for field in ("path", "candidate"):
+            path = slot.get(field)
+            if not path:
+                continue
+            rows = _model_rows_for_path(path)
+            if rows:
+                if any(
+                        not tone3000.is_supported_model(
+                            row, {key: row.get(key)
+                                  for key in ("gear", "format", "platform")})
+                        for row in rows):
+                    return True
+                continue
+            try:
+                if (Path(_to_abs_path(path)).is_file()
+                        and not model_rows_for_id):
+                    # Existing but unregistered paths are rejected by the
+                    # draft writer and must not re-enter through old rows.
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def _validate_known_chain_assets(cfg: dict) -> None:
+    """Reject known A1/Custom/unknown-architecture library assets in a chain.
+
+    The low-level protocol also checks the database when it is available, while
+    this higher-level path check covers deployments whose database location is
+    configured independently from ``data/gigbuddy.db``. Ambiguous duplicate
+    rows fail closed rather than allowing an unsupported asset into the engine.
+    """
+    normalized = chain_protocol.normalize_chain(cfg, root=ROOT)
+    paths = []
+    for slot in normalized.get("slots", []):
+        if not isinstance(slot, dict):
+            continue
+        for key in ("path", "candidate"):
+            value = slot.get(key)
+            if value:
+                paths.append(value)
+    for path in paths:
+        rows = _model_rows_for_path(path)
+        if not rows or not all(
+                tone3000.is_supported_model(
+                    row, {key: row.get(key) for key in ("gear", "format", "platform")})
+                for row in rows):
+            raise ValueError(
+                f"chain file is not a supported A2/IR library model: {path}")
+
+
+def _supported_model_by_id(model_id: int) -> dict | None:
+    """Resolve one model identity without requiring a downloaded file."""
+    with connect() as conn:
         row = conn.execute(
-            f"SELECT id FROM models WHERE {clause}", forms).fetchone()
-        return row["id"] if row else None
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            "WHERE m.id = ?", (model_id,)).fetchone()
+    return _supported_model_from_row(row)
+
+
+def _model_id_for_path(path: str) -> int | None:
+    """Reverse-lookup a supported models.local_path → model id."""
+    rows = _model_rows_for_path(path)
+    supported = [
+        row for row in rows
+        if tone3000.is_supported_model(
+            row, {key: row.get(key) for key in ("gear", "format", "platform")})
+    ]
+    return supported[0]["id"] if len(supported) == len(rows) and supported else None
 
 
 def tone_title_for_path(path: str) -> str | None:
@@ -966,9 +1120,11 @@ def tone_title_for_path(path: str) -> str | None:
     clause, forms = _local_path_clause(path)
     with connect() as conn:
         row = conn.execute(
-            f"SELECT t.title FROM models m JOIN tones t ON t.id = m.tone_id "
+            "SELECT m.*, t.title AS tone_title, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
             f"WHERE m.{clause}", forms).fetchone()
-        return row["title"] if row else None
+        model = _supported_model_from_row(row)
+        return row["tone_title"] if model else None
 
 
 def _model_path(model_id: int) -> str | None:
@@ -976,10 +1132,9 @@ def _model_path(model_id: int) -> str | None:
 
     DB 存相对 → 返回绝对（REQ-035 portable）。
     """
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT local_path FROM models WHERE id = ?", (model_id,)).fetchone()
-        return _to_abs_path(row["local_path"]) if row and row["local_path"] else None
+    model = _supported_model_by_id(model_id)
+    return (_to_abs_path(model["local_path"])
+            if model and model.get("local_path") else None)
 
 
 def _installed_model_path(model_id: int) -> str | None:
@@ -1154,7 +1309,7 @@ def _canonical_preset_chain(raw: object) -> dict:
     }
 
 
-def _preset_row(row: sqlite3.Row) -> dict:
+def _preset_row(row: sqlite3.Row) -> dict | None:
     d = dict(row)
     raw_json = d.pop("chain_json")
     if d.get("note") is None:
@@ -1166,6 +1321,13 @@ def _preset_row(row: sqlite3.Row) -> dict:
         # report the error without ever touching the live chain.
         d["chain"] = None
         d["chain_error"] = str(exc)
+    if (d["chain"] is not None
+            and _preset_has_unsupported_registered_asset(d["chain"])):
+        # A legacy preset can outlive the architecture boundary that was in
+        # place when it was created. Keep the database row for migration and
+        # auditability, but never expose its unsupported asset to the picker,
+        # detail view, or active-preset resolver.
+        return None
     return d
 
 
@@ -1215,7 +1377,7 @@ def _preset_chain_from_live(cfg: dict) -> dict:
             slots.append({
                 # 与 active 槽一致：candidate 路径反查 model id（preset 槽
                 # 以 Model ID 为身份；外部文件反查不到时为 None）。
-                "model_id": (_model_id_for_path(candidate)
+                "model_id": (_require_supported_model_path(candidate, index)
                              if candidate else None),
                 "path": None,
                 **_preset_slot_gains(item, index),
@@ -1223,8 +1385,9 @@ def _preset_chain_from_live(cfg: dict) -> dict:
                     "bypass": True} if candidate else {}),
             })
             continue
+        model_id = _require_supported_model_path(path, index)
         slots.append({
-            "model_id": _model_id_for_path(path),
+            "model_id": model_id,
             **_preset_slot_gains(item, index),
             "path": _preset_storage_path(path, index),
         })
@@ -1294,11 +1457,16 @@ def _preset_id_for_name(name: str) -> int:
 
 
 def preset_list() -> list[dict]:
-    """All Presets, newest first; invalid rows remain inspectable."""
+    """Return visible Presets, newest first.
+
+    Structurally invalid rows remain inspectable, while rows referencing a
+    known unsupported library model stay hidden from product-facing views.
+    """
     with connect() as conn:
         rows = conn.execute(
             "SELECT * FROM presets ORDER BY updated_at DESC").fetchall()
-        return [_preset_row(row) for row in rows]
+        return [preset for row in rows
+                if (preset := _preset_row(row)) is not None]
 
 
 def preset_delete(name: str) -> bool:
@@ -1406,6 +1574,53 @@ def preset_update_draft(name: str, chain: dict, note: str | None = None,
         expected_updated_at=expected_updated_at)
 
 
+def _validate_preset_draft_references(chain: dict) -> None:
+    """Reject unsupported or unregistered assets before storing a draft.
+
+    A missing file may remain in a draft so the user can repair it later, but
+    an existing file must resolve to a supported local library model. This
+    keeps invalid references out of the preset picker and its downstream load
+    path instead of discovering them only when a preset is activated.
+    """
+    for index, slot in enumerate(chain.get("slots", [])):
+        model_id = slot.get("model_id")
+        if model_id is not None and _supported_model_by_id(model_id) is None:
+            raise ValueError(
+                f"Preset Slot {index + 1:02d} references an unsupported A2/IR model: "
+                f"{model_id}")
+        for field in ("path", "candidate"):
+            path = slot.get(field)
+            if not path:
+                continue
+            rows = _model_rows_for_path(path)
+            if rows:
+                supported = [
+                    row for row in rows
+                    if tone3000.is_supported_model(
+                        row, {key: row.get(key)
+                              for key in ("gear", "format", "platform")})
+                ]
+                if len(supported) != len(rows):
+                    raise ValueError(
+                        f"Preset Slot {index + 1:02d} {field} is not a supported "
+                        f"A2/IR library model: {path}")
+                if (model_id is not None
+                        and not any(int(row["id"]) == int(model_id)
+                                    for row in supported)):
+                    raise ValueError(
+                        f"Preset Slot {index + 1:02d} {field} does not match "
+                        f"model_id {model_id}: {path}")
+                continue
+            try:
+                exists = Path(_to_abs_path(path)).exists()
+            except OSError:
+                exists = False
+            if exists:
+                raise ValueError(
+                    f"Preset Slot {index + 1:02d} {field} is not a registered "
+                    f"A2/IR library model: {path}")
+
+
 def preset_update_draft_by_id(
         preset_id: int, chain: dict, note: str | None = None, *,
         expected_updated_at: str | None | object = _PRESET_UPDATED_UNSET) -> dict:
@@ -1418,6 +1633,7 @@ def preset_update_draft_by_id(
     if isinstance(preset_id, bool) or not isinstance(preset_id, int):
         raise ValueError("preset id must be an integer")
     canonical = _canonical_preset_chain(chain)
+    _validate_preset_draft_references(canonical)
     stored_note = _preset_note_value(note)
     now = datetime.now(timezone.utc).isoformat()
     with connect() as conn:
@@ -1463,12 +1679,14 @@ def _resolve_preset_slot(slot: dict, index: int) -> str | None:
     saved_path = slot.get("path")
     if model_id is None and saved_path is None:
         return None
+    supported_model = (_supported_model_by_id(model_id)
+                       if model_id is not None else None)
     candidates: list[str] = []
-    if model_id is not None:
+    if supported_model is not None:
         current_path = _model_path(model_id)
         if current_path:
             candidates.append(current_path)
-    if saved_path:
+    elif saved_path and _model_id_for_path(saved_path) is not None:
         candidates.append(saved_path)
     seen: set[str] = set()
     errors: list[str] = []
@@ -1488,6 +1706,16 @@ def _resolve_preset_slot(slot: dict, index: int) -> str | None:
         + " | ".join(errors))
 
 
+def _require_supported_model_path(path: str, index: int) -> int:
+    """Resolve a live path to a registered A2/IR model for preset storage."""
+    model_id = _model_id_for_path(path)
+    if model_id is None:
+        raise ValueError(
+            f"Slot {index + 1:02d} path is not a supported A2/IR library model: "
+            f"{path}")
+    return model_id
+
+
 def _resolved_preset_chain(preset: dict) -> dict:
     if not isinstance(preset.get("chain"), dict):
         error = preset.get("chain_error", "invalid chain")
@@ -1496,14 +1724,33 @@ def _resolved_preset_chain(preset: dict) -> dict:
     slots = []
     errors = []
     for index, slot in enumerate(ch["slots"]):
+        model_id = slot.get("model_id")
+        if (model_id is not None
+                and _supported_model_by_id(model_id) is None):
+            errors.append(
+                f"Slot {index + 1:02d} model file missing or unsupported "
+                f"(model_id {model_id} is unsupported)")
+            slots.append({
+                "model_id": model_id,
+                **_preset_slot_gains(slot, index),
+                "path": None,
+            })
+            continue
         if slot.get("bypass"):
             # Bypassed slot: keep the model reference, no active file. The
             # recovery candidate (stored path, or resolved from model_id)
             # rides along so the UI can show BYPASS with the model name
             # instead of an empty slot.
             model_id = slot.get("model_id")
-            candidate = slot.get("candidate") or (
-                _model_path(model_id) if model_id is not None else None)
+            candidate = None
+            if model_id is not None:
+                candidate = _resolve_preset_slot(
+                    {"model_id": model_id, "path": slot.get("candidate")},
+                    index)
+            elif slot.get("candidate"):
+                candidate = _resolve_preset_slot(
+                    {"model_id": None, "path": slot.get("candidate")},
+                    index)
             slots.append({
                 "model_id": model_id,
                 "path": None,
@@ -1863,10 +2110,8 @@ def _first_local_model(tone_id: int, ir: bool = False) -> int | None:
                 "architecture", "architecture_version", "local_path",
                 "name", "model_url", "url")
         }
-        if model_is_ir(classification_model, tone) == ir:
-            # A1 (WaveNet) 是废弃架构：amp 默认选中不落到旧模型上。
-            if not ir and tone3000._is_a1_model(classification_model):
-                continue
+        if (tone3000.is_supported_model(model, tone)
+                and model_is_ir(classification_model, tone) == ir):
             return model["id"]
     return None
 
@@ -1882,33 +2127,42 @@ def local_models_by_tone(path: str) -> list[dict] | None:
     clause, forms = _local_path_clause(path)
     with connect() as conn:
         row = conn.execute(
-            f"SELECT tone_id FROM models WHERE {clause}", forms).fetchone()
-        if not row:
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            f"WHERE m.{clause}", forms).fetchone()
+        current = _supported_model_from_row(row)
+        if not current:
             return None
         rows = conn.execute(
             "SELECT id, tone_id, name, architecture, architecture_version, local_path "
             "FROM models "
             "WHERE tone_id = ? AND local_path IS NOT NULL ORDER BY id",
-            (row["tone_id"],)).fetchall()
-        # 链面板的兄弟模型步进同样排除 A1（WaveNet）旧文件。
+            (current["tone_id"],)).fetchall()
+        tone = conn.execute(
+            "SELECT gear, format, platform FROM tones WHERE id = ?",
+            (current["tone_id"],)).fetchone()
+        tone = _row_to_dict(tone) if tone else {}
         return [m for m in (_row_to_dict(r) for r in rows)
-                if not tone3000._is_a1_model(m)]
+                if tone3000.is_supported_model(m, tone)]
 
 
 def downloaded_model_ids_by_tone() -> dict[int, set[int]]:
     """tone_id → set of locally downloaded model ids (one SQL pass).
 
-    A1 (WaveNet) 模型是产品过滤掉的废弃架构：本地老数据不计入已下载集合，
-    否则下载状态比对与 Files 计数会把它们当成有效文件。
+    Only A2 and IR models count as downloaded product assets. Older A1,
+    Custom, and unknown local rows are deliberately ignored.
     """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT tone_id, id FROM models WHERE local_path IS NOT NULL "
-            "AND LOWER(COALESCE(architecture_version, architecture, '')) "
-            "NOT IN ('1', 'a1', 'wave', 'wavenet')").fetchall()
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            "WHERE m.local_path IS NOT NULL").fetchall()
     out: dict[int, set[int]] = {}
     for r in rows:
-        out.setdefault(r["tone_id"], set()).add(r["id"])
+        model = _row_to_dict(r)
+        tone = {key: model.get(key) for key in ("gear", "format", "platform")}
+        if tone3000.is_supported_model(model, tone):
+            out.setdefault(r["tone_id"], set()).add(r["id"])
     return out
 
 
@@ -1934,20 +2188,8 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
                 raise
             except Exception:
                 return t["id"], "partial", set()
-            if model_is_ir({}, t):
-                ids = {m["id"] for m in ms if model_is_ir(m, t)}
-                if not ids:
-                    # Older API fixtures may omit both architecture and a
-                    # model URL; an IR tone still defines the whole set as IR.
-                    ids = {m["id"] for m in ms}
-            else:
-                # Amp/pedal packs may contain WaveNet (A1) and
-                # SlimmableContainer (A2). A1 is product-filtered (never
-                # downloaded), so it must not count toward the remote set:
-                # including it would make every local install look partial.
-                ids = {m["id"] for m in ms
-                       if not model_is_ir(m, t)
-                       and not tone3000._is_a1_model(m)}
+            ids = {m["id"] for m in ms
+                   if tone3000.is_supported_model(m, t)}
             return t["id"], "all" if ids else "partial", ids
 
         with ThreadPoolExecutor(max_workers=6) as ex:
@@ -2047,6 +2289,22 @@ def _fmt_table(tones: list[dict]) -> str:
     return "\n".join(rows)
 
 
+def _public_tone(tone: dict) -> dict:
+    """Return product-facing Tone JSON without unsupported model metadata."""
+    result = dict(tone)
+    for key in ("a1_models_count", "custom_models_count", "models_count"):
+        result.pop(key, None)
+    result["supported_models_count"] = tone3000.supported_tone_model_count(tone)
+    models = result.get("models")
+    if isinstance(models, list):
+        result["models"] = [
+            model for model in models
+            if isinstance(model, dict)
+            and tone3000.is_supported_model(model, tone)
+        ]
+    return result
+
+
 def _fmt_show(t: dict) -> str:
     lines = [
         f"id           {t['id']}",
@@ -2055,8 +2313,8 @@ def _fmt_show(t: dict) -> str:
         f"format       {t.get('format') or t.get('platform')}",
         f"username     {t.get('username')}",
         f"downloads    {t.get('downloads_count')}   favorites {t.get('favorites_count')}",
-        f"counts       a1={t.get('a1_models_count')} a2={t.get('a2_models_count')} "
-        f"custom={t.get('custom_models_count')} irs={t.get('irs_count')} models={t.get('models_count')}",
+        f"counts       a2={t.get('a2_models_count')} irs={t.get('irs_count')} "
+        f"supported={tone3000.supported_tone_model_count(t)}",
         f"model_name   {t.get('model_name')}",
         f"tags         {', '.join(t.get('tags') or [])}",
         f"makes        {', '.join(t.get('makes') or [])}",
@@ -2165,7 +2423,8 @@ def main(argv: list[str] | None = None) -> int:
             print("TONE3000 logout complete.")
         elif args.tone_cmd == "list":
             tones = list_tones(args.gear, args.limit, args.query)
-            print(json.dumps(tones, ensure_ascii=False, indent=2) if args.json else
+            payload = [_public_tone(tone) for tone in tones]
+            print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else
                   (_fmt_table(tones) if tones else "No imported tones yet — `gigbuddy tone search <q>` first."))
         elif args.tone_cmd == "search":
             gear = args.gear
@@ -2178,7 +2437,8 @@ def main(argv: list[str] | None = None) -> int:
             hits = tone3000.search(args.query, page_size=args.limit,
                                    gear_filters=gear_values,
                                    usernames=args.author, tag_names=args.tag)
-            print(json.dumps(hits, ensure_ascii=False, indent=2) if args.json else _fmt_table(hits))
+            payload = [_public_tone(hit) for hit in hits]
+            print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else _fmt_table(hits))
             if hits and not args.json:
                 print("\nImport one with: gigbuddy tone import <id>")
         elif args.tone_cmd == "show":
@@ -2186,7 +2446,8 @@ def main(argv: list[str] | None = None) -> int:
             if not t:
                 print(f"Tone {args.id} not in local library — import it first (gigbuddy tone import {args.id}).")
                 return 1
-            print(json.dumps(t, ensure_ascii=False, indent=2) if args.json else _fmt_show(t))
+            print(json.dumps(_public_tone(t), ensure_ascii=False, indent=2)
+                  if args.json else _fmt_show(t))
         elif args.tone_cmd == "import":
             t = import_tone(args.id)
             if not t:

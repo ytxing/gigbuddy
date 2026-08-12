@@ -86,7 +86,8 @@ def test_tone3000_search_forwards_make_filters(monkeypatch):
 def test_tone3000_model_id_lookup_returns_its_parent_tone(monkeypatch):
     monkeypatch.setattr(
         tone3000, "_get",
-        lambda _url, **_kwargs: [{"id": 123, "tone_id": 19}],
+        lambda _url, **_kwargs: [{"id": 123, "tone_id": 19,
+                                  "architecture_version": "2"}],
     )
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tone_id: {"id": tone_id, "title": "Plexi"})
 
@@ -101,7 +102,9 @@ def test_download_keeps_original_remote_names(monkeypatch, tmp_path):
 
     def fake_models(tid, a2_only=True):
         return [
-            {"id": 1, "model_url": "http://x/Original%20Name_a2.nam", "model_json": {"metadata": {"name": "Eq Flat, Vol 3!"}}},
+            {"id": 1, "model_url": "http://x/Original%20Name_a2.nam",
+             "architecture_version": "2",
+             "model_json": {"metadata": {"name": "Eq Flat, Vol 3!"}}},
             {"id": 2, "model_url": "http://x/9f8e7d.wav", "model_json": None},
         ]
 
@@ -117,7 +120,8 @@ def test_download_keeps_original_remote_names(monkeypatch, tmp_path):
     monkeypatch.setattr(tone3000, "models", fake_models)
     monkeypatch.setattr(tone3000.urllib.request, "urlopen",
                         lambda *a, **kw: _FakeResp())
-    got = tone3000.download(99, tmp_path, tag="my-tone-slug", return_paths=True)
+    got = tone3000.download(
+        99, tmp_path, tag="my-tone-slug", a2_only=False, return_paths=True)
     names = sorted(p.name for p in tmp_path.iterdir() if p.is_file())
     assert names == ["9f8e7d.wav", "Original Name_a2.nam"], names
     assert got[1]["local_path"].endswith("9f8e7d.wav")
@@ -125,8 +129,10 @@ def test_download_keeps_original_remote_names(monkeypatch, tmp_path):
 
 def test_download_reports_file_progress(monkeypatch, tmp_path):
     monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [
-        {"id": 1, "model_url": "http://x/one.nam", "model_json": {}},
-        {"id": 2, "model_url": "http://x/two.nam", "model_json": {}},
+        {"id": 1, "model_url": "http://x/one.nam",
+         "architecture_version": "2", "model_json": {}},
+        {"id": 2, "model_url": "http://x/two.nam",
+         "architecture_version": "2", "model_json": {}},
     ])
 
     class _FakeResp:
@@ -146,6 +152,7 @@ def test_download_reports_file_progress(monkeypatch, tmp_path):
 def test_download_prefers_semantic_name_without_duplicate_extension(monkeypatch, tmp_path):
     monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [
         {"id": 1, "model_url": "http://x/encoded-one.nam",
+         "architecture_version": "2",
          "name": "JCM 800 P5", "model_json": {}},
         {"id": 2, "model_url": "http://x/encoded-two.wav?download=1",
          "name": "Greenback.wav", "model_json": {}},
@@ -159,7 +166,57 @@ def test_download_prefers_semantic_name_without_duplicate_extension(monkeypatch,
     monkeypatch.setattr(tone3000.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
     tone3000.download(99, tmp_path, ext="wav")
     assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == [
-        "Greenback.wav", "JCM 800 P5.wav"
+        "JCM 800 P5.nam"
+    ]
+
+
+def test_download_filters_extra_rows_from_a2_only_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [
+        {"id": 1, "model_url": "http://x/one.nam",
+         "architecture_version": "2", "name": "one"},
+        {"id": 2, "model_url": "http://x/two.wav",
+         "architecture": "IR", "name": "two.wav"},
+    ])
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"x"
+
+    monkeypatch.setattr(tone3000.urllib.request, "urlopen",
+                        lambda *a, **kw: _FakeResp())
+
+    records = tone3000.download(
+        99, tmp_path, a2_only=True, ext="wav",
+        return_paths=True, quiet=True)
+
+    assert [record["id"] for record in records] == [1]
+    assert (tmp_path / "one.nam").is_file()
+    assert not (tmp_path / "two.wav").exists()
+
+
+def test_download_uses_model_extension_inside_mixed_pack(monkeypatch, tmp_path):
+    monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [
+        {"id": 1, "model_url": "http://x/amp",
+         "architecture_version": "2", "name": "amp"},
+        {"id": 2, "model_url": "http://x/cab",
+         "architecture": "IR", "name": "cab"},
+    ])
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"x"
+
+    monkeypatch.setattr(tone3000.urllib.request, "urlopen",
+                        lambda *a, **kw: _FakeResp())
+
+    records = tone3000.download(
+        99, tmp_path, a2_only=False, ext="wav",
+        return_paths=True, quiet=True)
+
+    assert [Path(record["local_path"]).name for record in records] == [
+        "amp.nam", "cab.wav"
     ]
 
 
@@ -167,6 +224,7 @@ def test_download_sanitizes_remote_names_to_the_destination_directory(
         monkeypatch, tmp_path):
     monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [
         {"id": 1, "model_url": "http://x/one.nam",
+         "architecture_version": "2",
          "name": "../../escape.nam", "model_json": {}},
         {"id": 2, "model_url": "http://x/two.wav",
          "name": r"nested\evil.wav", "model_json": {}},
@@ -180,7 +238,8 @@ def test_download_sanitizes_remote_names_to_the_destination_directory(
     monkeypatch.setattr(tone3000.urllib.request, "urlopen",
                         lambda *a, **kw: _FakeResp())
     monkeypatch.setattr(tone3000.time, "sleep", lambda _seconds: None)
-    tone3000.download(99, tmp_path, return_paths=True, quiet=True)
+    tone3000.download(
+        99, tmp_path, a2_only=False, return_paths=True, quiet=True)
 
     assert sorted(path.name for path in tmp_path.iterdir() if path.is_file()) == [
         "escape.nam", "evil.wav"
@@ -193,7 +252,8 @@ def test_download_reuses_only_a_verified_existing_file(monkeypatch, tmp_path):
     path = tmp_path / "cached.nam"
     path.write_bytes(payload)
     model = {"id": 1, "model_url": "http://x/cached.nam",
-             "name": "cached.nam", "model_json": {}}
+             "name": "cached.nam", "architecture_version": "2",
+             "model_json": {}}
     monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [model])
     calls = []
 
@@ -222,7 +282,8 @@ def test_download_redownloads_when_cached_hash_is_stale(monkeypatch, tmp_path):
     path = tmp_path / "cached.nam"
     path.write_bytes(b"old")
     model = {"id": 1, "model_url": "http://x/cached.nam",
-             "name": "cached.nam", "model_json": {}}
+             "name": "cached.nam", "architecture_version": "2",
+             "model_json": {}}
     monkeypatch.setattr(tone3000, "models", lambda *a, **kw: [model])
 
     class _FakeResp:
@@ -384,6 +445,8 @@ def test_models_and_local_listing():
                                     "local_path": "data/tones/19-01.nam"})
         library.upsert_model(conn, {"id": 52, "tone_id": 19, "model_url": "u2",
                                     "architecture": "IR", "local_path": "data/tones/19-01.wav"})
+        library.upsert_model(conn, {"id": 53, "tone_id": 19, "model_url": "u3",
+                                    "architecture": "custom", "local_path": "data/tones/19-custom.nam"})
     t = library.get_tone(19)
     assert len(t["models"]) == 2
     assert [m["id"] for m in library.list_local_models("amp")] == [51]
@@ -393,7 +456,44 @@ def test_models_and_local_listing():
     with library.connect() as conn:
         library.upsert_model(conn, {"id": 51, "tone_id": 19, "model_url": "u1",
                                     "architecture": "SlimmableContainer", "local_path": None})
-        assert conn.execute("SELECT COUNT(*) FROM models").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM models").fetchone()[0] == 3
+
+
+def test_local_tone_list_excludes_custom_only_files():
+    custom_tone = {**SAMPLE, "id": 88, "title": "Custom Only",
+                   "a1_models_count": 0, "a2_models_count": 1,
+                   "custom_models_count": 1, "models_count": 1}
+    with library.connect() as conn:
+        library.upsert_tone(conn, custom_tone)
+        library.upsert_model(conn, {
+            "id": 8801, "tone_id": 88, "model_url": "u-custom",
+            "name": "custom.nam",
+            "architecture": "custom", "local_path": "data/tones/custom.nam",
+        })
+
+    assert library.get_tone(88)["models"] == []
+    assert library.list_tones() == []
+    assert library.list_tones(has_files=True) == []
+    assert library.downloaded_model_ids_by_tone() == {}
+
+
+def test_unsupported_model_paths_are_not_resolved_into_chain_metadata(tmp_path):
+    tone = {**SAMPLE, "id": 89, "a1_models_count": 0,
+            "a2_models_count": 1, "models_count": 1}
+    path = library.TONES_DIR / "custom-only.nam"
+    path.write_bytes(b"custom")
+    with library.connect() as conn:
+        library.upsert_tone(conn, tone)
+        library.upsert_model(conn, {
+            "id": 8901, "tone_id": 89, "model_url": "u",
+            "name": "custom-only.nam", "architecture": "custom",
+            "local_path": str(path),
+        })
+
+    assert library._model_id_for_path(str(path)) is None
+    assert library._model_path(8901) is None
+    assert library.tone_title_for_path(str(path)) is None
+    assert library.local_models_by_tone(str(path)) is None
 
 
 def test_local_listing_infers_architectureless_ir_and_keeps_a1_amp():
@@ -538,6 +638,13 @@ def test_chain_get_set_atomic():
     assert library.chain_get() == {}
     model = library.ROOT / "data" / "tones" / "19-01.nam"
     model.write_bytes(b"amp")
+    with library.connect() as conn:
+        library.upsert_tone(conn, {**SAMPLE, "id": 19})
+        library.upsert_model(conn, {
+            "id": 1901, "tone_id": 19, "model_url": "u1901",
+            "name": model.name, "architecture": "SlimmableContainer",
+            "local_path": str(model),
+        })
     library.chain_set({"master": 0.4, "model": "data/tones/19-01.nam"})
     # REQ-035 portable：读返回绝对路径（相对根解析）
     cfg = library.chain_get()
@@ -546,12 +653,95 @@ def test_chain_get_set_atomic():
     assert not library.CHAIN_FILE.with_suffix(".json.tmp").exists()  # no leftover tmp
 
 
+def test_chain_set_rejects_known_unsupported_model():
+    model = library.ROOT / "data" / "tones" / "legacy.nam"
+    model.write_bytes(b"legacy")
+    with library.connect() as conn:
+        library.upsert_tone(conn, {"id": 29, "title": "Legacy", "gear": "amp"})
+        library.upsert_model(conn, {
+            "id": 2901, "tone_id": 29, "name": model.name,
+            "model_url": None,
+            "architecture": "custom", "local_path": str(model),
+        })
+
+    with pytest.raises(ValueError, match="supported A2/IR"):
+        library.chain_set({"slots": [{"path": str(model)}]})
+
+
+def test_chain_set_rejects_unregistered_tone_asset():
+    model = library.ROOT / "data" / "tones" / "unknown.nam"
+    model.write_bytes(b"unknown")
+    with pytest.raises(ValueError, match="supported A2/IR"):
+        library.chain_set({"slots": [{"path": str(model)}]})
+
+
+def test_import_does_not_persist_when_download_has_no_supported_records(
+        monkeypatch):
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+    monkeypatch.setattr(tone3000, "download", lambda *args, **kwargs: [{
+        "id": 1902, "tone_id": 19, "model_url": "custom",
+        "name": "custom.nam", "model_json": {"architecture": "custom"},
+        "local_path": str(library.TONES_DIR / "custom.nam"),
+    }])
+
+    assert library.import_tone(19, quiet=True) is None
+    assert library.list_tones() == []
+
+
+def test_preset_draft_rejects_unsupported_model_reference(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    custom = library.TONES_DIR / "custom.nam"
+    custom.write_bytes(b"custom")
+    with library.connect() as conn:
+        library.upsert_model(conn, {
+            "id": 1003, "tone_id": 19, "model_url": "custom",
+            "name": custom.name, "architecture": "custom",
+            "local_path": str(custom),
+        })
+    library.chain_set({"model": amp["local_path"]})
+    preset = library.preset_save("draft-boundary")
+
+    with pytest.raises(ValueError, match="unsupported A2/IR"):
+        library.preset_update_draft_by_id(
+            preset["id"],
+            {"slots": [{"model_id": 1003, "path": str(custom)}]},
+        )
+
+
+def test_legacy_preset_with_unsupported_registered_model_is_hidden(tmp_path):
+    _put_models(tmp_path)
+    custom = library.TONES_DIR / "custom.nam"
+    custom.write_bytes(b"custom")
+    with library.connect() as conn:
+        library.upsert_model(conn, {
+            "id": 1003, "tone_id": 19, "model_url": "custom",
+            "name": custom.name, "architecture": "custom",
+            "local_path": str(custom),
+        }, commit=False)
+        conn.execute(
+            "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'now', 'now')",
+            ("legacy-unsupported", "", json.dumps({
+                "slots": [{"model_id": 1003, "path": str(custom)}],
+                "gain": 1.0, "master": 1.0, "quality": 1.0,
+            })),
+        )
+        conn.commit()
+
+    assert library.preset_get("legacy-unsupported") is None
+    assert all(p["name"] != "legacy-unsupported"
+               for p in library.preset_list())
+
+
 def test_import_tone_mocked(monkeypatch, capsys):
     downloaded = [
         {"id": 51, "tone_id": 19, "model_url": "u1", "model_json": {"architecture": "SlimmableContainer"},
          "local_path": "data/tones/19-01.nam"},
         {"id": 52, "tone_id": 19, "model_url": "u2", "model_json": None,
          "local_path": "data/tones/19-01.wav"},
+        {"id": 53, "tone_id": 19, "model_url": "u3",
+         "model_json": {"architecture": "custom"},
+         "local_path": "data/tones/19-custom.nam"},
     ]
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
     monkeypatch.setattr(tone3000, "download",
@@ -700,7 +890,17 @@ def test_import_ir_downloads_wav(monkeypatch):
 
 def test_cli_roundtrip(capsys, monkeypatch):
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
-    monkeypatch.setattr(tone3000, "download", lambda *a, **kw: [])
+    def fake_download(*_args, **kwargs):
+        if not kwargs.get("return_paths"):
+            return 1
+        return [{
+            "id": 1903, "tone_id": 19, "model_url": "u1903",
+            "name": "roundtrip.nam",
+            "model_json": {"architecture": "SlimmableContainer"},
+            "local_path": "data/tones/roundtrip.nam",
+        }]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
     assert library.main(["tone", "list"]) == 0
     assert "No imported tones" in capsys.readouterr().out
     library.main(["tone", "import", "19"])
@@ -726,10 +926,28 @@ def test_cli_reports_the_frozen_release_version(capsys):
 
 
 def test_cli_search_json(capsys, monkeypatch):
-    monkeypatch.setattr(tone3000, "search", lambda q, **kw: [dict(SAMPLE)])
+    hit = dict(SAMPLE)
+    hit.update({
+        "a1_models_count": 4,
+        "a2_models_count": 2,
+        "custom_models_count": 3,
+        "irs_count": 1,
+        "models_count": 10,
+        "models": [
+            {"id": 1, "architecture_version": "2", "name": "good.nam"},
+            {"id": 2, "architecture": "custom", "name": "bad.nam"},
+        ],
+    })
+    monkeypatch.setattr(tone3000, "search", lambda q, **kw: [hit])
     library.main(["tone", "search", "fender", "--json"])
     out = capsys.readouterr().out
-    assert json.loads(out)[0]["id"] == 19
+    payload = json.loads(out)[0]
+    assert payload["id"] == 19
+    assert payload["supported_models_count"] == 3
+    assert "a1_models_count" not in payload
+    assert "custom_models_count" not in payload
+    assert "models_count" not in payload
+    assert [model["id"] for model in payload["models"]] == [1]
 
 
 # ---- presets --------------------------------------------------------------
@@ -1008,8 +1226,10 @@ def test_top_favorites_attaches_usernames(monkeypatch):
     def fake_get(url, **params):
         if "tones_counts" in url:
             selects.append(params.get("select", ""))
-            return [{"id": 1, "title": "T1", "user_id": "u1"},
-                    {"id": 2, "title": "T2", "user_id": "u2"}]
+            return [{"id": 1, "title": "T1", "user_id": "u1",
+                     "a2_models_count": 1},
+                    {"id": 2, "title": "T2", "user_id": "u2",
+                     "irs_count": 1}]
         if "users" in url:
             assert "in.(" in params.get("id", ""), "应使用批量 in 过滤"
             return [{"id": "u1", "username": "alice", "avatar_url": "a"},
@@ -1133,6 +1353,13 @@ def test_chain_paths_relative_on_write_absolute_on_read(monkeypatch, tmp_path):
     p = tmp_path / "data" / "tones" / "1-x" / "A.nam"
     p.parent.mkdir(parents=True)
     p.write_bytes(b"amp")
+    with library.connect() as conn:
+        library.upsert_tone(conn, {"id": 1, "title": "T", "gear": "amp"})
+        library.upsert_model(conn, {
+            "id": 1001, "tone_id": 1, "model_url": "u",
+            "name": p.name, "architecture": "SlimmableContainer",
+            "local_path": str(p),
+        })
     library.chain_set({"model": str(p), "gain": 1.0})
     raw = json.loads((tmp_path / "live_chain.json").read_text())
     assert raw["slots"] == [{"path": "data/tones/1-x/A.nam"}]

@@ -163,22 +163,25 @@ def test_login_reports_callback_port_error(monkeypatch):
 def test_search_uses_authenticated_official_request(monkeypatch):
     monkeypatch.setenv("TONE3000_ACCESS_TOKEN", "access-token")
     monkeypatch.setattr(tone3000, "_MIN_REQUEST_INTERVAL", 0)
-    captured = {}
+    captured = []
 
     def fake_open_json(request):
-        captured["request"] = request
+        captured.append(request)
         return {"data": [], "total": 0, "total_pages": 0}
 
     monkeypatch.setattr(tone3000, "_open_json", fake_open_json)
     assert tone3000.search("plexi", page_size=10) == []
 
-    request = captured["request"]
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+    assert len(captured) == 2
+    queries = [urllib.parse.parse_qs(urllib.parse.urlparse(
+        request.full_url).query) for request in captured]
+    query = queries[0]
     assert query["query"] == ["plexi"]
     assert query["page"] == ["1"]
     assert query["page_size"] == ["25"]
-    assert request.get_header("Authorization") == "Bearer access-token"
-    headers = {key.lower(): value for key, value in request.header_items()}
+    assert [item.get("architecture") for item in queries] == [["2"], None]
+    assert captured[0].get_header("Authorization") == "Bearer access-token"
+    headers = {key.lower(): value for key, value in captured[0].header_items()}
     assert headers["content-type"] == "application/json"
 
 
@@ -291,27 +294,130 @@ def test_api_backs_off_when_rate_limit_has_no_retry_after(monkeypatch):
     assert delays == [0.5]
 
 
-def test_search_composes_official_25_item_pages(monkeypatch):
+def test_search_includes_supported_architectures_and_hides_a1_only(
+        monkeypatch):
     calls = []
 
-    def fake_get(url, **params):
-        assert url == f"{tone3000.API}/tones/search"
-        calls.append(params)
-        first = (params["page"] - 1) * 25
+    def row(tone_id, *, a1=0, a2=0, custom=0, ir=0):
         return {
-            "data": [{"id": first + offset, "title": f"Tone {first + offset}"}
-                     for offset in range(1, 26)],
-            "total": 80,
-            "total_pages": 4,
+            "id": tone_id, "title": f"Tone {tone_id}",
+            "a1_models_count": a1, "a2_models_count": a2,
+            "custom_models_count": custom, "irs_count": ir,
+            "models_count": a1 + a2 + custom + ir,
         }
 
-    monkeypatch.setattr(tone3000, "_get", fake_get)
-    rows = tone3000.search("plexi", page_size=40, page_number=1)
-    assert [row["id"] for row in rows] == list(range(1, 41))
-    assert len(calls) == 2
-    assert [call["page"] for call in calls] == [1, 2]
-    assert all(call["page_size"] == 25 for call in calls)
-    assert all(row["total_count"] == 80 for row in rows)
+    def fake_post(_url, body):
+        calls.append(body)
+        source = body["architecture_filter"]
+        if source == "2":
+            data = [row(1, a2=1), row(3, a1=1, a2=1), row(2, custom=1)]
+        else:
+            data = [row(4, ir=1), row(5, a1=1), row(6, custom=1)]
+        return {"data": data, "total": len(data), "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+    rows = tone3000.search("keeley", page_size=20)
+
+    assert {row["id"] for row in rows} == {1, 3, 4}
+    assert len(rows) == 3
+    assert all(row["total_count"] == 3 for row in rows)
+    assert [call["architecture_filter"] for call in calls] == ["2", None]
+
+
+def test_ir_search_does_not_send_a_nam_architecture(monkeypatch):
+    calls = []
+
+    def fake_post(_url, body):
+        calls.append(body)
+        return {"data": [{"id": 7, "irs_count": 1}],
+                "total": 1, "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+    rows = tone3000.search("keeley", page_size=10, gear_filters=["ir"])
+
+    assert [row["id"] for row in rows] == [7]
+    assert len(calls) == 1
+    assert calls[0]["architecture_filter"] is None
+    assert calls[0]["gear_filters"] == ("ir",)
+
+
+def test_search_keeps_a2_and_ir_rows_when_supported_counts_are_missing(
+        monkeypatch):
+    calls = []
+
+    def fake_post(_url, body):
+        calls.append(body)
+        if body["architecture_filter"] == "2":
+            return {"data": [{"id": 11, "title": "A2 without count"}],
+                    "total_pages": 1}
+        return {"data": [{"id": 12, "title": "IR without count"}],
+                "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    rows = tone3000.search("keeley", page_size=10)
+
+    assert [row["id"] for row in rows] == [11, 12]
+    assert [row["total_count"] for row in rows] == [2, 2]
+    assert [call["architecture_filter"] for call in calls] == ["2", None]
+
+
+def test_search_rejects_contradictory_ir_metadata_without_counts(monkeypatch):
+    def fake_post(_url, body):
+        if body["architecture_filter"] == "2":
+            return {"data": [{"id": 21, "format": "ir"}],
+                    "total_pages": 1}
+        return {"data": [
+            {"id": 22, "format": "nam", "gear": "cab"},
+            {"id": 23, "gear": "cab"},
+        ], "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    assert [row["id"] for row in tone3000.search("mixed", page_size=10)] == [23]
+    assert not tone3000._has_supported_tone_models({"id": 24, "gear": "cab"})
+
+
+def test_top_rejects_cab_rows_without_ir_evidence(monkeypatch):
+    monkeypatch.setattr(
+        tone3000, "_get",
+        lambda _url, **_params: [
+            {"id": 31, "gear": "cab"},
+            {"id": 32, "gear": "cab", "format": "ir"},
+        ])
+    monkeypatch.setattr(tone3000, "_attach_usernames",
+                        lambda rows, **_kwargs: None)
+
+    assert [row["id"] for row in tone3000.top(10)] == [32]
+
+
+def test_search_composes_25_item_pages_across_architectures(monkeypatch):
+    calls = []
+
+    def fake_post(_url, body):
+        calls.append(body)
+        page = body["page_number"]
+        source = body["architecture_filter"]
+        base = {"2": 0, None: 1000}[source]
+        first = base + (page - 1) * 25
+        data = [{
+            "id": first + offset, "title": f"Tone {first + offset}",
+            "a2_models_count": 1 if source == "2" else 0,
+            "irs_count": 1 if source is None else 0,
+        } for offset in range(25)]
+        return {"data": data, "total": 50, "total_pages": 2}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+    first_page = tone3000.search("plexi", page_size=40, page_number=1)
+    second_page = tone3000.search("plexi", page_size=40, page_number=2)
+
+    first_ids = {row["id"] for row in first_page}
+    second_ids = {row["id"] for row in second_page}
+    assert len(first_ids) == len(second_ids) == 40
+    assert first_ids.isdisjoint(second_ids)
+    assert all(row["total_count"] == 100 for row in first_page)
+    assert all(row["total_count"] == 100 for row in second_page)
+    assert len(calls) == 8  # 2 remote pages x 2 sources x 2 logical pages
 
 
 def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):
@@ -319,7 +425,8 @@ def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):
 
     def fake_get(url, **params):
         calls.append((url, params))
-        return [{"id": 1, "user_id": "u1", "downloads_count": 10}]
+        return [{"id": 1, "user_id": "u1", "downloads_count": 10,
+                 "a2_models_count": 1}]
 
     monkeypatch.setattr(tone3000, "_get", fake_get)
     monkeypatch.setattr(tone3000, "_attach_usernames",
@@ -342,6 +449,25 @@ def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):
     )]
 
 
+def test_top_fills_page_after_filtering_unsupported_tones(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        calls.append(params)
+        if params.get("offset") == 2:
+            return [{"id": 4, "a2_models_count": 1}]
+        return [{"id": 1, "custom_models_count": 2},
+                {"id": 3, "a2_models_count": 1}]
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+    monkeypatch.setattr(tone3000, "_attach_usernames",
+                        lambda rows, **_kwargs: None)
+
+    assert [row["id"] for row in tone3000.top(2)] == [3, 4]
+    assert calls[0]["limit"] == 2
+    assert calls[1]["offset"] == 2
+
+
 def test_models_honor_official_total_pages(monkeypatch):
     calls = []
 
@@ -359,6 +485,172 @@ def test_models_honor_official_total_pages(monkeypatch):
     assert [row["id"] for row in rows] == [1, 2]
     assert [call["architecture"] for call in calls] == ["2", "2"]
     assert [call["page_size"] for call in calls] == [300, 300]
+
+
+def test_a2_model_fetch_rejects_non_nam_files_and_formats(monkeypatch):
+    def fake_get(_url, **params):
+        assert params["architecture"] == "2"
+        return {
+            "data": [
+                {"id": 1, "architecture_version": "2",
+                 "name": "good.nam"},
+                {"id": 2, "architecture_version": "2",
+                 "name": "wrong.wav"},
+                {"id": 3, "architecture_version": "2",
+                 "name": "wrong.aida-x"},
+                {"id": 4, "architecture_version": "2",
+                 "format": "proteus", "name": "wrong.nam"},
+            ],
+            "total_pages": 1,
+        }
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    assert [row["id"] for row in tone3000.models(9, a2_only=True)] == [1]
+
+
+def test_a2_model_fetch_keeps_architectureless_nam_rows_from_a2_view(monkeypatch):
+    def fake_get(_url, **params):
+        if params.get("architecture") == "2":
+            return {
+                "data": [
+                    {"id": 1, "name": "good.nam"},
+                    {"id": 2, "format": "nam", "name": "good-2.nam"},
+                    {"id": 3, "name": "wrong.wav"},
+                ],
+                "total_pages": 1,
+            }
+        # The unfiltered endpoint can repeat an architectureless A2 row. The
+        # A2 source must win so the row is not lost to fail-closed inference.
+        return {"data": [{"id": 1, "name": "good.nam"}], "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    assert [row["id"] for row in tone3000.models(9, a2_only=False)] == [1, 2]
+
+
+def test_complete_model_fetch_keeps_only_a2_and_ir(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        assert url == f"{tone3000.API}/models"
+        calls.append(params)
+        if params.get("architecture") == "2":
+            rows = [{"id": 1, "architecture_version": "2",
+                     "name": "modern.nam"}]
+        else:
+            rows = [
+                {"id": 1, "architecture_version": "2", "name": "modern.nam"},
+                {"id": 2, "architecture": "WaveNet", "name": "legacy.nam"},
+                {"id": 3, "architecture": "custom", "name": "custom.nam"},
+                {"id": 4, "architecture": "IR", "name": "cab.wav"},
+                {"id": 5, "architecture": "AIDA-X", "name": "aida.nam"},
+                {"id": 6, "architecture": "AA-SNAPSHOT", "name": "aa.nam"},
+                {"id": 7, "architecture": "Proteus", "name": "proteus.nam"},
+                {"id": 8, "architecture": "FutureRuntime", "name": "future.nam"},
+                {"id": 9, "architecture_version": "2",
+                 "architecture": "custom", "name": "conflict.nam"},
+            ]
+        return {"data": rows, "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+    rows = tone3000.models(9, a2_only=False)
+
+    assert [row["id"] for row in rows] == [1, 4]
+    assert [call.get("architecture") for call in calls] == [None, "2"]
+
+
+def test_architectureless_ir_model_uses_parent_tone_context(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        calls.append((url, params))
+        if url == f"{tone3000.API}/models":
+            if params.get("architecture") == "2":
+                return {"data": [], "total_pages": 1}
+            return {"data": [{"id": 1, "tone_id": 9}], "total_pages": 1}
+        assert url == f"{tone3000.API}/tones/9"
+        return {"id": 9, "gear": "cab", "format": "ir"}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    rows = tone3000.models(9, a2_only=False)
+    assert [row["id"] for row in rows] == [1]
+    assert rows[0]["architecture"] == "IR"
+    assert (f"{tone3000.API}/tones/9", {}) in calls
+
+
+def test_supported_model_classifier_rejects_other_formats_and_unknown_ir():
+    assert tone3000.is_supported_model(
+        {"architecture_version": "2", "name": "modern.nam"})
+    assert tone3000.is_supported_model(
+        {"architecture": "IR", "name": "cab.wav"})
+    assert tone3000.is_supported_model(
+        {"name": "cab.wav"}, {"format": "ir", "gear": "cab"})
+
+    for model in (
+            {"architecture": "WaveNet", "name": "legacy.nam"},
+            {"architecture": "custom", "name": "custom.nam"},
+            {"architecture": "Proteus", "name": "capture.wav"},
+            {"architecture": "FutureRuntime", "name": "capture.wav"},
+            {"architecture_version": "2", "format": "aida-x"}):
+        assert not tone3000.is_supported_model(model, {"gear": "cab"})
+
+    assert not tone3000.is_supported_model(
+        {"architecture": "FutureRuntime"}, {"gear": "cab", "format": "ir"})
+
+
+@pytest.mark.parametrize("model", [
+    {"architecture_version": "2", "architecture": "custom",
+     "name": "conflict.nam"},
+    {"architecture_version": "2", "architecture": "WaveNet",
+     "name": "conflict.nam"},
+    {"architecture_version": "2", "architecture": "Proteus",
+     "name": "conflict.nam"},
+    {"architecture_version": "2", "architecture": "FutureRuntime",
+     "name": "conflict.nam"},
+    {"architecture_version": "2", "architecture": "IR",
+     "name": "conflict.nam"},
+])
+def test_supported_model_classifier_rejects_conflicting_architecture_fields(model):
+    assert not tone3000.is_supported_model(model)
+
+
+def test_search_uses_the_requested_supported_count_for_each_architecture_view(
+        monkeypatch):
+    def fake_post(_url, body):
+        if body["architecture_filter"] == "2":
+            return {"data": [
+                {"id": 1, "a2_models_count": 0, "irs_count": 2},
+                {"id": 2, "a2_models_count": 1, "irs_count": 0},
+            ], "total_pages": 1}
+        return {"data": [
+            {"id": 3, "a2_models_count": 2, "irs_count": 0},
+            {"id": 4, "a2_models_count": 1, "irs_count": 1},
+        ], "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    assert [row["id"] for row in tone3000.search("mixed", page_size=10)] == [
+        2, 4]
+    assert [row["id"] for row in tone3000.search(
+        "mixed", page_size=10, gear_filters=["ir"])] == [4]
+
+
+def test_supported_model_count_prefers_explicit_model_rows():
+    tone = {
+        "a2_models_count": 9,
+        "irs_count": 2,
+        "local_dir": "data/tones/1-pack",
+        "models": [
+            {"architecture_version": "2", "name": "amp.nam"},
+            {"architecture": "IR", "name": "cab.wav"},
+            {"architecture": "WaveNet", "name": "legacy.nam"},
+            {"architecture": "custom", "name": "custom.nam"},
+        ],
+    }
+
+    assert tone3000.supported_tone_model_count(tone) == 2
 
 
 def test_top_creators_composes_ten_item_api_pages(monkeypatch):
@@ -539,7 +831,8 @@ def test_nested_user_fields_fill_empty_compatibility_values():
 
 def test_model_download_refreshes_bearer_after_401(monkeypatch, tmp_path):
     monkeypatch.setattr(tone3000, "models", lambda *_args, **_kwargs: [{
-        "id": 1, "model_url": "https://cdn.example/model.nam", "name": "model.nam"
+        "id": 1, "model_url": "https://cdn.example/model.nam", "name": "model.nam",
+        "architecture_version": "2"
     }])
     tokens = iter(["stale", "fresh"])
     seen = []
@@ -578,8 +871,11 @@ def test_tone_by_id_uses_official_resource_shape(monkeypatch):
         }
 
     monkeypatch.setattr(tone3000, "_get", fake_get)
-    monkeypatch.setattr(tone3000, "models",
-                        lambda *_args, **_kwargs: [{"name": "Clean.nam"}])
+    monkeypatch.setattr(
+        tone3000, "models",
+        lambda *_args, **_kwargs: [{
+            "name": "Clean.nam", "architecture_version": "2",
+        }])
 
     row = tone3000.tone_by_id(7)
 

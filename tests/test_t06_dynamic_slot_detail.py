@@ -114,7 +114,7 @@ def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
     }
     tone = {
         "id": 10, "title": "Slot Tone", "gear": "amp",
-        "username": "creator", "models_count": 2,
+        "username": "creator", "models_count": 2, "a2_models_count": 2,
         "models": [local_model],
     }
     remote_models = [
@@ -423,7 +423,7 @@ def test_local_pack_marks_unloaded_models_without_fetching(monkeypatch, tmp_path
     }
     tone = {
         "id": 10, "title": "Local Tone", "gear": "amp",
-        "username": "creator", "models_count": 2,
+        "username": "creator", "models_count": 2, "a2_models_count": 2,
         "models": [local_model],
     }
     remote_models = [
@@ -464,8 +464,9 @@ def test_local_pack_marks_unloaded_models_without_fetching(monkeypatch, tmp_path
 
 def test_empty_local_description_pack_does_not_fetch(monkeypatch):
     tone = {
-        "id": 10, "title": "Empty Local Metadata", "gear": "amp",
-        "username": "creator", "models_count": 2, "models": [],
+            "id": 10, "title": "Empty Local Metadata", "gear": "amp",
+            "username": "creator", "models_count": 2, "a2_models_count": 2,
+            "models": [],
     }
     remote_calls = []
     monkeypatch.setattr(

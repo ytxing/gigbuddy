@@ -39,6 +39,15 @@ Every application connection enables `PRAGMA foreign_keys=ON` and sets
 `PRAGMA busy_timeout=5000`. The local deployment intentionally keeps SQLite's
 rollback journal until a measured TUI/import workload justifies switching to WAL.
 
+## GigBuddy visibility boundary
+
+The database preserves TONE3000's raw architecture counts for provenance, but
+GigBuddy's usable asset set is narrower: only NAM A2
+(`architecture_version=2`) and IR models are exposed, downloaded, counted, or
+resolved into a chain. A1, Custom, AIDA-X, AA-SNAPSHOT, Proteus, and unknown
+architectures are hidden. A mixed Pack may therefore have a larger raw
+`models_count` than the number of rows shown in its Pack view.
+
 ## models
 
 | column | notes |

@@ -7,7 +7,7 @@ user's config directory; no server-side secret is required for this desktop
 application.
 
 CLI:
-    tone3000.py search <query>              # 关键词搜索（全部架构）
+    tone3000.py search <query>              # 关键词搜索（A2 + IR）
     tone3000.py top [limit]                 # 全站下载排行
     tone3000.py models <tone_id>            # 列出 tone 的 A2 模型
     tone3000.py download <tone_id> <dest>   # 下载全部 A2 .nam 到目录
@@ -465,13 +465,36 @@ def _canonical_tones(rows):
     return [_canonical_tone(row) for row in _response_rows(rows)]
 
 
+_A2_ARCHITECTURE_TOKENS = frozenset({"2", "a2", "slimmablecontainer"})
+_A1_ARCHITECTURE_TOKENS = frozenset({"1", "a1", "wave", "wavenet"})
+_IR_ARCHITECTURE_TOKENS = frozenset({"ir"})
+
+
+def _architecture_family(model: dict) -> str | None:
+    """Resolve both architecture fields, rejecting contradictory metadata."""
+    if not isinstance(model, dict):
+        return None
+    families = []
+    for key in ("architecture_version", "architecture"):
+        token = str(model.get(key) or "").strip().casefold()
+        if not token:
+            continue
+        if token in _A2_ARCHITECTURE_TOKENS:
+            families.append("a2")
+        elif token in _A1_ARCHITECTURE_TOKENS:
+            families.append("a1")
+        elif token in _IR_ARCHITECTURE_TOKENS:
+            families.append("ir")
+        else:
+            families.append("unknown")
+    if not families:
+        return None
+    return families[0] if len(set(families)) == 1 else "conflict"
+
+
 def _is_a2_model(model: dict) -> bool:
-    """Accept the documented architecture version and the legacy token."""
-    version = str(model.get("architecture_version") or "").strip().casefold()
-    if version:
-        return version in {"2", "a2"}
-    token = str(model.get("architecture") or "").strip().casefold()
-    return token in {"2", "a2", "slimmablecontainer"}
+    """Accept A2 only when all explicit architecture fields agree."""
+    return _architecture_family(model) == "a2"
 
 
 def _is_a1_model(model: dict) -> bool:
@@ -481,9 +504,106 @@ def _is_a1_model(model: dict) -> bool:
     values) for A1 rows. Callers that fetch a full model set must drop these
     rows so A1 files are never downloaded, browsed, or shown.
     """
-    token = str(model.get("architecture_version")
-                or model.get("architecture") or "").strip().casefold()
-    return token in {"1", "a1", "wave", "wavenet"}
+    return _architecture_family(model) == "a1"
+
+
+_IR_SUFFIXES = frozenset({".wav", ".wave", ".flac", ".aif", ".aiff"})
+_NAM_SUFFIXES = frozenset({".nam", ".aida-x", ".aa-snapshot", ".proteus"})
+_SUPPORTED_NAM_SUFFIXES = frozenset({".nam"})
+_IR_GEAR_TOKENS = frozenset({"cab", "space", "ir"})
+_SUPPORTED_TONE_FORMATS = frozenset({"nam", "ir"})
+
+
+def _has_supported_formats(model: dict, tone: dict | None = None) -> bool:
+    """Reject explicit non-NAM/non-IR formats before architecture inference."""
+    model = model if isinstance(model, dict) else {}
+    tone = tone if isinstance(tone, dict) else {}
+    model_format = str(model.get("format") or "").strip().casefold()
+    tone_format = str(
+        tone.get("format") or tone.get("platform") or ""
+    ).strip().casefold()
+    return all(not value or value in _SUPPORTED_TONE_FORMATS
+               for value in (model_format, tone_format))
+
+
+def _model_file_suffix(model: dict) -> str:
+    """Return a model's source/file suffix without trusting its URL query."""
+    for key in ("local_path", "name", "model_url", "url"):
+        raw = str(model.get(key) or "").strip()
+        if not raw:
+            continue
+        source = raw.split("?", 1)[0].replace("\\", "/")
+        suffix = PurePosixPath(source).suffix.casefold()
+        if suffix:
+            return suffix
+    return ""
+
+
+def _is_ir_model(model: dict, tone: dict | None = None) -> bool:
+    """Recognize an IR row when TONE3000 leaves architecture unset."""
+    model = model if isinstance(model, dict) else {}
+    tone = tone if isinstance(tone, dict) else {}
+    if not _has_supported_formats(model, tone):
+        return False
+    model_format = str(model.get("format") or "").strip().casefold()
+    tone_format = str(tone.get("format") or "").strip().casefold()
+    if not tone_format and str(tone.get("platform") or "").strip().casefold() == "ir":
+        tone_format = "ir"
+    family = _architecture_family(model)
+    if family == "ir":
+        return True
+    if family is not None:
+        # A non-empty architecture is authoritative. In particular, a custom
+        # or future NAM architecture on a CAB tone must not be guessed as IR.
+        return False
+
+    explicit_format = model_format or tone_format
+    if explicit_format:
+        return explicit_format == "ir"
+
+    suffix = _model_file_suffix(model)
+    if suffix in _IR_SUFFIXES:
+        return True
+    if suffix in _NAM_SUFFIXES:
+        return False
+
+    return str(tone.get("gear") or "").strip().casefold() in _IR_GEAR_TOKENS
+
+
+def is_supported_model(model: dict, tone: dict | None = None) -> bool:
+    """Return whether GigBuddy can expose or load this model.
+
+    GigBuddy intentionally supports only NAM A2 and IR. Unknown model rows
+    fail closed so a new architecture cannot silently enter the UI or import
+    path before the product explicitly supports it.
+    """
+    model = model if isinstance(model, dict) else {}
+    tone = tone if isinstance(tone, dict) else {}
+    if not _has_supported_formats(model, tone):
+        return False
+    suffix = _model_file_suffix(model)
+    if suffix and suffix not in (_SUPPORTED_NAM_SUFFIXES | _IR_SUFFIXES):
+        return False
+
+    family = _architecture_family(model)
+    if family in {"a1", "unknown", "conflict"}:
+        return False
+    is_a2 = family == "a2"
+    is_ir = family == "ir" or (family is None and _is_ir_model(model, tone))
+    model_format = str(model.get("format") or "").strip().casefold()
+    tone_format = str(
+        tone.get("format") or tone.get("platform") or ""
+    ).strip().casefold()
+    if is_a2 and (model_format == "ir"
+                  or (not model_format and tone_format == "ir")):
+        return False
+    if is_ir and model_format == "nam":
+        return False
+    if suffix in _SUPPORTED_NAM_SUFFIXES:
+        return is_a2
+    if suffix in _IR_SUFFIXES:
+        return is_ir
+    return is_a2 or is_ir
 
 
 def verified_users() -> set[str]:
@@ -686,7 +806,8 @@ def _post(url, body):
     """POST helper; search bodies are translated to official REST query params."""
     if url == f"{API}/tones/search":
         gears = list(body.get("gear_filters") or ())
-        format_filter = "ir" if "ir" in gears else None
+        format_filter = ("ir" if any(gear in _IR_GEAR_FILTERS
+                                      for gear in gears) else None)
         gears = [gear for gear in gears if gear != "ir"]
         params = {
             "query": body.get("query_term", ""),
@@ -698,38 +819,162 @@ def _post(url, body):
             "tags": "_".join(body.get("tag_names") or ()),
             "makes": "_".join(body.get("make_names") or ()),
             "creators": ",".join(body.get("usernames") or ()),
+            "architecture": body.get("architecture_filter"),
         }
         return _get(url, **params)
     return _request_json(url, method="POST", body=body,
                          authenticated=url.startswith(API))
 
 
-def search(query="", page_size=50, order_by="trending", gear_filters=None,
-           usernames=None, tag_names=None, make_names=None, page_number=1):
-    """Search the official paginated tone catalog.
+_IR_GEAR_FILTERS = frozenset({"cab", "space", "ir"})
+_SUPPORTED_MODEL_COUNTS = ("a2_models_count", "irs_count")
 
-    TONE3000 currently caps one response at 25 rows. Keep the caller-facing
-    ``page_size`` contract by composing consecutive official pages here.
-    """
-    requested = max(0, int(page_size))
-    if requested == 0:
-        return []
-    remote_page_size = 25
-    logical_page = max(1, int(page_number))
-    start_offset = (logical_page - 1) * requested
-    first_page = start_offset // remote_page_size + 1
-    skip = start_offset % remote_page_size
-    pages = (skip + requested + remote_page_size - 1) // remote_page_size
+
+def _has_supported_tone_models(
+        row: dict, *, architecture_filter: str | None = None,
+        gear_filters=None) -> bool:
+    """Keep tones with at least one model the product can expose."""
+    row = row if isinstance(row, dict) else {}
+    format_token = str(
+        row.get("format") or row.get("platform") or ""
+    ).strip().casefold()
+    if format_token and format_token not in _SUPPORTED_TONE_FORMATS:
+        return False
+    models = row.get("models")
+    if isinstance(models, (list, tuple)):
+        return any(
+            is_supported_model(model, row)
+            for model in models if isinstance(model, dict)
+        )
+    architecture_token = str(architecture_filter or "").strip().casefold()
+    source_gears = {
+        str(value).strip().casefold() for value in (gear_filters or ()) if value
+    }
+    # A source-specific aggregate must prove the architecture represented by
+    # that source. This matters for mixed Packs and for exact ``--gear ir``
+    # searches: a positive A2 count alone must not make an IR-only view visible,
+    # and vice versa.
+    if architecture_token in {"2", "a2"}:
+        if "a2_models_count" in row:
+            try:
+                return int(row.get("a2_models_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        if any(key in row for key in _SUPPORTED_MODEL_COUNTS):
+            return False
+    if source_gears & _IR_GEAR_FILTERS and architecture_filter is None:
+        if "irs_count" in row:
+            try:
+                return int(row.get("irs_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        if any(key in row for key in _SUPPORTED_MODEL_COUNTS):
+            return False
+    supported_counts = []
+    for key in _SUPPORTED_MODEL_COUNTS:
+        if key not in row:
+            continue
+        try:
+            supported_counts.append(int(row.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    if supported_counts:
+        return any(value > 0 for value in supported_counts)
+    # The A2 search view is already an authoritative server-side filter. Do
+    # not drop a valid result merely because an older response omitted the
+    # aggregate a2_models_count field.
+    if str(architecture_filter or "").strip().casefold() in {"2", "a2"}:
+        return format_token in {"", "nam"}
+    if format_token == "ir":
+        return True
+    # A NAM row cannot be admitted to the IR view just because its gear is
+    # cab/space. The server-side filter is useful evidence only when the row
+    # does not carry contradictory format metadata.
+    if format_token == "nam":
+        return False
+    # _post sends format=ir for CAB/SPACE/IR sources. Trust that explicit
+    # server-side view when older responses omit both format and irs_count;
+    # the model-level classifier still guards the Pack and download paths.
+    if source_gears & _IR_GEAR_FILTERS:
+        return True
+    return False
+
+
+def supported_tone_model_count(row: dict | None) -> int:
+    """Return the product-visible A2 plus IR count for one Tone row."""
+    row = row if isinstance(row, dict) else {}
+    models = row.get("models")
+    has_local_model_evidence = any(
+        isinstance(model, dict) and model.get("local_path")
+        for model in (models or ())
+    )
+    model_count = None
+    if isinstance(models, (list, tuple)) and models:
+        model_count = sum(
+            is_supported_model(model, row)
+            for model in models if isinstance(model, dict)
+        )
+        if has_local_model_evidence:
+            # A local pack's model list is the downloaded subset, while the
+            # aggregate A2/IR counters describe the complete remote pack.
+            # Keep the larger supported value so partial packs show missing
+            # rows without allowing A1/Custom counters into the total.
+            aggregate = 0
+            for key in _SUPPORTED_MODEL_COUNTS:
+                try:
+                    aggregate += int(row.get(key) or 0)
+                except (TypeError, ValueError):
+                    continue
+            return max(model_count, aggregate)
+        if row.get("local_dir"):
+            # An imported full-detail response has model-level evidence. Prefer
+            # it over aggregate counters, which may include unsupported rows.
+            return model_count
+    counts = []
+    for key in _SUPPORTED_MODEL_COUNTS:
+        if key not in row:
+            continue
+        try:
+            counts.append(int(row.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    total = sum(counts)
+    if total:
+        return total
+    return model_count or 0
+
+
+def _search_sources(gear_filters):
+    """Return the supported catalog views needed for one search."""
+    gears = tuple(str(value).strip().casefold()
+                  for value in (gear_filters or ()) if value)
+    if not gears:
+        return [("2", None), (None, ("ir",))]
+
+    nam_gears = tuple(value for value in gears
+                      if value not in _IR_GEAR_FILTERS)
+    ir_gears = tuple(value for value in gears
+                     if value in _IR_GEAR_FILTERS)
+    sources = []
+    if nam_gears:
+        sources.append(("2", nam_gears))
+    if ir_gears:
+        sources.append((None, ir_gears))
+    return sources
+
+
+def _fetch_search_prefix(query, limit, order_by, gear_filters, usernames,
+                         tag_names, make_names, architecture_filter):
+    """Fetch a bounded supported prefix from one official catalog view."""
     rows: list[dict] = []
     total = None
-    total_pages = None
-    for offset in range(pages):
+    page = 1
+    exhausted = False
+    while len(rows) < limit:
         response = _post(f"{API}/tones/search", {
-            # Keep these names as the adapter contract used by legacy callers;
-            # _post translates them to the documented REST query parameters.
             "query_term": query,
-            "page_number": first_page + offset,
-            "page_size": remote_page_size,
+            "page_number": page,
+            "page_size": 25,
             "order_by": order_by,
             "tag_names": tag_names,
             "make_names": make_names,
@@ -737,32 +982,124 @@ def search(query="", page_size=50, order_by="trending", gear_filters=None,
             "is_calibrated": False,
             "size_filters": None,
             "usernames": usernames,
-            "architecture_filter": None,
+            "architecture_filter": architecture_filter,
         })
         if isinstance(response, dict):
             page_rows = response.get("data") or []
             total = response.get("total", total)
-            total_pages = response.get("total_pages", total_pages)
+            total_pages = response.get("total_pages")
         else:
             page_rows = response or []
+            total_pages = None
         if not isinstance(page_rows, list):
             page_rows = []
-        rows.extend(page_rows)
         if not page_rows:
+            exhausted = True
             break
+        rows.extend(
+            row for row in _canonical_tones(page_rows)
+            if isinstance(row, dict) and _has_supported_tone_models(
+                row, architecture_filter=architecture_filter,
+                gear_filters=gear_filters)
+        )
         if total_pages is not None:
             try:
-                if first_page + offset >= int(total_pages):
+                if page >= int(total_pages):
+                    exhausted = True
                     break
             except (TypeError, ValueError):
                 pass
-        if len(page_rows) < remote_page_size:
+        if len(page_rows) < 25:
+            exhausted = True
             break
-    if total is not None:
-        for row in rows:
-            if isinstance(row, dict):
-                row["total_count"] = total
-    return _canonical_tones(rows[skip:skip + requested])
+        page += 1
+    return (rows if exhausted else rows[:limit]), total, exhausted
+
+
+def _merge_search_sources(source_rows):
+    """Interleave source rankings while removing mixed-pack duplicates."""
+    merged: list[dict] = []
+    seen: set[int] = set()
+    for index in range(max((len(rows) for rows in source_rows), default=0)):
+        for rows in source_rows:
+            if index >= len(rows):
+                continue
+            row = rows[index]
+            try:
+                tone_id = int(row["id"])
+            except (KeyError, TypeError, ValueError):
+                tone_id = None
+            if tone_id is not None:
+                if tone_id in seen:
+                    continue
+                seen.add(tone_id)
+            merged.append(row)
+    return merged
+
+
+def _fetch_supported_aggregate(fetch, requested: int) -> list[dict]:
+    """Fill a leaderboard page after removing unsupported Tone rows."""
+    visible: list[dict] = []
+    offset = 0
+    seen_ids: set[int] = set()
+    while len(visible) < requested:
+        batch = [_canonical_tone(row) for row in (fetch(offset) or [])
+                 if isinstance(row, dict)]
+        if not batch:
+            break
+        batch_ids = set()
+        for row in batch:
+            try:
+                batch_ids.add(int(row["id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if offset and batch_ids and batch_ids <= seen_ids:
+            break
+        seen_ids.update(batch_ids)
+        visible.extend(row for row in batch if _has_supported_tone_models(row))
+        if len(batch) < requested:
+            break
+        offset += len(batch)
+    return visible[:requested]
+
+
+def search(query="", page_size=50, order_by="trending", gear_filters=None,
+           usernames=None, tag_names=None, make_names=None, page_number=1):
+    """Search the official paginated tone catalog.
+
+    TONE3000's documented default excludes A2 and its architecture filter only
+    accepts one architecture at a time. Search the supported A2 and IR views,
+    then merge and deduplicate the bounded prefixes. A1-only, Custom-only,
+    and other unsupported tones are omitted; mixed packs remain visible with
+    only their usable model counts.
+    """
+    requested = max(0, int(page_size))
+    if requested == 0:
+        return []
+    logical_page = max(1, int(page_number))
+    prefix_limit = logical_page * requested
+    source_rows = []
+    source_exhausted = []
+    for architecture_filter, source_gears in _search_sources(gear_filters):
+        rows, _total, exhausted = _fetch_search_prefix(
+            query, prefix_limit, order_by, source_gears, usernames,
+            tag_names, make_names, architecture_filter)
+        source_rows.append(rows)
+        source_exhausted.append(exhausted)
+
+    merged = _merge_search_sources(source_rows)
+    start_offset = (logical_page - 1) * requested
+    page_rows = merged[start_offset:start_offset + requested]
+    if all(source_exhausted):
+        total = len(merged)
+    else:
+        # The exact union total is not knowable until both catalog views are
+        # exhausted. This lower-bounded hint keeps TUI pagination progressing;
+        # a later exhausted page replaces it with the exact total.
+        total = max(len(merged), prefix_limit + requested)
+    for row in page_rows:
+        row["total_count"] = total
+    return page_rows
 
 
 def top(limit=50):
@@ -770,12 +1107,18 @@ def top(limit=50):
     requested = max(0, int(limit))
     if requested == 0:
         return []
-    rows = _canonical_tones(_get(
-        f"{LEGACY_API}/tones_counts",
-        select=("id,title,description,gear,downloads_count,favorites_count,"
-                "a1_models_count,a2_models_count,custom_models_count,"
-                "irs_count,models_count,created_at,user_id,platform"),
-        order="downloads_count.desc", limit=requested))
+    select = ("id,title,description,gear,downloads_count,favorites_count,"
+              "a1_models_count,a2_models_count,custom_models_count,"
+              "irs_count,models_count,created_at,user_id,platform")
+
+    def fetch(offset):
+        params = dict(select=select, order="downloads_count.desc",
+                      limit=requested)
+        if offset:
+            params["offset"] = offset
+        return _get(f"{LEGACY_API}/tones_counts", **params)
+
+    rows = _fetch_supported_aggregate(fetch, requested)
     _attach_usernames(rows, api=LEGACY_API)
     return rows
 
@@ -811,7 +1154,13 @@ def top_favorites(limit=50, text=None, usernames=None):
         safe = re.sub(r"[*%\\(),]", " ", text).strip()
         if safe:
             params["or"] = f"(title.ilike.*{safe}*,description.ilike.*{safe}*)"
-    rows = _canonical_tones(_get(f"{LEGACY_API}/tones_counts", **params))
+    def fetch(offset):
+        page_params = dict(params)
+        if offset:
+            page_params["offset"] = offset
+        return _get(f"{LEGACY_API}/tones_counts", **page_params)
+
+    rows = _fetch_supported_aggregate(fetch, max(0, int(limit)))
     _attach_usernames(rows, api=LEGACY_API)
     return rows
 
@@ -887,8 +1236,26 @@ def user_stats(username: str) -> dict | None:
     return {**info, "stats": stats}
 
 
-def models(tone_id, a2_only=True):
-    """tone 的全部模型；a2_only=True 时过滤 A2 (SlimmableContainer)。IR 等非 A2 音色传 False
+def _model_has_explicit_architecture(model: dict) -> bool:
+    """Whether a model row carries an architecture token of its own."""
+    if not isinstance(model, dict):
+        return False
+    return any(str(model.get(key) or "").strip()
+               for key in ("architecture_version", "architecture"))
+
+
+def _model_needs_tone_context(model: dict) -> bool:
+    """Whether a model row needs its parent Tone to classify an architectureless IR."""
+    if not isinstance(model, dict):
+        return False
+    if _model_has_explicit_architecture(model) or str(
+            model.get("format") or "").strip():
+        return False
+    return not bool(_model_file_suffix(model))
+
+
+def models(tone_id, a2_only=True, tone=None):
+    """Return A2 models, or A2 plus IR when ``a2_only`` is false.
 
     name 取 models 表顶层字段（TONE3000 网页/zip 下载的文件名即此 name 原样）。
     用 JSONB 投影只取 architecture，不拉全量 model_json（多模型 tone 的全量
@@ -923,13 +1290,15 @@ def models(tone_id, a2_only=True):
         return rows
 
     # The documented default is A1 + Custom and explicitly excludes A2.
-    # Preserve GigBuddy's existing all-model behavior by adding the A2 page
-    # when callers request the complete model set.
+    # Add the A2 page when callers request the complete *supported* set. The
+    # final classifier below removes A1, Custom, and all other architectures.
     architectures = ["2"] if a2_only else [None, "2"]
-    rows: list[dict] = []
-    seen: set[int] = set()
+    tagged_rows: list[tuple[dict, str | None]] = []
+    seen: dict[int, int] = {}
     for architecture in architectures:
         for model in fetch(architecture):
+            if not isinstance(model, dict):
+                continue
             model_id = model.get("id") if isinstance(model, dict) else None
             if model_id is not None:
                 try:
@@ -937,11 +1306,47 @@ def models(tone_id, a2_only=True):
                 except (TypeError, ValueError):
                     key = hash(str(model_id))
                 if key in seen:
+                    # The unfiltered endpoint can repeat a row returned by
+                    # the A2 view. Keep the A2 view's copy because that source
+                    # is the authoritative classification for an otherwise
+                    # metadata-less .nam row.
+                    if architecture == "2":
+                        tagged_rows[seen[key]] = (model, architecture)
                     continue
-                seen.add(key)
-            rows.append(model)
-    return ([m for m in rows if _is_a2_model(m)]
-            if a2_only else rows)
+                seen[key] = len(tagged_rows)
+            tagged_rows.append((model, architecture))
+
+    classification_tone = tone if isinstance(tone, dict) else None
+    if (classification_tone is None
+            and any(source is None and _model_needs_tone_context(model)
+                    for model, source in tagged_rows)):
+        parent = _response_object(_get(f"{API}/tones/{int(tone_id)}"))
+        classification_tone = (
+            _canonical_tone(dict(parent)) if isinstance(parent, dict) else {})
+
+    rows: list[dict] = []
+    for model, source in tagged_rows:
+        candidate = dict(model)
+        # The A2 endpoint is authoritative for an otherwise metadata-less row.
+        # Preserve it as canonical metadata so downstream Pack/download filters
+        # do not discard a valid A2 file after this method returns.
+        if source == "2" and not _model_has_explicit_architecture(candidate):
+            # The A2 endpoint is authoritative even when the row has a .nam
+            # name or an explicit ``format=nam`` field. Do not require the
+            # endpoint to repeat the architecture on every model row.
+            if str(candidate.get("format") or "").strip().casefold() != "ir":
+                candidate["architecture_version"] = "2"
+        elif (source is None and classification_tone
+              and not any(str(candidate.get(key) or "").strip()
+                          for key in ("architecture_version", "architecture", "format"))
+              and _is_ir_model(candidate, classification_tone)):
+            # A legacy IR endpoint may omit both architecture and a file
+            # suffix. Preserve the parent-tone classification for callers such
+            # as download(), which may not carry the parent tone separately.
+            candidate["architecture"] = "IR"
+        if is_supported_model(candidate, classification_tone):
+            rows.append(candidate)
+    return rows
 
 
 def _safe_download_name(value, fallback):
@@ -963,8 +1368,8 @@ def _sha256_file(path):
 
 def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
              return_paths=False, progress=None, quiet=False, model_ids=None,
-             existing_records=None):
-    """下载 tone 的模型到 dest_dir；a2_only=False 下载全部（含 IR wav）；ext 强制扩展名
+             existing_records=None, tone=None):
+    """Download A2, or A2 plus IR when ``a2_only`` is false.
 
     文件名优先采用 models.name；旧响应没有 name 时采用 model_url 的 basename。
     不添加序号、不改写语义名称。model_ids 限制只下载指定模型（部分安装）。
@@ -974,10 +1379,11 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
     """
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    ms = models(tone_id, a2_only=a2_only)
-    if not a2_only:
-        # A1 (WaveNet) 是废弃架构，产品一律不下载；IR wav 与 A2 保留。
-        ms = [m for m in ms if not _is_a1_model(m)]
+    ms = (models(tone_id, a2_only=a2_only)
+          if tone is None else models(tone_id, a2_only=a2_only, tone=tone))
+    ms = [m for m in ms
+          if is_supported_model(m, tone)
+          and (not a2_only or _is_a2_model(m))]
     if model_ids:
         ms = [m for m in ms if m["id"] in set(model_ids)]
     if not ms:
@@ -999,13 +1405,14 @@ def download(tone_id, dest_dir, tag=None, a2_only=True, ext=None,
             url_path = urllib.parse.urlparse(m.get("model_url") or "").path
             fname = Path(urllib.parse.unquote(url_path)).name
         fname = _safe_download_name(fname, f"model-{m['id']}")
-        # ext is used for IR downloads. Preserve an existing .nam/.wav suffix
-        # instead of producing names such as cab.wav.wav.
-        if ext:
-            suffix = f".{ext.lstrip('.')}".lower()
-            if not fname.lower().endswith((".nam", ".wav")):
+        # Choose the extension per model. A mixed Pack can contain A2 and IR,
+        # so a tone-level is_ir flag must not turn an A2 file into a WAV.
+        lower_name = fname.casefold()
+        if _is_ir_model(m, tone):
+            if not lower_name.endswith(tuple(_IR_SUFFIXES)):
+                suffix = f".{str(ext or 'wav').lstrip('.')}".lower()
                 fname = f"{fname}{suffix}"
-        elif not fname.lower().endswith((".nam", ".wav")):
+        elif not lower_name.endswith(tuple(_SUPPORTED_NAM_SUFFIXES)):
             fname = f"{fname}.nam"
         out = dest / fname
         if progress:
@@ -1116,15 +1523,15 @@ def tone_by_id(tone_id, with_models=False):
         return None
     t.setdefault("tags", [])
     t.setdefault("makes", [])
-    # ``model_name`` is a legacy library field. Official Tone responses expose
-    # model counts only, so derive the first model name from the documented
-    # models endpoint while preserving the existing row shape.
-    t["model_name"] = t.get("model_name")
-    if not t["model_name"]:
-        for model in models(tone_id, a2_only=False):
-            if model.get("name"):
-                t["model_name"] = model["name"]
-                break
+    # ``model_name`` is a legacy library field. Official Tone responses may
+    # carry a name from an unsupported A1/Custom row, so derive it only from
+    # the shared A2/IR model list instead of trusting the raw field.
+    t["model_name"] = None
+    for model in models(tone_id, a2_only=False, tone=t):
+        if (model.get("name")
+                and is_supported_model(model, t)):
+            t["model_name"] = model["name"]
+            break
     return _canonical_tone(t)
 
 
@@ -1147,11 +1554,15 @@ def tones_for_model_ids(model_ids):
     for model_id in ids:
         row = models_by_id.get(model_id)
         if row:
-            matches.setdefault(int(row["tone_id"]), []).append(model_id)
+            matches.setdefault(int(row["tone_id"]), []).append(row)
     tones = []
-    for tone_id, matched_ids in matches.items():
+    for tone_id, matched_models in matches.items():
         tone = tone_by_id(tone_id)
-        if tone:
+        if not tone:
+            continue
+        matched_ids = [model["id"] for model in matched_models
+                       if is_supported_model(model, tone)]
+        if matched_ids:
             tone["matched_model_ids"] = matched_ids
             tones.append(tone)
     return tones
@@ -1159,8 +1570,7 @@ def tones_for_model_ids(model_ids):
 
 def fmt(t):
     return (f"{t['id']:>7} | dl={t.get('downloads_count', 0):>6} fav={t.get('favorites_count', 0):>5} "
-            f"a1={t.get('a1_models_count', 0):>3} a2={t.get('a2_models_count', 0):>3} "
-            f"custom={t.get('custom_models_count', 0):>3} ir={t.get('irs_count', 0):>3} | "
+            f"a2={t.get('a2_models_count', 0):>3} ir={t.get('irs_count', 0):>3} | "
             f"{t.get('gear', '?'):<8} | {t.get('title', '')[:58]} | @{t.get('username', '')}")
 
 

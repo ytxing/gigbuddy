@@ -23,6 +23,7 @@ from .metadata import (SelectableStatic, metadata_table, model_architecture,
 from .modals import (ClickSelectTable, GigBuddyModal, ModalBox,
                      border_hint_action_token, border_hint_click,
                      set_border_hint_hover, set_border_hint_layout)
+from .mutations import ModelsDownloaded
 from .selection import NonSelectableStatic
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -210,8 +211,8 @@ class PackInstallScreen(GigBuddyModal):
             self._load_generation += 1
             generation = self._load_generation
         try:
-            # INSTALL PACK is a complete model set.  Filtering to A2 here
-            # silently drops A1 files before the table can render them.
+            # Fetch the complete pack because the endpoint's default omits A2;
+            # the shared product boundary below keeps only A2 and IR.
             ms = await asyncio.to_thread(tone3000.models, tone_id,
                                          a2_only=False)
         except Exception as e:
@@ -227,8 +228,8 @@ class PackInstallScreen(GigBuddyModal):
         for model in ms:
             normalized = normalize_model_architecture(model, tone=self._tone)
             arch = model_architecture(normalized, tone=self._tone)
-            # A1 (WaveNet) 是废弃架构：不展示、不可勾选，因此也不会被下载。
-            if arch == "A1":
+            # Mixed packs can contain A1/Custom alongside usable rows.
+            if not tone3000.is_supported_model(model, self._tone):
                 continue
             if arch:
                 self._models.append(normalized)
@@ -493,18 +494,18 @@ class PackInstallScreen(GigBuddyModal):
         frozen_ids = list(sel)
         self._set_status(f"installing {len(frozen_ids)} file(s)…",
                          hint="installing…")
-        self.run_worker(partial(self._install, t["id"], frozen_ids, generation),
-                        name="pack-install", exclusive=True)
+        self.app.run_worker(
+            partial(self._install, t["id"], frozen_ids, generation),
+            name="tone-download", group="tone-download", exclusive=False)
 
     async def _install(self, tone_id: int, model_ids: list[int],
                        generation: int) -> None:
-        if not self._ui_alive(generation, operation="operation"):
-            return
-        status = self.query_one("#pack-status", MarqueeBar)
-        bar = self.query_one("#pack-progress", ProgressBar)
-        bar.update(total=max(len(model_ids), 1), progress=0)
-        bar.display = True
-        status.content = f"Installing {len(model_ids)} file(s)…"
+        if self._ui_alive(generation, operation="operation"):
+            status = self.query_one("#pack-status", MarqueeBar)
+            bar = self.query_one("#pack-progress", ProgressBar)
+            bar.update(total=max(len(model_ids), 1), progress=0)
+            bar.display = True
+            status.content = f"Installing {len(model_ids)} file(s)…"
 
         def progress(done: int, total: int, filename: str) -> None:
             try:
@@ -520,6 +521,8 @@ class PackInstallScreen(GigBuddyModal):
         except Exception as e:
             if self._ui_alive(generation, operation="operation"):
                 self._finish_operation()
+                status = self.query_one("#pack-status", MarqueeBar)
+                bar = self.query_one("#pack-progress", ProgressBar)
                 status.content = f"install failed: {e}"
                 bar.display = False
                 self._update_hint("install failed")
@@ -527,6 +530,8 @@ class PackInstallScreen(GigBuddyModal):
         if not t:
             if self._ui_alive(generation, operation="operation"):
                 self._finish_operation()
+                status = self.query_one("#pack-status", MarqueeBar)
+                bar = self.query_one("#pack-progress", ProgressBar)
                 status.content = f"tone3000 has no tone {tone_id}"
                 bar.display = False
                 self._update_hint("install failed")
@@ -538,10 +543,13 @@ class PackInstallScreen(GigBuddyModal):
             # import result without a populated local-model table. In the real
             # library path, downloaded_model_ids_by_tone supplies the exact set.
             actual_ids = tuple(sorted(set(model_ids)))
+        self.app.post_message(
+            ModelsDownloaded(tone_id, len(actual_ids), actual_ids))
         publish = getattr(self.app, "_publish_mutation", None)
         if callable(publish):
             publish("install", tuple(f"model:{model_id}" for model_id in actual_ids),
                     t.get("revision"))
+        self.app.post_message(self.Installed(tone_id, len(actual_ids), actual_ids))
         if not self._ui_alive(generation, operation="operation"):
             return
         bar.display = False
@@ -558,7 +566,6 @@ class PackInstallScreen(GigBuddyModal):
             except Exception:
                 pass
         self._finish_operation()
-        self.post_message(self.Installed(tone_id, len(actual_ids), actual_ids))
         self.dismiss()
 
     def _show_progress(self, generation: int, done: int, total: int,

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,42 @@ def test_invalid_slot_is_rejected_without_representing_unknown_type(tmp_path):
         chain_protocol.normalize_chain(
             {"slots": [{"path": "../outside.nam"}]}, root=root
         )
+
+
+def test_database_backed_chain_rejects_unregistered_and_unsupported_models(
+        tmp_path):
+    root = _root(tmp_path)
+    legacy = root / "data" / "tones" / "legacy.nam"
+    legacy.write_text("legacy")
+    database = root / "data" / "gigbuddy.db"
+    with sqlite3.connect(database) as conn:
+        conn.executescript("""
+            CREATE TABLE tones (
+                id INTEGER PRIMARY KEY, gear TEXT, format TEXT, platform TEXT
+            );
+            CREATE TABLE models (
+                id INTEGER PRIMARY KEY, tone_id INTEGER, local_path TEXT,
+                architecture TEXT, architecture_version TEXT, name TEXT,
+                model_url TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO tones (id, gear, format, platform) VALUES (1, 'amp', 'nam', 'nam')")
+        conn.execute(
+            "INSERT INTO models (id, tone_id, local_path, architecture, name) "
+            "VALUES (101, 1, ?, 'WaveNet', 'legacy.nam')",
+            ("data/tones/legacy.nam",),
+        )
+        conn.commit()
+
+    with pytest.raises(chain_protocol.ChainProtocolError,
+                       match="supported A2/IR"):
+        chain_protocol.normalize_chain(
+            {"slots": [{"path": "data/tones/amp.nam"}]}, root=root)
+    with pytest.raises(chain_protocol.ChainProtocolError,
+                       match="supported A2/IR"):
+        chain_protocol.normalize_chain(
+            {"slots": [{"path": "data/tones/legacy.nam"}]}, root=root)
 
 
 def test_bypass_candidate_is_scoped_and_serialized_as_a_relative_tone_path(tmp_path):

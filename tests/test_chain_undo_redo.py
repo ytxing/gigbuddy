@@ -45,6 +45,24 @@ def _make_env(monkeypatch, tmp_path) -> None:
     (tones / "amp-c.nam").write_bytes(b"c")
     (tones / "cab-a.wav").write_bytes(b"c")
     (dry_inputs / "dry.wav").write_bytes(b"dry")
+    with library.connect() as conn:
+        library.upsert_tone(conn, {
+            "id": 1, "title": "Undo/redo fixture", "gear": "amp-cab",
+            "a2_models_count": 3, "irs_count": 1,
+        })
+        for model_id, name in ((101, "amp-a.nam"),
+                               (102, "amp-b.nam"),
+                               (103, "amp-c.nam")):
+            library.upsert_model(conn, {
+                "id": model_id, "tone_id": 1, "model_url": name,
+                "name": name, "architecture": "SlimmableContainer",
+                "local_path": str(tones / name),
+            })
+        library.upsert_model(conn, {
+            "id": 104, "tone_id": 1, "model_url": "cab-a.wav",
+            "name": "cab-a.wav", "architecture": "IR",
+            "local_path": str(tones / "cab-a.wav"),
+        })
 
 
 def _seed_presets(tmp_path) -> None:
