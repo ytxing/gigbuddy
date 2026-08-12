@@ -422,6 +422,22 @@ def test_search_composes_25_item_pages_across_architectures(monkeypatch):
             for call in calls] == [("2", 1), (None, 1), ("2", 2), (None, 2)]
 
 
+def test_search_downloads_all_time_is_sorted_globally(monkeypatch):
+    def fake_post(_url, body):
+        source = body["architecture_filter"]
+        data = ([{"id": 1, "downloads_count": 10, "a2_models_count": 1}]
+                if source == "2" else
+                [{"id": 2, "downloads_count": 100, "irs_count": 1}])
+        return {"data": data, "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    rows = tone3000.search("amp", page_size=10,
+                          order_by="downloads-all-time")
+
+    assert [row["id"] for row in rows] == [2, 1]
+
+
 def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):
     calls = []
 

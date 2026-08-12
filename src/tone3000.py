@@ -1125,6 +1125,7 @@ def _merge_search_sources(source_rows):
 def _sort_search_rows(rows, order_by):
     field = {
         "downloads": "downloads_count",
+        "downloads-all-time": "downloads_count",
         "downloads_count": "downloads_count",
         "favorites": "favorites_count",
         "favorites_count": "favorites_count",
