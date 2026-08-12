@@ -1141,6 +1141,10 @@ def _sort_search_rows(rows, order_by):
         item = row.get(field)
         if field == "title":
             return str(item or "").casefold()
+        if field == "created_at":
+            # TONE3000 timestamps are ISO-8601 strings; lexical order is
+            # chronological for the normalized server representation.
+            return str(item or "")
         return item if isinstance(item, (int, float)) else 0
 
     return sorted(rows, key=lambda row: (value(row), int(row.get("id", 0))),

@@ -438,6 +438,23 @@ def test_search_downloads_all_time_is_sorted_globally(monkeypatch):
     assert [row["id"] for row in rows] == [2, 1]
 
 
+def test_search_newest_is_sorted_by_created_at(monkeypatch):
+    def fake_post(_url, body):
+        source = body["architecture_filter"]
+        data = ([{"id": 1, "created_at": "2026-01-01T00:00:00Z",
+                  "a2_models_count": 1}]
+                if source == "2" else
+                [{"id": 2, "created_at": "2026-08-01T00:00:00Z",
+                  "irs_count": 1}])
+        return {"data": data, "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    rows = tone3000.search("amp", page_size=10, order_by="newest")
+
+    assert [row["id"] for row in rows] == [2, 1]
+
+
 def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):
     calls = []
 
