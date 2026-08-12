@@ -415,9 +415,11 @@ def test_search_composes_25_item_pages_across_architectures(monkeypatch):
     second_ids = {row["id"] for row in second_page}
     assert len(first_ids) == len(second_ids) == 40
     assert first_ids.isdisjoint(second_ids)
-    assert all(row["total_count"] == 100 for row in first_page)
+    assert all(row["total_count"] == 50 for row in first_page)
     assert all(row["total_count"] == 100 for row in second_page)
-    assert len(calls) == 8  # 2 remote pages x 2 sources x 2 logical pages
+    assert len(calls) == 4  # each of 2 remote pages is fetched once per source
+    assert [(call["architecture_filter"], call["page_number"])
+            for call in calls] == [("2", 1), (None, 1), ("2", 2), (None, 2)]
 
 
 def test_top_uses_public_aggregate_and_preserves_limit(monkeypatch):

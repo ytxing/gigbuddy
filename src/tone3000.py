@@ -14,6 +14,7 @@ CLI:
     tone3000.py dry <dest> [name...]        # 下载试听干音素材（MIT，mayer/brit/rollin 等）
 """
 import base64
+from dataclasses import dataclass, field
 import json
 import hashlib
 import http.client
@@ -31,6 +32,32 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path, PurePosixPath
+
+
+@dataclass
+class SearchPage:
+    rows: list[dict]
+    loaded_count: int
+    has_more: bool
+    exhausted: bool
+
+
+@dataclass
+class _SearchSourceState:
+    architecture_filter: str | None
+    gear_filters: tuple[str, ...] | None
+    next_page: int = 1
+    rows: list[dict] = field(default_factory=list)
+    seen_ids: set[int] = field(default_factory=set)
+    exhausted: bool = False
+
+
+@dataclass
+class _SearchState:
+    sources: list[_SearchSourceState]
+
+
+_SEARCH_STATES: dict[tuple, _SearchState] = {}
 
 
 def slugify(text, maxlen=48):
@@ -806,8 +833,7 @@ def _post(url, body):
     """POST helper; search bodies are translated to official REST query params."""
     if url == f"{API}/tones/search":
         gears = list(body.get("gear_filters") or ())
-        format_filter = ("ir" if any(gear in _IR_GEAR_FILTERS
-                                      for gear in gears) else None)
+        format_filter = "ir" if "ir" in gears else None
         gears = [gear for gear in gears if gear != "ir"]
         params = {
             "query": body.get("query_term", ""),
@@ -826,7 +852,7 @@ def _post(url, body):
                          authenticated=url.startswith(API))
 
 
-_IR_GEAR_FILTERS = frozenset({"cab", "space", "ir"})
+_IR_GEAR_FILTERS = frozenset({"ir"})
 _SUPPORTED_MODEL_COUNTS = ("a2_models_count", "irs_count")
 
 
@@ -955,6 +981,9 @@ def _search_sources(gear_filters):
                       if value not in _IR_GEAR_FILTERS)
     ir_gears = tuple(value for value in gears
                      if value in _IR_GEAR_FILTERS)
+    if any(value in {"cab", "space"} for value in gears):
+        ir_gears = tuple(dict.fromkeys(ir_gears + tuple(
+            value for value in gears if value in {"cab", "space"})))
     sources = []
     if nam_gears:
         sources.append(("2", nam_gears))
@@ -1016,6 +1045,62 @@ def _fetch_search_prefix(query, limit, order_by, gear_filters, usernames,
     return (rows if exhausted else rows[:limit]), total, exhausted
 
 
+def _search_identity(query, order_by, gear_filters, usernames, tag_names,
+                     make_names):
+    def normalized(values):
+        return tuple(sorted(str(value).strip().casefold()
+                            for value in (values or ()) if value))
+
+    return (str(query or ""), str(order_by or "trending"),
+            normalized(gear_filters), normalized(usernames),
+            normalized(tag_names), normalized(make_names))
+
+
+def _fetch_next_source_page(state, *, query, order_by, usernames, tag_names,
+                            make_names):
+    if state.exhausted:
+        return
+    response = _post(f"{API}/tones/search", {
+        "query_term": query,
+        "page_number": state.next_page,
+        "page_size": 25,
+        "order_by": order_by,
+        "tag_names": tag_names,
+        "make_names": make_names,
+        "gear_filters": state.gear_filters,
+        "is_calibrated": False,
+        "size_filters": None,
+        "usernames": usernames,
+        "architecture_filter": state.architecture_filter,
+    })
+    if isinstance(response, dict):
+        page_rows = response.get("data") or []
+        total_pages = response.get("total_pages")
+    else:
+        page_rows, total_pages = response or [], None
+    if not isinstance(page_rows, list) or not page_rows:
+        state.exhausted = True
+        return
+    canonical = [row for row in _canonical_tones(page_rows)
+                 if isinstance(row, dict) and _has_supported_tone_models(
+                     row, architecture_filter=state.architecture_filter,
+                     gear_filters=state.gear_filters)]
+    for row in canonical:
+        try:
+            tone_id = int(row["id"])
+        except (KeyError, TypeError, ValueError):
+            tone_id = None
+        if tone_id is None or tone_id not in state.seen_ids:
+            state.rows.append(row)
+            if tone_id is not None:
+                state.seen_ids.add(tone_id)
+    state.next_page += 1
+    try:
+        state.exhausted = state.next_page > int(total_pages)
+    except (TypeError, ValueError):
+        state.exhausted = len(page_rows) < 25
+
+
 def _merge_search_sources(source_rows):
     """Interleave source rankings while removing mixed-pack duplicates."""
     merged: list[dict] = []
@@ -1035,6 +1120,30 @@ def _merge_search_sources(source_rows):
                 seen.add(tone_id)
             merged.append(row)
     return merged
+
+
+def _sort_search_rows(rows, order_by):
+    field = {
+        "downloads": "downloads_count",
+        "downloads_count": "downloads_count",
+        "favorites": "favorites_count",
+        "favorites_count": "favorites_count",
+        "newest": "created_at",
+        "created": "created_at",
+        "name": "title",
+        "title": "title",
+    }.get(str(order_by or "trending").casefold())
+    if not field:
+        return rows
+
+    def value(row):
+        item = row.get(field)
+        if field == "title":
+            return str(item or "").casefold()
+        return item if isinstance(item, (int, float)) else 0
+
+    return sorted(rows, key=lambda row: (value(row), int(row.get("id", 0))),
+                  reverse=field != "title")
 
 
 def _fetch_supported_aggregate(fetch, requested: int) -> list[dict]:
@@ -1073,33 +1182,45 @@ def search(query="", page_size=50, order_by="trending", gear_filters=None,
     and other unsupported tones are omitted; mixed packs remain visible with
     only their usable model counts.
     """
+    return search_page(query, page_size=page_size, order_by=order_by,
+                       gear_filters=gear_filters, usernames=usernames,
+                       tag_names=tag_names, make_names=make_names,
+                       page_number=page_number).rows
+
+
+def search_page(query="", page_size=50, order_by="trending", gear_filters=None,
+                usernames=None, tag_names=None, make_names=None, page_number=1):
+    """Return a page while incrementally advancing each remote source."""
     requested = max(0, int(page_size))
     if requested == 0:
-        return []
+        return SearchPage([], 0, False, True)
     logical_page = max(1, int(page_number))
-    prefix_limit = logical_page * requested
-    source_rows = []
-    source_exhausted = []
-    for architecture_filter, source_gears in _search_sources(gear_filters):
-        rows, _total, exhausted = _fetch_search_prefix(
-            query, prefix_limit, order_by, source_gears, usernames,
-            tag_names, make_names, architecture_filter)
-        source_rows.append(rows)
-        source_exhausted.append(exhausted)
-
-    merged = _merge_search_sources(source_rows)
-    start_offset = (logical_page - 1) * requested
-    page_rows = merged[start_offset:start_offset + requested]
-    if all(source_exhausted):
-        total = len(merged)
-    else:
-        # The exact union total is not knowable until both catalog views are
-        # exhausted. This lower-bounded hint keeps TUI pagination progressing;
-        # a later exhausted page replaces it with the exact total.
-        total = max(len(merged), prefix_limit + requested)
-    for row in page_rows:
-        row["total_count"] = total
-    return page_rows
+    key = _search_identity(query, order_by, gear_filters, usernames,
+                           tag_names, make_names)
+    if logical_page == 1 or key not in _SEARCH_STATES:
+        _SEARCH_STATES[key] = _SearchState([
+            _SearchSourceState(architecture, gears)
+            for architecture, gears in _search_sources(gear_filters)
+        ])
+    state = _SEARCH_STATES[key]
+    target = logical_page * requested
+    while len(_merge_search_sources([source.rows for source in state.sources])) < target:
+        before = sum(len(source.rows) for source in state.sources)
+        for source in state.sources:
+            _fetch_next_source_page(source, query=query, order_by=order_by,
+                                    usernames=usernames, tag_names=tag_names,
+                                    make_names=make_names)
+        after = sum(len(source.rows) for source in state.sources)
+        if after == before or all(source.exhausted for source in state.sources):
+            break
+    merged = _sort_search_rows(
+        _merge_search_sources([source.rows for source in state.sources]), order_by)
+    exhausted = all(source.exhausted for source in state.sources)
+    start = (logical_page - 1) * requested
+    rows = merged[start:start + requested]
+    for row in rows:
+        row["total_count"] = len(merged)
+    return SearchPage(rows, len(merged), not exhausted, exhausted)
 
 
 def top(limit=50):

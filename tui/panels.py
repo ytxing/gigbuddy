@@ -2202,11 +2202,6 @@ class ChainPanel(Vertical):
                 # semantics by Slot identity. Prefer that target over the
                 # captured index, which may now contain a different Slot.
                 target_index = self.state.target_index
-                if target_index is None:
-                    # Overall replacements discard process-local target
-                    # identity; retain the old visual fallback only when the
-                    # replacement left a Slot at that position.
-                    target_index = min(old_index, self.state.slot_count - 1)
         if target_index is not None:
             try:
                 self.state.focus_slot(target_index)

@@ -44,9 +44,9 @@ SUPPORTED_EXTENSIONS = {".nam", ".wav"}
 def _known_library_model_is_supported(path: Path, root: Path) -> bool | None:
     """Classify a path when the local library has an exact model record.
 
-    A real GigBuddy root has a library database, so an exact model row is
-    required before a file can enter ``live_chain.json``. Returning ``None`` is
-    reserved for standalone protocol callers that have no database at all.
+    A database row is only used to reject an explicitly unsupported catalog
+    asset. A valid local file without a model row remains loadable and returns
+    ``None``, just like a standalone protocol caller without a database.
     """
     database = root / "data" / "gigbuddy.db"
     if not database.is_file():
@@ -65,7 +65,7 @@ def _known_library_model_is_supported(path: Path, root: Path) -> bool | None:
     except (OSError, ValueError, sqlite3.Error):
         return False
     if not rows:
-        return False
+        return None
     # Imported lazily so the protocol's standalone tests and callers do not
     # pay for the TONE3000 adapter unless a local library database is present.
     import tone3000

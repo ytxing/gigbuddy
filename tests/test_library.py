@@ -668,11 +668,11 @@ def test_chain_set_rejects_known_unsupported_model():
         library.chain_set({"slots": [{"path": str(model)}]})
 
 
-def test_chain_set_rejects_unregistered_tone_asset():
+def test_chain_set_allows_unregistered_tone_asset():
     model = library.ROOT / "data" / "tones" / "unknown.nam"
     model.write_bytes(b"unknown")
-    with pytest.raises(ValueError, match="supported A2/IR"):
-        library.chain_set({"slots": [{"path": str(model)}]})
+    library.chain_set({"slots": [{"path": str(model)}]})
+    assert library.chain_get()["slots"] == [{"path": str(model)}]
 
 
 def test_import_does_not_persist_when_download_has_no_supported_records(

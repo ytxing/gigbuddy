@@ -1080,7 +1080,7 @@ def _validate_known_chain_assets(cfg: dict) -> None:
                 paths.append(value)
     for path in paths:
         rows = _model_rows_for_path(path)
-        if not rows or not all(
+        if rows and not all(
                 tone3000.is_supported_model(
                     row, {key: row.get(key) for key in ("gear", "format", "platform")})
                 for row in rows):

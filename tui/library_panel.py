@@ -1812,6 +1812,9 @@ class LibraryPanel(Vertical):
                 and request_id == self._mutation_request_id):
             return
         self._reconcile_local_rows(tone_ids)
+        # Installation state is also projected onto retained remote rows and
+        # their cache. Do this before restoring anchors and publishing detail.
+        self._apply_local_download_states()
         # The mutation coordinator captures every retained Library view. The
         # async worker must restore every tab-local anchor after its incremental
         # update, not only LOCAL; remote rows and TOP CREATORS may be inactive
@@ -2137,14 +2140,23 @@ class LibraryPanel(Vertical):
                 hits = await asyncio.to_thread(
                     library.tone3000.tones_for_model_ids, spec.model_ids)
             else:
-                hits = await asyncio.to_thread(
-                    library.tone3000.search,
-                    spec.text, page_size=REMOTE_PAGE_SIZE, page_number=page,
+                search_kwargs = dict(
+                    page_size=REMOTE_PAGE_SIZE, page_number=page,
                     order_by=order_by or self._selected_order(),
                     gear_filters=None if self._type_filter == "all" else [self._type_filter],
                     usernames=self._effective_authors(spec) or None,
                     tag_names=list(spec.tags) or None,
                     make_names=list(spec.makes) or None)
+                # Keep older adapters and focused test doubles on the public
+                # list-returning seam while the real adapter exposes state.
+                if getattr(library.tone3000.search, "__module__", "") != "tone3000":
+                    hits = await asyncio.to_thread(
+                        library.tone3000.search, spec.text, **search_kwargs)
+                    search_page = None
+                else:
+                    search_page = await asyncio.to_thread(
+                        library.tone3000.search_page, spec.text, **search_kwargs)
+                    hits = search_page.rows
         except library.tone3000.AuthenticationRequiredError:
             if not self._tone_alive(generation, request_id):
                 return
@@ -2204,12 +2216,9 @@ class LibraryPanel(Vertical):
         self._tone_loading = False
         self._clear_tone_auth_required()
         self._tone_page = page
-        total = next((hit.get("total_count") for hit in hits
-                      if hit.get("total_count") is not None), None)
-        try:
-            self._tone_total = int(total) if total is not None else self._tone_total
-        except (TypeError, ValueError):
-            pass
+        search_page = locals().get("search_page")
+        if search_page is not None:
+            self._tone_total = search_page.loaded_count
         if not append:
             self._remote_tones = {}
             table.clear()
@@ -2222,16 +2231,15 @@ class LibraryPanel(Vertical):
         self._sync_type_search_options(table)
         if spec.model_ids:
             self._tone_has_more = False
-        elif not hits or len(hits) < REMOTE_PAGE_SIZE:
-            # The adapter returns a short page only after all supported
-            # architecture views are exhausted. This also closes the loop
-            # when a lower-bound total required one final empty request.
-            self._tone_total = len(self._remote_tones)
-            self._tone_has_more = False
+        elif search_page is not None:
+            self._tone_has_more = search_page.has_more
+            self._tone_total = search_page.loaded_count
+            if search_page.exhausted:
+                self._tone_total = len(self._remote_tones)
         else:
-            self._tone_has_more = (
-                len(self._remote_tones) < self._tone_total
-                if self._tone_total is not None else True)
+            self._tone_has_more = bool(hits)
+            if not hits:
+                self._tone_total = len(self._remote_tones)
         if key is not None:
             self._save_tone_cache(key)
         if silent:

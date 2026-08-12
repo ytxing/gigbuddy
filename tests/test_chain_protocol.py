@@ -132,7 +132,7 @@ def test_invalid_slot_is_rejected_without_representing_unknown_type(tmp_path):
         )
 
 
-def test_database_backed_chain_rejects_unregistered_and_unsupported_models(
+def test_database_backed_chain_allows_unregistered_but_rejects_unsupported_models(
         tmp_path):
     root = _root(tmp_path)
     legacy = root / "data" / "tones" / "legacy.nam"
@@ -158,10 +158,9 @@ def test_database_backed_chain_rejects_unregistered_and_unsupported_models(
         )
         conn.commit()
 
-    with pytest.raises(chain_protocol.ChainProtocolError,
-                       match="supported A2/IR"):
-        chain_protocol.normalize_chain(
-            {"slots": [{"path": "data/tones/amp.nam"}]}, root=root)
+    got = chain_protocol.normalize_chain(
+        {"slots": [{"path": "data/tones/amp.nam"}]}, root=root)
+    assert got["slots"][0]["path"].endswith("data/tones/amp.nam")
     with pytest.raises(chain_protocol.ChainProtocolError,
                        match="supported A2/IR"):
         chain_protocol.normalize_chain(
