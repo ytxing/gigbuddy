@@ -2339,7 +2339,7 @@ class LibraryPanel(Vertical):
         self._tone_page = page
         search_page = locals().get("search_page")
         if search_page is not None:
-            self._tone_remote_total = search_page.total_count
+            self._tone_remote_total = search_page.remote_total
         elif hits:
             remote_totals = {
                 int(hit["total_count"])

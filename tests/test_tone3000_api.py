@@ -531,21 +531,114 @@ def test_search_composes_pages_from_one_official_stream(monkeypatch):
     second_ids = {row["id"] for row in second_page.rows}
     assert len(first_ids) == len(second_ids) == 40
     assert first_ids.isdisjoint(second_ids)
-    assert all(row["total_count"] == 100 for row in first_page.rows)
+    assert all(row["total_count"] == 50 for row in first_page.rows)
     assert all(row["total_count"] == 100 for row in second_page.rows)
     assert first_page.loaded_count == 50
-    assert first_page.total_count == 100
+    assert first_page.total_count == 50
     assert first_page.total_pages == 4
+    assert first_page.remote_total_pages == 4
+    assert first_page.remote_total == 100
     assert first_page.has_more
     assert not first_page.exhausted
     assert second_page.loaded_count == 100
     assert second_page.total_count == 100
     assert second_page.total_pages == 4
+    assert second_page.remote_total_pages == 4
+    assert second_page.remote_total == 100
     assert not second_page.has_more
     assert second_page.exhausted
     assert len(calls) == 4
     assert [(call["architecture_filter"], call["page_number"])
             for call in calls] == [("2", 1), ("2", 2), ("2", 3), ("2", 4)]
+
+
+def test_search_continues_after_a_fully_filtered_official_page(monkeypatch):
+    calls = []
+
+    def fake_post(_url, body):
+        calls.append(body["page_number"])
+        if body["page_number"] == 1:
+            return {
+                "data": [{"id": index, "custom_models_count": 1}
+                         for index in range(25)],
+                "total": 26,
+                "total_pages": 2,
+            }
+        return {"data": [{"id": 25, "a2_models_count": 1}],
+                "total": 26, "total_pages": 2}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    result = tone3000.search_page(
+        "fully-filtered-page", page_size=1)
+
+    assert [row["id"] for row in result.rows] == [25]
+    assert calls == [1, 2]
+    assert result.exhausted
+    assert not result.has_more
+
+
+def test_search_stops_when_the_official_api_repeats_a_page(monkeypatch):
+    calls = []
+    data = [{"id": index, "a2_models_count": 1}
+            for index in range(25)]
+
+    def fake_post(_url, body):
+        calls.append(body["page_number"])
+        return {"data": data, "total_pages": 99}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    result = tone3000.search_page(
+        "repeated-official-page", page_size=26)
+
+    assert len(result.rows) == 25
+    assert calls == [1, 2]
+    assert result.exhausted
+    assert not result.has_more
+
+
+def test_search_stops_when_only_seen_ids_reorder_between_pages(monkeypatch):
+    calls = []
+    first = [{"id": index, "a2_models_count": 1}
+             for index in range(25)]
+    second = list(reversed(first))
+
+    def fake_post(_url, body):
+        calls.append(body["page_number"])
+        return {"data": first if len(calls) == 1 else second,
+                "total_pages": 99}
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    result = tone3000.search_page(
+        "reordered-seen-ids", page_size=26)
+
+    assert len(result.rows) == 25
+    assert calls == [1, 2]
+    assert result.exhausted
+    assert not result.has_more
+
+
+def test_search_stops_after_a_short_official_page(monkeypatch):
+    calls = []
+
+    def fake_post(_url, body):
+        calls.append(body["page_number"])
+        return {
+            "data": [{"id": 1, "a2_models_count": 1}],
+            "total": 99,
+            "total_pages": 99,
+        }
+
+    monkeypatch.setattr(tone3000, "_post", fake_post)
+
+    result = tone3000.search_page("short-official-page", page_size=2)
+
+    assert [row["id"] for row in result.rows] == [1]
+    assert calls == [1]
+    assert result.exhausted
+    assert not result.has_more
 
 
 def test_search_downloads_all_time_is_sorted_globally(monkeypatch):
@@ -607,10 +700,12 @@ def test_top_fills_page_after_filtering_unsupported_tones(monkeypatch):
         calls.append(body)
         if body["page_number"] == 2:
             return {"data": [{"id": 4, "a2_models_count": 1}],
-                    "total": 3, "total_pages": 2}
+                    "total": 26, "total_pages": 2}
         return {"data": [{"id": 1, "custom_models_count": 2},
+                          *[{"id": 100 + index, "custom_models_count": 1}
+                            for index in range(23)],
                           {"id": 3, "a2_models_count": 1}],
-                "total": 3, "total_pages": 2}
+                "total": 26, "total_pages": 2}
 
     monkeypatch.setattr(tone3000, "_post", fake_post)
 

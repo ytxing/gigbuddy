@@ -42,8 +42,13 @@ class SearchPage:
     loaded_count: int
     has_more: bool
     exhausted: bool
+    # Backward-compatible alias for the loaded, deduplicated result count.
     total_count: int | None = None
+    # Backward-compatible alias for the official source page count; it is not
+    # the visible union count.
     total_pages: int | None = None
+    remote_total_pages: int | None = None
+    remote_total: int | None = None
 
 
 @dataclass
@@ -71,9 +76,10 @@ class _SearchSourceState:
     gear_filters: tuple[str, ...] | None
     next_page: int = 1
     rows: list[dict] = field(default_factory=list)
-    seen_ids: set[int] = field(default_factory=set)
+    seen_row_keys: set[tuple] = field(default_factory=set)
+    seen_page_signatures: set[tuple] = field(default_factory=set)
     exhausted: bool = False
-    total_count: int | None = None
+    remote_total: int | None = None
     total_pages: int | None = None
 
 
@@ -83,6 +89,16 @@ class _SearchState:
 
 
 _SEARCH_STATES: dict[tuple, _SearchState] = {}
+
+
+def _search_row_key(row: dict) -> tuple:
+    """Return a stable identity for a remote row, normalizing numeric IDs."""
+    if isinstance(row, dict):
+        try:
+            return ("id", int(row["id"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    return ("row", json.dumps(row, sort_keys=True, default=str))
 
 
 def slugify(text, maxlen=48):
@@ -1125,17 +1141,17 @@ def _fetch_next_source_page(state, *, query, order_by, usernames, tag_names,
     })
     if isinstance(response, dict):
         page_rows = response.get("data") or []
-        state.total_count = response.get(
-            "total", response.get("total_count", state.total_count))
+        state.remote_total = response.get(
+            "total", response.get("total_count", state.remote_total))
         total_pages = response.get("total_pages")
     else:
         page_rows, total_pages = response or [], None
-    if state.total_count is None and page_rows:
+    if state.remote_total is None and page_rows:
         first = page_rows[0] if isinstance(page_rows[0], dict) else {}
-        state.total_count = first.get("total_count")
-    if total_pages is None and state.total_count is not None:
+        state.remote_total = first.get("total_count")
+    if total_pages is None and state.remote_total is not None:
         try:
-            total_pages = math.ceil(int(state.total_count) / 25)
+            total_pages = math.ceil(int(state.remote_total) / 25)
         except (TypeError, ValueError):
             total_pages = None
     if total_pages is not None:
@@ -1146,25 +1162,35 @@ def _fetch_next_source_page(state, *, query, order_by, usernames, tag_names,
     if not isinstance(page_rows, list) or not page_rows:
         state.exhausted = True
         return
+    page_signature = tuple(sorted(_search_row_key(row) for row in page_rows))
+    if page_signature in state.seen_page_signatures:
+        state.exhausted = True
+        return
+    state.seen_page_signatures.add(page_signature)
     canonical = [row for row in _canonical_tones(page_rows)
                  if isinstance(row, dict) and _has_supported_tone_models(
                      row, architecture_filter=state.architecture_filter,
                      format_filter=state.format_filter,
                      gear_filters=state.gear_filters)]
+    added = 0
     for row in canonical:
-        try:
-            tone_id = int(row["id"])
-        except (KeyError, TypeError, ValueError):
-            tone_id = None
-        if tone_id is None or tone_id not in state.seen_ids:
+        row_key = _search_row_key(row)
+        if row_key not in state.seen_row_keys:
             state.rows.append(row)
-            if tone_id is not None:
-                state.seen_ids.add(tone_id)
+            state.seen_row_keys.add(row_key)
+            added += 1
+    if canonical and not added:
+        state.exhausted = True
+        return
     state.next_page += 1
-    if state.total_pages is not None:
+    if len(page_rows) < 25:
+        # The official endpoint uses a short page as the end-of-stream signal;
+        # do not let contradictory pagination metadata extend the stream.
+        state.exhausted = True
+    elif state.total_pages is not None:
         state.exhausted = state.next_page > state.total_pages
     else:
-        state.exhausted = len(page_rows) < 25
+        state.exhausted = False
 
 
 def _merge_search_sources(source_rows):
@@ -1235,7 +1261,7 @@ def search_page(query="", page_size=50, order_by=None, gear_filters=None,
     """Return a page from the single official ``search_tones_a2`` stream."""
     requested = max(0, int(page_size))
     if requested == 0:
-        return SearchPage([], 0, False, True)
+        return SearchPage([], 0, False, True, total_count=0)
     logical_page = max(1, int(page_number))
     order_by = _effective_order(query, order_by)
     gear_filters, format_filter = _normalize_search_filters(
@@ -1250,21 +1276,28 @@ def search_page(query="", page_size=50, order_by=None, gear_filters=None,
     state = _SEARCH_STATES[key]
     target = logical_page * requested
     while len(_merge_search_sources([state.source.rows])) < target:
-        before = len(state.source.rows)
         _fetch_next_source_page(state.source, query=query, order_by=order_by,
                                 usernames=usernames, tag_names=tag_names,
                                 make_names=make_names)
-        if len(state.source.rows) == before or state.source.exhausted:
+        if state.source.exhausted:
             break
     merged = _merge_search_sources([state.source.rows])
     exhausted = state.source.exhausted
     start = (logical_page - 1) * requested
     rows = merged[start:start + requested]
+    loaded_count = len(merged)
     for row in rows:
-        if state.source.total_count is not None:
-            row["total_count"] = state.source.total_count
-    return SearchPage(rows, len(merged), not exhausted, exhausted,
-                      state.source.total_count, state.source.total_pages)
+        row["total_count"] = loaded_count
+    return SearchPage(
+        rows=rows,
+        loaded_count=loaded_count,
+        has_more=not exhausted,
+        exhausted=exhausted,
+        total_count=loaded_count,
+        total_pages=state.source.total_pages,
+        remote_total_pages=state.source.total_pages,
+        remote_total=state.source.remote_total,
+    )
 
 
 def top(limit=50):

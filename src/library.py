@@ -1021,6 +1021,44 @@ def _empty_uninstall_plan() -> dict:
             "active_paths": [], "preset_names": [], "outside_paths": []}
 
 
+def _is_outside_tone_library(path: Path) -> bool:
+    """Return whether a path resolves outside the managed tone directory."""
+    try:
+        return not path.resolve().is_relative_to(TONES_DIR.resolve())
+    except OSError:
+        return True
+
+
+def _path_exists(path: Path) -> bool:
+    """Treat filesystem errors conservatively for uninstall safety checks."""
+    try:
+        return path.exists()
+    except OSError:
+        return True
+
+
+def _assert_no_existing_external_paths(models: list[dict]) -> None:
+    """Reject external files that appear after the uninstall plan was built."""
+    for model in models:
+        source = Path(_to_abs_path(model["local_path"]))
+        if _is_outside_tone_library(source) and _path_exists(source):
+            raise ValueError(
+                "Cannot uninstall files outside the managed tone library.")
+
+
+def _clear_uninstalled_model_paths(
+        conn: sqlite3.Connection, models: list[dict]) -> None:
+    """Clear only paths that still match the files this operation planned."""
+    for model in models:
+        path_forms = _path_forms(model["local_path"])
+        marks = ",".join("?" for _ in path_forms)
+        conn.execute(
+            f"UPDATE models SET local_path = NULL WHERE id = ? "
+            f"AND local_path IN ({marks})",
+            (model["id"], *path_forms),
+        )
+
+
 def _uninstall_plan_for_models(models: list[dict]) -> dict:
     """Shared plan builder: downloaded model rows → file/dependency summary.
 
@@ -1057,17 +1095,16 @@ def _uninstall_plan_for_models(models: list[dict]) -> dict:
             for slot in ch.get("slots", [])
         ):
             preset_names.append(preset["name"])
-    root = TONES_DIR.resolve()
     outside_paths = []
     total_bytes = 0
     for path in paths:
         p = Path(path)
-        try:
-            if not p.resolve().is_relative_to(root):
+        if _is_outside_tone_library(p):
+            # A stale path outside the managed root is safe to forget: there
+            # is no file left for us to move. Existing external files remain
+            # blocked by the guard below and are never adopted or deleted.
+            if _path_exists(p):
                 outside_paths.append(path)
-                continue
-        except OSError:
-            outside_paths.append(path)
             continue
         try:
             total_bytes += p.stat().st_size
@@ -1162,9 +1199,21 @@ def _uninstall_files(plan: dict, *, allow_preset_references: bool,
             raise ValueError(
                 "Cannot uninstall files referenced by presets without confirmation.")
         plan = current
+        _assert_no_existing_external_paths(plan["models"])
         for model in plan["models"]:
             # 相对存储行（REQ-035 后）需绝对化：Path(相对) 会按 CWD 解析
             source = Path(_to_abs_path(model["local_path"]))
+            if _is_outside_tone_library(source):
+                # Never move an external path. This keeps a file that appears
+                # after the existence check outside the TOCTOU move boundary.
+                if _path_exists(source):
+                    raise ValueError(
+                        "Cannot uninstall files outside the managed tone library.")
+                manifest["missing"].append({
+                    "model_id": model["id"], "tone_id": model["tone_id"],
+                    "source": str(source),
+                })
+                continue
             if not source.is_file():
                 manifest["missing"].append({
                     "model_id": model["id"], "tone_id": model["tone_id"],
@@ -1178,14 +1227,13 @@ def _uninstall_files(plan: dict, *, allow_preset_references: bool,
                 "model_id": model["id"], "tone_id": model["tone_id"],
                 "source": str(source), "trash": str(target),
             })
+        _assert_no_existing_external_paths(plan["models"])
         (trash_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        model_ids = [model["id"] for model in plan["models"]]
-        marks = ",".join("?" for _ in model_ids)
+        _assert_no_existing_external_paths(plan["models"])
         tone_marks = ",".join("?" for _ in plan["tone_ids"])
         with connect() as conn:
-            conn.execute(
-                f"UPDATE models SET local_path = NULL WHERE id IN ({marks})", model_ids)
+            _clear_uninstalled_model_paths(conn, plan["models"])
             conn.execute(
                 f"UPDATE tones SET local_dir = NULL WHERE id IN ({tone_marks}) "
                 "AND NOT EXISTS (SELECT 1 FROM models m "

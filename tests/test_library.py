@@ -616,6 +616,110 @@ def test_local_uninstall_reports_missing_files_separately(tmp_path):
     assert all(model["local_path"] is None for model in library.get_tone(19)["models"])
 
 
+def test_local_uninstall_clears_missing_external_paths(tmp_path):
+    (tmp_path / "external").mkdir()
+    amp, ir = _put_models(tmp_path / "external")
+    Path(amp["local_path"]).unlink()
+    Path(ir["local_path"]).unlink()
+    library.chain_set({})
+
+    plan = library.local_uninstall_plan([19])
+    assert plan["outside_paths"] == []
+
+    result = library.local_uninstall_tones([19])
+
+    assert result["removed"] == 0
+    assert result["missing"] == 2
+    assert all(model["local_path"] is None
+               for model in library.get_tone(19)["models"])
+
+
+def test_local_uninstall_rechecks_external_paths_before_moving(
+        monkeypatch, tmp_path):
+    (tmp_path / "external").mkdir()
+    amp, ir = _put_models(tmp_path / "external")
+    Path(amp["local_path"]).unlink()
+    Path(ir["local_path"]).unlink()
+    library.chain_set({})
+
+    real_plan = library.local_uninstall_plan
+    calls = 0
+
+    def plan_with_external_race(ids):
+        nonlocal calls
+        plan = real_plan(ids)
+        calls += 1
+        if calls == 2:
+            Path(amp["local_path"]).write_bytes(b"reappeared")
+        return plan
+
+    monkeypatch.setattr(library, "local_uninstall_plan", plan_with_external_race)
+
+    with pytest.raises(ValueError, match="outside"):
+        library.local_uninstall_tones([19])
+    assert Path(amp["local_path"]).read_bytes() == b"reappeared"
+    models = {model["id"]: model for model in library.get_tone(19)["models"]}
+    assert models[amp["id"]]["local_path"] == amp["local_path"]
+    assert models[ir["id"]]["local_path"] is None
+
+
+def test_local_uninstall_never_moves_external_path_after_check(
+        monkeypatch, tmp_path):
+    (tmp_path / "external").mkdir()
+    amp, ir = _put_models(tmp_path / "external")
+    Path(amp["local_path"]).unlink()
+    Path(ir["local_path"]).unlink()
+    library.chain_set({})
+
+    real_assert = library._assert_no_existing_external_paths
+    calls = 0
+
+    def assert_then_recreate(models):
+        nonlocal calls
+        real_assert(models)
+        calls += 1
+        if calls == 1:
+            Path(amp["local_path"]).write_bytes(b"recreated")
+
+    monkeypatch.setattr(library, "_assert_no_existing_external_paths",
+                        assert_then_recreate)
+
+    with pytest.raises(ValueError, match="outside"):
+        library.local_uninstall_tones([19])
+    assert Path(amp["local_path"]).read_bytes() == b"recreated"
+    assert not list((library.TONES_DIR.parent / ".trash").glob("*"))
+
+
+def test_local_uninstall_preserves_path_replaced_during_operation(
+        monkeypatch, tmp_path):
+    (tmp_path / "tones").mkdir()
+    amp, ir = _put_models(tmp_path / "tones")
+    library.chain_set({})
+    replacement = library.TONES_DIR / "redownloaded.nam"
+    real_assert = library._assert_no_existing_external_paths
+    calls = 0
+
+    def assert_and_redownload(models):
+        nonlocal calls
+        real_assert(models)
+        calls += 1
+        if calls == 2:
+            replacement.write_bytes(b"new amp")
+            with library.connect() as conn:
+                library.upsert_model(conn, {**amp, "local_path": str(replacement)})
+
+    monkeypatch.setattr(library, "_assert_no_existing_external_paths",
+                        assert_and_redownload)
+
+    result = library.local_uninstall_tones([19])
+
+    assert result["removed"] == 2
+    models = {model["id"]: model for model in library.get_tone(19)["models"]}
+    assert models[amp["id"]]["local_path"] == str(replacement)
+    assert models[ir["id"]]["local_path"] is None
+    assert replacement.read_bytes() == b"new amp"
+
+
 def test_local_uninstall_models_uninstalls_subset(tmp_path):
     """REQ-038：模型粒度卸载——只卸选中的模型，tone 其余模型保留；
     全部卸空时 local_dir 一并清空。"""
