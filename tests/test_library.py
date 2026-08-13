@@ -700,6 +700,51 @@ def test_import_does_not_persist_when_download_has_no_supported_records(
     assert library.list_tones() == []
 
 
+def test_import_does_not_reuse_stale_local_path_when_download_is_empty(
+        monkeypatch):
+    missing = library.TONES_DIR / "19-stale" / "stale.nam"
+    with library.connect() as conn:
+        library.upsert_tone(conn, {**SAMPLE, "local_dir": str(missing.parent)},
+                             commit=False)
+        library.upsert_model(conn, {
+            "id": 1901, "tone_id": 19, "model_url": "stale",
+            "name": missing.name, "architecture": "SlimmableContainer",
+            "local_path": str(missing),
+        }, commit=False)
+        conn.commit()
+
+    monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
+    monkeypatch.setattr(tone3000, "download", lambda *args, **kwargs: [])
+
+    assert library.import_tone(19, quiet=True) is None
+
+
+def test_get_tone_and_public_views_hide_missing_local_paths(capsys):
+    missing = library.TONES_DIR / "19-stale" / "stale.nam"
+    with library.connect() as conn:
+        library.upsert_tone(conn, {**SAMPLE, "local_dir": str(missing.parent)},
+                             commit=False)
+        library.upsert_model(conn, {
+            "id": 1901, "tone_id": 19, "model_url": "https://example/stale",
+            "name": missing.name, "architecture": "SlimmableContainer",
+            "local_path": str(missing),
+        }, commit=False)
+        conn.commit()
+
+    tone = library.get_tone(19)
+    assert tone["models"][0]["local_path"] is None
+    assert tone["local_dir"] is None
+    assert tone["model_name"] is None
+
+    public = library._public_tone(tone)
+    assert "_models_source" not in public
+    assert public["models"][0]["local_path"] is None
+    assert str(missing) not in library._fmt_show(tone)
+
+    library.main(["tone", "show", "19"])
+    assert str(missing) not in capsys.readouterr().out
+
+
 def test_preset_draft_rejects_unsupported_model_reference(tmp_path):
     amp, _ir = _put_models(tmp_path)
     custom = library.TONES_DIR / "custom.nam"
@@ -756,8 +801,20 @@ def test_import_tone_mocked(monkeypatch, capsys):
          "local_path": "data/tones/19-custom.nam"},
     ]
     monkeypatch.setattr(tone3000, "tone_by_id", lambda tid: dict(SAMPLE))
-    monkeypatch.setattr(tone3000, "download",
-                        lambda tid, dest, **kw: list(downloaded) if kw.get("return_paths") else len(downloaded))
+
+    def fake_download(_tone_id, dest, **kwargs):
+        if not kwargs.get("return_paths"):
+            return len(downloaded)
+        records = []
+        for record in downloaded[:2]:
+            record = dict(record)
+            target = dest / Path(record["local_path"]).name
+            target.write_bytes(b"model")
+            record["local_path"] = str(target)
+            records.append(record)
+        return records + [dict(downloaded[2])]
+
+    monkeypatch.setattr(tone3000, "download", fake_download)
     t = library.import_tone(19)
     assert t["local_dir"] is not None
     arch = {m["id"]: m["architecture"] for m in t["models"]}

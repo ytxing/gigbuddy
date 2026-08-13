@@ -36,6 +36,8 @@ def _chain(paths, revision=1):
 def _slot_models(tmp_path):
     first = str(tmp_path / "first.nam")
     second = str(tmp_path / "second.nam")
+    Path(first).write_bytes(b"first")
+    Path(second).write_bytes(b"second")
     models = [
         {"id": 101, "tone_id": 10, "name": "first.nam",
          "local_path": first, "architecture": "SlimmableContainer"},
@@ -112,6 +114,7 @@ def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
         "id": 101, "tone_id": 10, "name": "first.nam",
         "local_path": first, "architecture": "SlimmableContainer",
     }
+    Path(first).write_bytes(b"first")
     tone = {
         "id": 10, "title": "Slot Tone", "gear": "amp",
         "username": "creator", "models_count": 2, "a2_models_count": 2,

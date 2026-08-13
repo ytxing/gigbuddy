@@ -58,6 +58,51 @@ def test_tone3000_url_prefers_official_canonical_url():
     }) == "https://www.tone3000.com/tones/canonical-route"
 
 
+def test_tone3000_url_uses_manifest_compatible_fallback_slug():
+    title = "x" * 100
+    assert tone3000_url({"id": 7, "title": title}) == (
+        "https://www.tone3000.com/tones/" + "x" * 48 + "-7")
+
+
+def test_metadata_author_link_uses_official_user_url():
+    table = metadata_table({
+        "id": 7,
+        "title": "Tone",
+        "username": "alice",
+        "user_url": "https://www.tone3000.com/alice",
+    })
+    author = next(
+        cell for cell in table.columns[1].cells
+        if isinstance(cell, Text) and cell.plain == "@alice")
+
+    assert any(str(span.style) == "link https://www.tone3000.com/alice"
+               for span in author.spans)
+
+
+def test_metadata_downloaded_count_requires_existing_local_files(tmp_path):
+    missing = tmp_path / "missing.nam"
+    table = metadata_table({
+        "id": 7,
+        "title": "Tone",
+        "a2_models_count": 1,
+        "local_dir": str(tmp_path),
+        "models": [{
+            "id": 1,
+            "name": missing.name,
+            "architecture_version": "2",
+            "local_path": str(missing),
+        }],
+    })
+    rows = {
+        label.plain: value.plain
+        for label, value in zip(table.columns[0].cells, table.columns[1].cells)
+        if isinstance(label, Text) and isinstance(value, Text)
+    }
+
+    assert rows["Downloaded"] == "0"
+    assert rows["Local folder"] == "-"
+
+
 def test_signed_fixed_reserves_minus_column():
     assert signed_fixed(0.8) == " 0.80"
     assert signed_fixed(-0.1) == "-0.10"

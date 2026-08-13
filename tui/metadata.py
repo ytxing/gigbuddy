@@ -21,6 +21,7 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+import library  # noqa: E402
 import tone3000  # noqa: E402
 
 # Fallback palette for direct/meta rendering outside the app (and for
@@ -350,7 +351,9 @@ def tone3000_url(tone: dict | None) -> str | None:
     if tone_id is None:
         return None
     title = str(tone.get("title") or "tone")
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "tone"
+    # Match the importer/Pack manifest fallback so legacy rows resolve to one
+    # stable public route even when a title is longer than the slug limit.
+    slug = tone3000.slugify(title, 48)
     return f"https://www.tone3000.com/tones/{slug}-{tone_id}"
 
 
@@ -428,8 +431,12 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
             if author:
                 badge = (f" [b {colors['value']}]✓[/]"
                          if tone3000.is_verified(author) else "")
+                user_url = tone.get("user_url")
+                author_href = (str(user_url).strip()
+                               if isinstance(user_url, str) and user_url.strip()
+                               else f"search:author:{author}")
                 row("IDENTITY", "Author",
-                    _link_markup(f"search:author:{author}", f"@{author}") + badge,
+                    _link_markup(author_href, f"@{author}") + badge,
                     markup=True)
             else:
                 row("IDENTITY", "Author", "?")
@@ -473,9 +480,12 @@ def metadata_table(tone: dict | None = None, model: dict | None = None,
         if not model and tone.get("models") is not None:
             downloaded = sum(
                 1 for item in tone.get("models") or []
-                if tone3000.is_supported_model(item, tone))
+                if (isinstance(item, dict)
+                    and tone3000.is_supported_model(item, tone)
+                    and library._local_file_exists(item.get("local_path"))))
             row("MODEL SET", "Downloaded", downloaded)
-            row("MODEL SET", "Local folder", _compact_path(tone.get("local_dir")))
+            local_folder = tone.get("local_dir") if downloaded else None
+            row("MODEL SET", "Local folder", _compact_path(local_folder))
 
     if note:
         row("NOTES", "Status", note)

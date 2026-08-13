@@ -467,7 +467,17 @@ def _remote_pack_roots(conn: sqlite3.Connection, root: Path) -> set[str]:
     for row in conn.execute(
             "SELECT local_dir FROM tones WHERE local_dir IS NOT NULL").fetchall():
         if row[0]:
-            result.add(_path_key(Path(_to_abs_path(row[0]))))
+            directory = Path(_to_abs_path(row[0]))
+            try:
+                has_assets = directory.is_dir() and any(
+                    child.is_file()
+                    and child.suffix.casefold() in _PACK_ASSET_FORMATS
+                    for child in directory.iterdir()
+                )
+            except (OSError, TypeError, ValueError):
+                has_assets = False
+            if has_assets:
+                result.add(_path_key(directory))
     return result
 
 
@@ -942,6 +952,47 @@ def list_local_models(kind: str = "amp", limit: int = 2000) -> list[dict]:
     return models
 
 
+def _sanitize_tone_local_state(tone: dict) -> dict:
+    """Return a tone copy whose local fields reflect files on disk.
+
+    SQLite keeps stale paths so an import can reconcile metadata after a user
+    moves or deletes a file. Those paths must not escape into detail views or
+    public JSON as if they were still downloaded.
+    """
+    result = dict(tone)
+    raw_models = result.get("models")
+    if isinstance(raw_models, (list, tuple)):
+        models = []
+        has_local_files = False
+        for raw_model in raw_models:
+            if not isinstance(raw_model, dict):
+                models.append(raw_model)
+                continue
+            model = dict(raw_model)
+            if model.get("local_path") and not _local_file_exists(
+                    model.get("local_path")):
+                model["local_path"] = None
+            has_local_files = has_local_files or _local_file_exists(
+                model.get("local_path"))
+            models.append(model)
+        result["models"] = models
+        if result.get("local_dir") and not has_local_files:
+            result["local_dir"] = None
+    elif result.get("local_dir"):
+        try:
+            directory = Path(_to_abs_path(str(result["local_dir"])))
+            has_local_files = any(
+                child.is_file()
+                and child.suffix.casefold() in _PACK_ASSET_FORMATS
+                for child in directory.iterdir()
+            )
+        except (OSError, TypeError, ValueError):
+            has_local_files = False
+        if not has_local_files:
+            result["local_dir"] = None
+    return result
+
+
 def get_tone(tone_id: int) -> dict | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM tones WHERE id = ?", (tone_id,)).fetchone()
@@ -955,9 +1006,13 @@ def get_tone(tone_id: int) -> dict | None:
             m = _row_to_dict(r)
             if tone3000.is_supported_model(m, d):
                 local_models.append(m)
-        d["model_name"] = next(
-            (m.get("name") for m in local_models if m.get("name")), None)
+        d["_models_source"] = "local"
         d["models"] = local_models
+        d = _sanitize_tone_local_state(d)
+        d["model_name"] = next(
+            (m.get("name") for m in d["models"]
+             if isinstance(m, dict) and m.get("local_path") and m.get("name")),
+            None)
         return d
 
 
@@ -1545,7 +1600,7 @@ def import_tone(tone_id: int, progress=None, *, quiet: bool = False,
             if not paths:
                 existing = get_tone(tone_id)
                 shutil.rmtree(staging, ignore_errors=True)
-                if existing and any(model.get("local_path")
+                if existing and any(_local_file_exists(model.get("local_path"))
                                     for model in existing.get("models", [])):
                     return existing
                 if not quiet:
@@ -3277,10 +3332,10 @@ def _fmt_table(tones: list[dict]) -> str:
 
 def _public_tone(tone: dict) -> dict:
     """Return product-facing Tone JSON without unsupported model metadata."""
-    result = dict(tone)
+    result = _sanitize_tone_local_state(tone)
     for key in ("a1_models_count", "custom_models_count", "models_count"):
         result.pop(key, None)
-    result["supported_models_count"] = tone3000.supported_tone_model_count(tone)
+    result["supported_models_count"] = tone3000.supported_tone_model_count(result)
     models = result.get("models")
     if isinstance(models, list):
         result["models"] = [
@@ -3288,10 +3343,13 @@ def _public_tone(tone: dict) -> dict:
             if isinstance(model, dict)
             and tone3000.is_supported_model(model, tone)
         ]
+    result.pop("_models_source", None)
+    result.pop("_models_complete", None)
     return result
 
 
 def _fmt_show(t: dict) -> str:
+    t = _public_tone(t)
     lines = [
         f"id           {t['id']}",
         f"title        {t.get('title')}",
@@ -3300,7 +3358,8 @@ def _fmt_show(t: dict) -> str:
         f"username     {t.get('username')}",
         f"downloads    {t.get('downloads_count')}   favorites {t.get('favorites_count')}",
         f"counts       a2={t.get('a2_models_count')} irs={t.get('irs_count')} "
-        f"supported={tone3000.supported_tone_model_count(t)}",
+        f"supported={t.get('supported_models_count',
+                           tone3000.supported_tone_model_count(t))}",
         f"model_name   {t.get('model_name')}",
         f"tags         {', '.join(t.get('tags') or [])}",
         f"makes        {', '.join(t.get('makes') or [])}",

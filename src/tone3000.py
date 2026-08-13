@@ -1012,17 +1012,13 @@ def supported_tone_model_count(row: dict | None) -> int:
     """Return the product-visible A2 plus IR count for one Tone row."""
     row = row if isinstance(row, dict) else {}
     models = row.get("models")
-    has_local_model_evidence = any(
-        isinstance(model, dict) and model.get("local_path")
-        for model in (models or ())
-    )
     model_count = None
     if isinstance(models, (list, tuple)) and models:
         model_count = sum(
             is_supported_model(model, row)
             for model in models if isinstance(model, dict)
         )
-        if has_local_model_evidence:
+        if row.get("_models_source") == "local":
             # A local pack's model list is the downloaded subset, while the
             # aggregate A2/IR counters describe the complete remote pack.
             # Keep the larger supported value so partial packs show missing
@@ -1034,9 +1030,9 @@ def supported_tone_model_count(row: dict | None) -> int:
                 except (TypeError, ValueError):
                     continue
             return max(model_count, aggregate)
-        if row.get("local_dir"):
-            # An imported full-detail response has model-level evidence. Prefer
-            # it over aggregate counters, which may include unsupported rows.
+        if row.get("_models_complete"):
+            # A complete remote model list is authoritative even when the
+            # aggregate counters include unsupported architectures.
             return model_count
     counts = []
     for key in _SUPPORTED_MODEL_COUNTS:
@@ -1317,29 +1313,27 @@ def favorited(limit=50, text=None, usernames=None, gear=None):
     requested = max(0, int(limit))
     if requested == 0:
         return []
-    rows: list[dict] = []
+    usernames_set = {str(name).casefold() for name in (usernames or ())}
+    text_value = str(text or "").casefold().strip()
+    filtered: list[dict] = []
     page = 1
-    while len(rows) < requested:
+    while len(filtered) < requested:
         result = favorited_page(page_size=min(100, max(requested, 50)),
                                 page_number=page, gear=gear)
-        rows.extend(result.rows)
+        for row in result.rows:
+            username = str(row.get("username") or "").casefold()
+            haystack = " ".join((str(row.get("title") or ""),
+                                  str(row.get("description") or ""))).casefold()
+            if usernames_set and username not in usernames_set:
+                continue
+            if text_value and text_value not in haystack:
+                continue
+            filtered.append(row)
+            if len(filtered) >= requested:
+                break
         if not result.has_more:
             break
         page += 1
-    usernames_set = {str(name).casefold() for name in (usernames or ())}
-    text_value = str(text or "").casefold().strip()
-    filtered = []
-    for row in rows:
-        username = str(row.get("username") or "").casefold()
-        haystack = " ".join((str(row.get("title") or ""),
-                              str(row.get("description") or ""))).casefold()
-        if usernames_set and username not in usernames_set:
-            continue
-        if text_value and text_value not in haystack:
-            continue
-        filtered.append(row)
-        if len(filtered) >= requested:
-            break
     return filtered
 
 

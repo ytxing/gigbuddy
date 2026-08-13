@@ -2831,7 +2831,6 @@ class GigBuddyApp(App):
             siblings = library.local_models_by_tone(path) or []
         except Exception:
             siblings = []
-        siblings = [m for m in siblings if m.get("local_path")]
         if len(siblings) <= 1:
             self.notify("Only one model in this pack", severity="warning")
             return
@@ -3024,8 +3023,6 @@ class GigBuddyApp(App):
             local_models = library.local_models_by_tone(path) or []
         except Exception:
             local_models = []
-        local_models = [model for model in local_models
-                        if model.get("local_path")]
         tone = {}
         if local_models:
             try:

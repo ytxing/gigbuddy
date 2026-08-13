@@ -593,6 +593,7 @@ class LibraryPanel(Vertical):
         self._highlighted_key: str | None = None
         self._tone_page = 0
         self._tone_total: int | None = None
+        self._tone_remote_total: int | None = None
         self._tone_has_more = False
         self._tone_loading = False
         self._tone_request_id = 0
@@ -1330,7 +1331,8 @@ class LibraryPanel(Vertical):
                 [token for token, _action in self._border_hint_actions()])
             return
         loaded = len(self._remote_tones)
-        count = f"{loaded}/{self._tone_total}" if self._tone_total else str(loaded)
+        count = (f"{loaded}/{self._tone_total}"
+                 if self._tone_total is not None else str(loaded))
         if self._tone_auth_required:
             self._tone_error = False
             state = "login required"
@@ -1560,12 +1562,10 @@ class LibraryPanel(Vertical):
                 "(SELECT COUNT(*) FROM models WHERE local_path IS NOT NULL), "
                 "(SELECT COALESCE(GROUP_CONCAT(id || ':' || local_path, '|'), '') "
                 "FROM models WHERE local_path IS NOT NULL) FROM tones").fetchone())
-            all_local_ids = {
-                int(row[0]) for row in conn.execute(
-                    "SELECT id FROM tones WHERE local_dir IS NOT NULL "
-                    "OR id IN (SELECT tone_id FROM models "
-                    "WHERE local_path IS NOT NULL)").fetchall()
-            }
+            # Selection survives a refresh/page change, but only for tones
+            # that still own at least one real supported local file. A stale
+            # local_dir/local_path must not keep an invisible row selected.
+            all_local_ids = set(library.downloaded_model_ids_by_tone())
             fp = (db_fp, tuple(
                 (pack["pack_id"], pack.get("root_path"), pack.get("name"),
                  pack.get("author"), pack.get("gear"), pack.get("description"),
@@ -1656,10 +1656,13 @@ class LibraryPanel(Vertical):
     def _local_tone_has_files(tone: dict | None) -> bool:
         if not tone:
             return False
-        if tone.get("local_dir"):
-            return True
-        return any(model.get("local_path") for model in (tone.get("models") or [])
-                   if isinstance(model, dict))
+        # ``local_dir`` is metadata, not proof that an import produced usable
+        # assets. A failed/partial import can leave the directory behind.
+        return any(
+            library._local_file_exists(model.get("local_path"))
+            for model in (tone.get("models") or [])
+            if isinstance(model, dict)
+        )
 
     def _local_tone_matches(self, tone: dict, spec: SearchSpec,
                             type_filter: str) -> bool:
@@ -2144,6 +2147,9 @@ class LibraryPanel(Vertical):
         self._tone_cache[key] = {
             "tones": dict(self._remote_tones),
             "total": self._tone_total,
+            # Keep focused test doubles and caches written by older builds
+            # compatible with the newer remote-total field.
+            "remote_total": getattr(self, "_tone_remote_total", None),
             "page": self._tone_page,
             "has_more": self._tone_has_more,
         }
@@ -2154,6 +2160,7 @@ class LibraryPanel(Vertical):
         self._remote_tones = dict(entry["tones"])
         self._tone_page = entry["page"]
         self._tone_total = entry["total"]
+        self._tone_remote_total = entry.get("remote_total")
         self._tone_has_more = entry["has_more"]
         self._apply_local_download_states()
         table = self._table_for_pane("pane-tone")
@@ -2234,6 +2241,7 @@ class LibraryPanel(Vertical):
                 return
             self._tone_page = 0
             self._tone_total = None
+            self._tone_remote_total = None
             self._tone_has_more = False
             if not silent:
                 self._show_status_if_empty(table, "loading…")
@@ -2331,7 +2339,7 @@ class LibraryPanel(Vertical):
         self._tone_page = page
         search_page = locals().get("search_page")
         if search_page is not None:
-            self._tone_total = search_page.total_count
+            self._tone_remote_total = search_page.total_count
         elif hits:
             remote_totals = {
                 int(hit["total_count"])
@@ -2339,7 +2347,7 @@ class LibraryPanel(Vertical):
                 if isinstance(hit, dict) and hit.get("total_count") is not None
             }
             if len(remote_totals) == 1:
-                self._tone_total = remote_totals.pop()
+                self._tone_remote_total = remote_totals.pop()
         if not append:
             self._remote_tones = {}
             table.clear()
@@ -2356,8 +2364,10 @@ class LibraryPanel(Vertical):
             self._tone_has_more = search_page.has_more
         else:
             self._tone_has_more = bool(hits)
-            if not hits:
-                self._tone_total = len(self._remote_tones)
+        # The API total includes rows removed by the product A2/IR gate. It is
+        # useful for pagination, but it is not the visible total shown here.
+        self._tone_total = (len(self._remote_tones)
+                            if not self._tone_has_more else None)
         if key is not None:
             self._save_tone_cache(key)
         if silent:
@@ -2477,6 +2487,10 @@ class LibraryPanel(Vertical):
                     self._restore_tone_entry(key, silent=silent)
                 return
             self._tone_loading = True
+            if not append:
+                self._tone_page = 0
+                self._tone_total = None
+                self._tone_remote_total = None
             if not silent and not append:
                 self._show_status_if_empty(table, "loading…")
                 status.content = "loading…"
@@ -2500,26 +2514,39 @@ class LibraryPanel(Vertical):
                     and getattr(top_favorites, "__module__", "") == "tone3000")
                 page_result = None
                 if use_official_page:
-                    page_result = await asyncio.to_thread(
-                        favorited_page, page_size=REMOTE_PAGE_SIZE,
-                        page_number=page,
-                        gear=(None if self._type_filter == "all"
-                              else self._type_filter))
-                    hits = list(page_result.rows)
                     text_value = str(spec.text or "").casefold().strip()
                     authors = {
                         str(name).casefold()
                         for name in self._effective_authors(spec)
                     }
-                    hits = [
-                        hit for hit in hits
-                        if (not text_value or text_value in " ".join((
-                            str(hit.get("title") or ""),
-                            str(hit.get("description") or ""),
-                        )).casefold())
-                        and (not authors or str(hit.get("username") or "")
-                             .casefold() in authors)
-                    ]
+                    hits = []
+                    fetch_page = page
+                    while True:
+                        page_result = await asyncio.to_thread(
+                            favorited_page, page_size=REMOTE_PAGE_SIZE,
+                            page_number=fetch_page,
+                            gear=(None if self._type_filter == "all"
+                                  else self._type_filter))
+                        batch = [
+                            hit for hit in page_result.rows
+                            if (not text_value or text_value in " ".join((
+                                str(hit.get("title") or ""),
+                                str(hit.get("description") or ""),
+                            )).casefold())
+                            and (not authors
+                                 or str(hit.get("username") or "").casefold()
+                                 in authors)
+                        ]
+                        hits.extend(batch)
+                        # Filtering is client-side because the official
+                        # favorites feed has no text/creator predicates. Keep
+                        # consuming official pages when this page contributes
+                        # no matching rows, so a match on page 2 is visible.
+                        if (not text_value and not authors) or len(hits) >= REMOTE_PAGE_SIZE \
+                                or not page_result.has_more:
+                            break
+                        fetch_page += 1
+                    page = page_result.page_number
                 else:
                     # Keep focused test doubles and older integrations source
                     # compatible while production uses the official page API.
@@ -2553,9 +2580,8 @@ class LibraryPanel(Vertical):
             self._tone_loading = False
             self._clear_tone_auth_required()
             self._tone_page = page
-            self._tone_total = (
-                page_result.total_count if page_result is not None
-                else (len(hits) if not append else self._tone_total))
+            if page_result is not None:
+                self._tone_remote_total = page_result.total_count
             self._tone_has_more = (
                 page_result.has_more if page_result is not None else False)
             if not append:
@@ -2568,6 +2594,8 @@ class LibraryPanel(Vertical):
                     continue
                 self._remote_tones[tone_id] = t
                 table.add_row(*self._row_cells(t, table), key=f"remote:{tone_id}")
+            self._tone_total = (len(self._remote_tones)
+                                if not self._tone_has_more else None)
             self._save_tone_cache(key)
             if silent:
                 return
@@ -2965,7 +2993,8 @@ class LibraryPanel(Vertical):
             ]
             if t.get("downloaded") is None:
                 t["downloaded"] = sum(
-                    bool(model.get("local_path")) for model in usable_models)
+                    library._local_file_exists(model.get("local_path"))
+                    for model in usable_models)
         files = str(total)
         if t.get("downloaded") is not None and total:
             files = f"{t['downloaded']}/{total}"

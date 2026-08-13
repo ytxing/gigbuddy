@@ -260,6 +260,25 @@ def test_favorited_page_forwards_official_gear_filter(monkeypatch):
                       {"page": 1, "page_size": 10, "gear": "ir"})]
 
 
+def test_favorited_filter_continues_across_official_pages(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        calls.append((url, params))
+        if params["page"] == 1:
+            rows = [{"id": 1, "title": "Other", "a2_models_count": 1}]
+            return {"data": rows, "total": 2, "total_pages": 2}
+        rows = [{"id": 2, "title": "Needle", "a2_models_count": 1}]
+        return {"data": rows, "total": 2, "total_pages": 2}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    rows = tone3000.favorited(limit=1, text="needle")
+
+    assert [row["id"] for row in rows] == [2]
+    assert [params["page"] for _url, params in calls] == [1, 2]
+
+
 def test_top_creators_page_preserves_official_pagination(monkeypatch):
     calls = []
 
@@ -772,7 +791,7 @@ def test_supported_model_count_prefers_explicit_model_rows():
     tone = {
         "a2_models_count": 9,
         "irs_count": 2,
-        "local_dir": "data/tones/1-pack",
+        "_models_complete": True,
         "models": [
             {"architecture_version": "2", "name": "amp.nam"},
             {"architecture": "IR", "name": "cab.wav"},
@@ -782,6 +801,22 @@ def test_supported_model_count_prefers_explicit_model_rows():
     }
 
     assert tone3000.supported_tone_model_count(tone) == 2
+
+
+def test_supported_model_count_does_not_infer_local_state_from_paths():
+    tone = {
+        "a2_models_count": 9,
+        "irs_count": 2,
+        "local_dir": "data/tones/missing-pack",
+        "models": [
+            {"architecture_version": "2", "name": "amp.nam",
+             "local_path": "data/tones/missing-pack/amp.nam"},
+            {"architecture": "IR", "name": "cab.wav",
+             "local_path": "data/tones/missing-pack/cab.wav"},
+        ],
+    }
+
+    assert tone3000.supported_tone_model_count(tone) == 11
 
 
 def test_top_creators_composes_ten_item_api_pages(monkeypatch):

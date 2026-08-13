@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import library
 from tui.library_panel import LibraryPanel
 
 
@@ -56,3 +57,27 @@ def test_tone_cache_is_fifo_bounded():
     assert len(panel._tone_cache) == 20
     assert ("query-0", "all", "trending") not in panel._tone_cache
     assert ("query-20", "all", "trending") in panel._tone_cache
+    assert panel._tone_cache[("query-20", "all", "trending")]["remote_total"] is None
+
+
+def test_local_tone_file_state_requires_a_real_file(tmp_path):
+    missing_dir = tmp_path / "missing-pack"
+    missing_file = missing_dir / "amp.nam"
+    assert not LibraryPanel._local_tone_has_files({
+        "local_dir": str(missing_dir),
+        "models": [{"local_path": str(missing_file)}],
+    })
+
+    missing_dir.mkdir()
+    assert not LibraryPanel._local_tone_has_files({
+        "local_dir": str(missing_dir),
+        "models": [{"local_path": str(missing_file)}],
+    })
+
+    missing_file.write_bytes(b"nam")
+    assert LibraryPanel._local_tone_has_files({
+        "local_dir": str(missing_dir),
+        "models": [{"local_path": str(missing_file)}],
+    })
+
+    assert not library._local_file_exists(str(missing_dir))

@@ -10,6 +10,7 @@
    靠左（REQ-024/025）。
 """
 import asyncio
+from pathlib import Path
 
 from textual.widgets import DataTable
 
@@ -307,6 +308,7 @@ def test_install_keeps_remote_pack_and_marks_local_rows(monkeypatch, tmp_path):
 
     def fake_import(tone_id, progress, **_kwargs):
         state["installed"] = True
+        Path(local_path).write_bytes(b"nam")
         return local_tone
 
     monkeypatch.setattr("tui.install_screen.library.import_tone", fake_import)

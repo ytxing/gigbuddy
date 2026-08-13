@@ -2003,7 +2003,8 @@ class ChainPanel(Vertical):
             if models:
                 model = next(
                     (item for item in models
-                     if item.get("local_path") == path), models[0])
+                     if item.get("local_path") == path),
+                    models[0])
                 tone = (library.get_tone(model.get("tone_id"))
                         if model.get("tone_id") is not None
                         else library.local_pack_for_path(path)) or {}
@@ -3626,7 +3627,7 @@ class DetailPane(Vertical):
             self.app.notify("This tone has no models", severity="warning")
             return
         path = model.get("local_path")
-        if not path:
+        if not library._local_file_exists(path):
             self.app.notify("First model is not downloaded", severity="warning")
             return
         slot_index = self._pack_slot_index
@@ -3732,7 +3733,7 @@ class DetailPane(Vertical):
             return
         picked = self._selected_pack_keys()
         todo = [m for m in (self._pack_rows.get(k) for k in picked)
-                if m and not m.get("local_path")]
+                if m and not library._local_file_exists(m.get("local_path"))]
         if not todo:
             self.app.notify("All selected models are already downloaded",
                             severity="warning")
@@ -3813,7 +3814,7 @@ class DetailPane(Vertical):
             return
         picked = self._selected_pack_keys()
         todo = [m for m in (self._pack_rows.get(k) for k in picked)
-                if m and m.get("local_path")]
+                if m and library._local_file_exists(m.get("local_path"))]
         if not todo:
             self.app.notify("No downloaded model selected", severity="warning")
             return
@@ -4180,7 +4181,7 @@ class DetailPane(Vertical):
                 continue
             for model in models:
                 model_path = model.get("local_path")
-                if not model_path:
+                if not library._local_file_exists(model_path):
                     continue
                 if str(model_path) == str(path):
                     return model.get("id")
@@ -4394,10 +4395,14 @@ class DetailPane(Vertical):
                    else f"local:{model.get('model_key')}")
             self._pack_rows[key] = model
             self._pack_status_markers[key] = ""
-            local_path = model.get("local_path")
-            filename = Path(local_path).name if local_path else (
+            raw_local_path = model.get("local_path")
+            has_local_file = library._local_file_exists(raw_local_path)
+            local_path = raw_local_path if has_local_file else None
+            if not has_local_file:
+                model["local_path"] = None
+            filename = Path(raw_local_path).name if raw_local_path else (
                 model.get("name") or model.get("title") or "?")
-            if local_path:
+            if has_local_file:
                 self._pack_path_to_key[local_path] = key
                 try:
                     size = Path(local_path).stat().st_size
@@ -4598,7 +4603,8 @@ class DetailPane(Vertical):
         local_by_id = {
             int(model["id"]): model
             for model in local_tone.get("models") or []
-            if model.get("id") is not None and model.get("local_path")
+            if (model.get("id") is not None
+                    and library._local_file_exists(model.get("local_path")))
         }
         merged = []
         for model in models:
@@ -4773,10 +4779,10 @@ class DetailPane(Vertical):
         model_idx = ir_idx = None
         for index, (key, model) in enumerate(self._pack_rows.items()):
             path = model.get("local_path")
-            if path and path == active_path:
+            if library._local_file_exists(path) and path == active_path:
                 mark = "[bold $success]▶[/]"
                 model_idx = index
-            elif path and path == candidate_path:
+            elif library._local_file_exists(path) and path == candidate_path:
                 mark = "[bold $error]▷[/]"
                 ir_idx = index
             else:
@@ -4840,7 +4846,7 @@ class DetailPane(Vertical):
         if not model:
             return
         tone = self._pack_tone or self._current_tone or {}
-        if not model.get("local_path"):
+        if not library._local_file_exists(model.get("local_path")):
             # 未下载行 Enter/双击 = 打开二级菜单详情页（REQ-038）。
             # 必须传 tone dict——旧实现把 model 当 tone 传，PackInstallScreen
             # 用 model 的 id 当作 tone id 拉列表/导入，内容全错。
