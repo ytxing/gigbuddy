@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.2.0] - Unreleased
+
+Full release note: [GigBuddy v1.2.0](docs/releases/v1.2.0.md).
+
+This entry covers the current `main` work after `v1.1.4`. It is not a published
+tag yet.
+
+### Added
+
+- Remote and local Tone Pack management with a shared LOCAL workflow.
+- Optional `gigbuddy.json` Pack manifests and direct-file local Pack scanning.
+- A customer-facing [tone file management guide](docs/tone-file-management.md).
+
+### Changed
+
+- TONE3000 search now follows the official default `trending` + A2 view for an
+  empty query and keeps one official ranked stream while filtering to A2/IR.
+- Remote imports preserve semantic model filenames, support partial installs,
+  reuse matching files, and write portable Pack metadata.
+
+### Fixed
+
+- A1, Custom, and other unsupported model architectures no longer enter the
+  visible catalog, download path, Chain, or Preset resolution.
+- Search sorting, pagination, duplicate-page handling, stale local files, and
+  uninstall boundary checks were corrected.
+
 ## 1.1.4 - 2026-08-11
 
 ### Added

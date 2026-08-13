@@ -27,7 +27,7 @@ So I built GigBuddy: a searchable library for tone packs, NAM files, and IRs. I
 can try them with the same dry recording or my own instrument, keep track of
 which file I am hearing, and build the chain once I find a sound that works.
 
-*v1.1.4 · 2026-08-11*
+*v1.1.4 · 2026-08-11* · [v1.2.0 changes on `main`](docs/releases/v1.2.0.md)
 
 **One line from the terminal — downloads, installs, and initializes everything:**
 
@@ -87,6 +87,12 @@ dependency), fully MIT core stack.
 See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md) for a closer look at the Library, Tone Chain, Tone Detail, Presets, and Audio / Level views.
 
 ## What's new
+
+The full change list since `v1.1.4` is in the [v1.2.0 release note](docs/releases/v1.2.0.md).
+The short version: TONE3000 search now follows the official default ranking and
+A2 filter, and LOCAL now manages both downloaded remote Packs and user-owned
+local Packs. The [tone file management guide](docs/tone-file-management.md)
+covers the customer workflow, paths, manifests, and file limits.
 
 GigBuddy turns the original tone-chain console into a complete tone workbench:
 
@@ -274,9 +280,10 @@ data/tones/<tone-id>-<title-slug>/
   <ir-name>.wav
 ```
 
-See [GigBuddy tone file management](docs/local-tone-pack-design.md) for the
-remote download layout, local Tone Pack loading rules, preset files, and current
-format and path limits.
+See the customer-facing [GigBuddy tone file management guide](docs/tone-file-management.md)
+for the remote download layout, local Pack workflow, manifest format, preset
+behavior, and current file limits. The older [local Tone Pack design note](docs/local-tone-pack-design.md)
+keeps the engineering schema and boundary details.
 
 ## Make a rig your own
 

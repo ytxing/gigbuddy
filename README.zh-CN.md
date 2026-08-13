@@ -24,7 +24,7 @@ tone pack，里面又是一长串 NAM 文件，每个文件都是不同 setting 
 我可以用同一段干音或自己的乐器试听，知道当前听的到底是哪一个文件，找到
 合适的声音后直接搭建整条音色链。
 
-*v1.1.4 · 2026-08-11*
+*v1.1.4 · 2026-08-11* · [main 上 v1.2.0 的变更说明](docs/releases/v1.2.0.md)
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
 
@@ -86,6 +86,11 @@ british-green、surf-cream 之间循环。
 逐项说明，请参阅 [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs/gigbuddy-panels.md)。
 
 ## 主要特性
+
+`v1.1.4` 之后 `main` 的完整变更见 [v1.2.0 release note](docs/releases/v1.2.0.md)。
+简单说：TONE3000 搜索现在跟随官方默认排序和 A2 过滤，LOCAL 也可以统一管理
+远程下载的 Pack 与用户自己的本地 Pack。面向客户的[音色文件管理指南](docs/tone-file-management.zh-CN.md)
+说明目录、导入、manifest、preset 和文件限制。
 
 **音色链全面升级。** 原来固定的 AMP/CAB 两段，现在是最多六个 Slot 的
 有序链，每个 Slot 可放任意受支持的 NAM 模型或 `.wav` IR，信号路径完全
@@ -249,8 +254,9 @@ data/tones/<tone-id>-<title-slug>/
   <ir-name>.wav
 ```
 
-音色文件的完整管理规则见 [GigBuddy 音色文件管理](docs/local-tone-pack-design.md)，
-包括远程下载、本地 Tone Pack 加载、preset 文件以及格式和路径限制。
+音色文件的完整客户使用规则见 [GigBuddy 音色文件管理指南](docs/tone-file-management.zh-CN.md)，
+包括远程下载、本地 Pack 加入、manifest、preset 行为以及格式和路径限制。工程
+实现细节仍可参考[本地 Tone Pack 设计说明](docs/local-tone-pack-design.md)。
 
 ## 搭建自己的设备
 

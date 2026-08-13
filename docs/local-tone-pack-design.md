@@ -1,5 +1,8 @@
 # GigBuddy 音色文件管理
 
+> 面向客户的操作指南见 [GigBuddy 音色文件管理指南](tone-file-management.zh-CN.md)。
+> 本文保留实现边界、索引结构和工程约束，供开发与集成使用。
+
 本文说明 GigBuddy 当前如何保存远程下载的音色、如何加载用户自己的本地
 Tone Pack，以及文件格式、目录结构和元数据方面的限制。这里的 `data/`
 路径是 GigBuddy 数据根目录的相对写法：源码 checkout 中位于仓库下，安装版
