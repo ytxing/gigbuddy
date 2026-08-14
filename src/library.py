@@ -37,7 +37,7 @@ from uuid import uuid4
 import tone3000
 import chain_protocol
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 ROOT = Path(__file__).resolve().parent.parent
 

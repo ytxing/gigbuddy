@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.2.0}"
+REPO_REF="${GIGBUDDY_REF:-v1.2.1}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
@@ -426,8 +426,9 @@ if [[ -d "$INSTALL_ROOT/.git" ]]; then
     die "install path is not a GigBuddy checkout: $INSTALL_ROOT"
   fi
   step "Updating GigBuddy to $REPO_REF"
-  # --force: release tag 可能被前移（修复后重发），本地旧 tag 必须可被覆盖
-  run_quiet git -C "$INSTALL_ROOT" fetch --quiet --tags --force origin
+  # Old shallow tag clones can retain a fetch refspec for a tag no longer
+  # published by the remote. An explicit wildcard refspec avoids inheriting it.
+  run_quiet git -C "$INSTALL_ROOT" fetch --quiet --force origin "+refs/tags/*:refs/tags/*"
   run_quiet git -C "$INSTALL_ROOT" checkout --quiet --detach "$REPO_REF"
 else
   step "Downloading GigBuddy $REPO_REF"

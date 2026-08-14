@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.1] - 2026-08-14
+
+Full release note: [GigBuddy v1.2.1](docs/releases/v1.2.1.md).
+
+### Fixed
+
+- The user installer now upgrades old tag-based checkouts even when their
+  configured fetch refspec names a retired release tag.
+
 ## [1.2.0] - 2026-08-14
 
 Full release note: [GigBuddy v1.2.0](docs/releases/v1.2.0.md).
