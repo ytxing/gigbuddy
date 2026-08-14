@@ -27,12 +27,12 @@ So I built GigBuddy: a searchable library for tone packs, NAM files, and IRs. I
 can try them with the same dry recording or my own instrument, keep track of
 which file I am hearing, and build the chain once I find a sound that works.
 
-*v1.1.4 · 2026-08-11* · [v1.2.0 changes on `main`](docs/releases/v1.2.0.md)
+*v1.2.0 · 2026-08-14* · [release notes](docs/releases/v1.2.0.md) · [Tone Pack and shareable Preset guide](docs/tone-file-management.md)
 
 **One line from the terminal — downloads, installs, and initializes everything:**
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.0/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
@@ -88,11 +88,12 @@ See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs
 
 ## What's new
 
-The full change list since `v1.1.4` is in the [v1.2.0 release note](docs/releases/v1.2.0.md).
+The full change list is in the [v1.2.0 release note](docs/releases/v1.2.0.md).
 The short version: TONE3000 search now follows the official default ranking and
 A2 filter, and LOCAL now manages both downloaded remote Packs and user-owned
 local Packs. The [tone file management guide](docs/tone-file-management.md)
-covers the customer workflow, paths, manifests, and file limits.
+covers the customer workflow, paths, manifests, shareable Presets, and file
+limits.
 
 GigBuddy turns the original tone-chain console into a complete tone workbench:
 
@@ -143,6 +144,11 @@ GigBuddy turns the original tone-chain console into a complete tone workbench:
   kept off the hot path.
 - **Model changes start clean:** replacing a model restores neutral Slot input
   and output trims; bypass and restore preserve the existing model's trims.
+- **Share a rig by model ID:** `gigbuddy preset export` writes a portable JSON
+  file containing TONE3000 model IDs and chain settings, without local paths.
+  Another GigBuddy user can run `gigbuddy preset import preset-name.json` to
+  download the referenced models and create the local Preset. The full format
+  and workflow are in the [tone file management guide](docs/tone-file-management.md#shareable-presets).
 
 ## Start playing
 
@@ -156,7 +162,7 @@ skip the prompt. To remove a user-level install, run the matching uninstall
 script:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.0/scripts/uninstall.sh | bash
 ```
 
 The standalone uninstaller removes the local install, generated runtime files,
@@ -165,7 +171,7 @@ the runtime while keeping downloaded tones and local data; the login session is
 still removed:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.0/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 From a fresh checkout:
@@ -233,6 +239,19 @@ Presets are editable JSON files in `data/presets/`, so rigs can be backed up or
 reviewed outside GigBuddy. SQLite remains the local index. A hand-edited JSON
 file is reconciled when GigBuddy reads the preset; invalid JSON is preserved and
 reported instead of replacing the last indexed snapshot.
+
+For sharing with another GigBuddy user, export a separate portable file. It uses
+TONE3000 model IDs rather than paths, so the recipient can download the same
+models into their own library:
+
+```sh
+gigbuddy preset export <name> preset-name.json
+gigbuddy preset import preset-name.json --load
+```
+
+The source file is imported explicitly and should stay outside `data/presets/`.
+See the [shareable Preset format](docs/tone-file-management.md#shareable-presets)
+for the JSON fields and local Pack limitations.
 
 The global command palette (`ctrl+p`) can focus Presets, open audio settings,
 change the theme, or find the main commands without memorizing every key.
@@ -330,6 +349,8 @@ gigbuddy tone login
 gigbuddy tone logout
 gigbuddy preset list
 gigbuddy preset load <name>
+gigbuddy preset export <name> preset-name.json
+gigbuddy preset import preset-name.json --load
 gigbuddy chain get
 gigbuddy chain set '{"slots": [], "gain": 1.0, "master": 1.0}'
 ```
@@ -410,7 +431,7 @@ integration.
 
 ## Dependencies
 
-Pinned versions (v1.1.4). Update `requirements.txt` and the NeuralAudio commit
+Pinned versions (v1.2.0). Update `requirements.txt` and the NeuralAudio commit
 in `install.sh` together when bumping.
 
 **Python runtime** (`requirements.txt`):

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.1.4}"
+REPO_REF="${GIGBUDDY_REF:-v1.2.0}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"

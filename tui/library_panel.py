@@ -18,7 +18,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.events import Leave, MouseEvent, MouseMove
+from textual.events import Leave, MouseEvent, MouseMove, MouseScrollDown
 from textual.message import Message
 from textual.widgets import (Button, DataTable, Input, Select,
                              TabbedContent, TabPane)
@@ -327,6 +327,31 @@ class LibraryTable(ClickSelectTable):
         panel = self.query_ancestor(LibraryPanel)
         if panel is not None:
             panel._maybe_load_more_from_viewport(self)
+
+    def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
+        """Use a down-wheel event when a full page has no scroll offset.
+
+        Textual's default handler reports no scroll change when the first page
+        exactly fills the table, so ``watch_scroll_y`` never runs. In that
+        case the wheel still expresses the user's intent to load more.
+        """
+        if self.max_scroll_y > 0:
+            return
+        panel = self.query_ancestor(LibraryPanel)
+        if panel is None:
+            return
+        if self.id == "lib-table-tone":
+            can_load = panel._tone_has_more and not panel._tone_loading
+        elif self.id == "lib-table-local":
+            can_load = panel._local_has_more and not panel._local_loading
+        elif self.id == "lib-table-creators":
+            can_load = panel._creator_has_more and not panel._creator_loading
+        else:
+            return
+        if can_load:
+            panel._maybe_load_more_from_viewport(self, force=True)
+            event.prevent_default()
+            event.stop()
 
     def scroll_end(self, *args, **kwargs):
         """Treat an explicit End/scroll-end action as viewport intent.

@@ -104,6 +104,49 @@ warning. Deleting a tracked file deletes its indexed preset. Rename, note,
 draft, delete, and seed operations update both representations atomically as
 far as the local SQLite/file boundary permits.
 
+### Shareable Preset documents
+
+`gigbuddy preset export NAME [PATH]` writes a separate portable document for
+sharing with another GigBuddy user. Its kind is
+`"gigbuddy-shareable-preset"`, its provider is `"tone3000"`, and every loaded
+model is identified by its TONE3000 `model_id`. It contains no local path,
+Pack identity, database id, or machine-specific filename.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-shareable-preset",
+  "provider": "tone3000",
+  "name": "blackface-clean",
+  "note": "Clean amp with a 4x12 IR",
+  "chain": {
+    "slots": [
+      {"model_id": 12345, "input_gain_db": 1.5},
+      {"model_id": 67890, "bypass": true},
+      {"model_id": 12345}
+    ],
+    "gain": 0.8,
+    "master": 0.9,
+    "quality": 1.0
+  }
+}
+```
+
+`chain.slots` keeps Slot order, repeated model references, bypass state, and
+per-Slot trims. An empty Slot uses `{"model_id": null}`. The Slot
+`model_id` values are the only model references in the format; GigBuddy derives
+the unique, first-use-ordered download list from them. Local-only Pack assets
+cannot be exported in this format. Older files may contain a redundant
+top-level `model_ids` field; it is ignored for compatibility.
+
+The share file is imported explicitly; it is not a local preset just because it
+has a `.json` suffix and it should not be placed in `data/presets/`. Importing
+it with `gigbuddy preset import preset-name.json` resolves each missing model ID
+through TONE3000's exact model endpoint, groups IDs by parent Tone, downloads
+only the requested models, and writes the normal local preset after every model
+is available. Already installed models are reused. Add `--load` to apply the
+new preset to the live Chain, or `--name NAME` to choose a local name.
+
 Built-in chains (`gigbuddy preset seed`) use name prefixes and descriptions for
 the two categories and instrument. The default seed command downloads the exact
 starter model files first, then writes preset rows that reference local model

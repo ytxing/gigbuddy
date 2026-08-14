@@ -805,6 +805,28 @@ def test_complete_model_fetch_keeps_only_a2_and_ir(monkeypatch):
     assert [call.get("architecture") for call in calls] == [None, "2"]
 
 
+def test_complete_model_fetch_does_not_reclassify_repeated_ir_as_a2(monkeypatch):
+    calls = []
+
+    def fake_get(url, **params):
+        assert url == f"{tone3000.API}/models"
+        calls.append(params)
+        # The official architecture filter can repeat IR rows for an IR Tone.
+        return {
+            "data": [{"id": 4, "name": "cab.wav"}],
+            "total_pages": 1,
+        }
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    rows = tone3000.models(
+        9, a2_only=False, tone={"id": 9, "gear": "cab", "format": "ir"})
+
+    assert [row["id"] for row in rows] == [4]
+    assert rows[0]["architecture"] == "IR"
+    assert [call.get("architecture") for call in calls] == [None, "2"]
+
+
 def test_architectureless_ir_model_uses_parent_tone_context(monkeypatch):
     calls = []
 

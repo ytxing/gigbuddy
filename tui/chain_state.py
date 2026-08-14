@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
+import inspect
+import itertools
 import json
 import math
 from pathlib import Path
@@ -31,6 +33,12 @@ SLOT_GAIN_DEFAULT_DB = 0.0
 SLOT_GAIN_MIN_DB = -24.0
 SLOT_GAIN_MAX_DB = 24.0
 _UNSET = object()
+_NEXT_SLOT_IDENTITY = itertools.count(1)
+
+
+def _new_slot_identity() -> int:
+    """Allocate a process-local identity that is never written to disk."""
+    return next(_NEXT_SLOT_IDENTITY)
 
 
 class ChainStateError(ValueError):
@@ -73,6 +81,9 @@ class SlotSnapshot:
     overlay: SlotOverlay | None = None
     error: str | None = None
     operation_id: int | str | None = None
+    # Process-local only. It lets UI messages follow a Slot across reorder;
+    # it is never serialized into the live chain protocol.
+    identity: int | None = None
 
     @property
     def display_state(self) -> str:
@@ -156,6 +167,7 @@ class _Slot:
     overlay: SlotOverlay | None = None
     error: str | None = None
     operation_id: int | str | None = None
+    identity: int = field(default_factory=_new_slot_identity)
 
     @property
     def status(self) -> SlotStatus:
@@ -172,7 +184,8 @@ def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _slots_from_chain(chain: Mapping[str, Any],
                       paths: Sequence[str | None], *,
-                      carry_candidates: bool = True) -> list[_Slot]:
+                      carry_candidates: bool = True,
+                      identities: Sequence[int] | None = None) -> list[_Slot]:
     """Build Slot objects from a chain, carrying each slot's recovery
     candidate (a persisted ``path:null + candidate`` is a bypassed slot that
     keeps its model reference until the user activates it).
@@ -183,6 +196,8 @@ def _slots_from_chain(chain: Mapping[str, Any],
     (reconcile docstring contract).
     """
     raw_slots = chain.get("slots") or []
+    if identities is not None and len(identities) != len(paths):
+        raise ChainStateError("Slot identity count does not match the chain")
     return [
         _Slot(
             path,
@@ -195,6 +210,8 @@ def _slots_from_chain(chain: Mapping[str, Any],
             output_gain_db=float(
                 raw_slots[index].get("output_gain_db", SLOT_GAIN_DEFAULT_DB)
                 if index < len(raw_slots) else SLOT_GAIN_DEFAULT_DB),
+            identity=(identities[index]
+                      if identities is not None else _new_slot_identity()),
         )
         for index, path in enumerate(paths)
     ]
@@ -386,6 +403,16 @@ class ChainState:
         self._managed_revision: int | None = None
         self._chain_error: str | None = None
         self._next_operation_id = 0
+        self._index_aliases: tuple[int, ...] | None = None
+
+    @classmethod
+    def from_chain_with_identities(
+            cls, chain: Mapping[str, Any], identities: Sequence[int]
+    ) -> "ChainState":
+        """Build state from a chain while restoring process-local identities."""
+        state = cls(chain)
+        state.set_slot_identities(identities)
+        return state
 
     @property
     def target_index(self) -> int | None:
@@ -393,6 +420,19 @@ class ChainState:
             return None
         return next((index for index, slot in enumerate(self._slots)
                      if slot is self._target), None)
+
+    @property
+    def target_identity(self) -> int | None:
+        """Return the process-local identity of the focused Slot."""
+        return self._target.identity if self._target is not None else None
+
+    @property
+    def slot_paths(self) -> tuple[str | None, ...]:
+        return tuple(slot.path for slot in self._slots)
+
+    @property
+    def slot_identities(self) -> tuple[int, ...]:
+        return tuple(slot.identity for slot in self._slots)
 
     @property
     def target(self) -> SlotSnapshot | None:
@@ -480,6 +520,51 @@ class ChainState:
         self._target = slot
         return self.slot(index)
 
+    def focus_identity(self, identity: int) -> SlotSnapshot:
+        """Focus a Slot by its process-local identity."""
+        index = self.index_for_identity(identity)
+        if index is None:
+            raise ChainStateError("slot identity is not present")
+        return self.focus_slot(index)
+
+    def slot_identity(self, index: int) -> int:
+        """Return the process-local identity at one current index."""
+        return self._slots[self._check_index(index)].identity
+
+    def index_for_identity(self, identity: int) -> int | None:
+        """Find a current index without confusing duplicate file paths."""
+        return next((index for index, slot in enumerate(self._slots)
+                     if slot.identity == identity), None)
+
+    def set_slot_identities(self, identities: Sequence[int]) -> None:
+        """Restore process-local Slot identities after rebuilding from disk."""
+        if len(identities) != len(self._slots):
+            raise ChainStateError("Slot identity count does not match the chain")
+        if len(set(identities)) != len(identities):
+            raise ChainStateError("Slot identities must be unique")
+        if any(isinstance(identity, bool) or not isinstance(identity, int)
+               for identity in identities):
+            raise ChainStateError("Slot identities must be integers")
+        for slot, identity in zip(self._slots, identities):
+            slot.identity = identity
+
+    def set_index_aliases(self, identities: Sequence[int] | None) -> None:
+        """Resolve one queued mutation's stale indexes to Slot identities."""
+        if identities is None:
+            self._index_aliases = None
+            return
+        aliases = tuple(identities)
+        if len(set(aliases)) != len(aliases):
+            raise ChainStateError("Slot identities must be unique")
+        if any(isinstance(identity, bool) or not isinstance(identity, int)
+               for identity in aliases):
+            raise ChainStateError("Slot identities must be integers")
+        # The alias table belongs to the stale UI snapshot that created one
+        # queued job. Its length may differ from the current file after an
+        # earlier queued add/delete, so only the requested stale index needs a
+        # current identity match.
+        self._index_aliases = aliases
+
     def clear_target(self) -> None:
         self._target = None
 
@@ -502,6 +587,14 @@ class ChainState:
 
     def delete_slot(self, index: int) -> SlotSnapshot:
         index = self._check_index(index)
+        return self._delete_slot_resolved(index)
+
+    def delete_slot_identity(self, identity: int) -> SlotSnapshot:
+        """Delete a Slot by process-local identity."""
+        return self._delete_slot_resolved(self._check_identity(identity))
+
+    def _delete_slot_resolved(self, index: int) -> SlotSnapshot:
+        """Delete a Slot after its index has already been resolved."""
         deleted = self._slots[index]
         was_target = self._target is deleted
         self._mark_local_mutation()
@@ -525,6 +618,7 @@ class ChainState:
             overlay=deleted.overlay,
             error=deleted.error,
             operation_id=deleted.operation_id,
+            identity=deleted.identity,
         )
 
     def clear_slots(self) -> int:
@@ -543,6 +637,14 @@ class ChainState:
         identity, rather than path or index, carries target and candidates.
         """
         index = self._check_index(index)
+        return self._move_slot_resolved(index, direction)
+
+    def move_slot_identity(self, identity: int, direction: int) -> bool:
+        """Move a Slot by process-local identity."""
+        return self._move_slot_resolved(self._check_identity(identity), direction)
+
+    def _move_slot_resolved(self, index: int, direction: int) -> bool:
+        """Move a Slot after its index has already been resolved."""
         if direction not in (-1, 1):
             raise ChainStateError("slot direction must be -1 or 1")
         other = index + direction
@@ -557,6 +659,14 @@ class ChainState:
     def toggle_bypass(self, index: int) -> bool:
         """Toggle Active <-> Bypass for one Slot; Empty is a no-op."""
         index = self._check_index(index)
+        return self._toggle_bypass_resolved(index)
+
+    def toggle_bypass_identity(self, identity: int) -> bool:
+        """Toggle a Slot by process-local identity."""
+        return self._toggle_bypass_resolved(self._check_identity(identity))
+
+    def _toggle_bypass_resolved(self, index: int) -> bool:
+        """Toggle a Slot after its index has already been resolved."""
         slot = self._slots[index]
         if slot.path is not None:
             self._mark_local_mutation()
@@ -586,6 +696,16 @@ class ChainState:
         if not isinstance(path, str) or not path:
             raise ChainStateError("a Slot file path must be a non-empty string")
         index = self._check_index(index)
+        return self._load_file_resolved(index, path)
+
+    def load_file_identity(self, identity: int, path: str) -> SlotSnapshot:
+        """Load a file into a Slot selected by process-local identity."""
+        if not isinstance(path, str) or not path:
+            raise ChainStateError("a Slot file path must be a non-empty string")
+        return self._load_file_resolved(self._check_identity(identity), path)
+
+    def _load_file_resolved(self, index: int, path: str) -> SlotSnapshot:
+        """Load a file after its Slot index has already been resolved."""
         slot = self._slots[index]
         if slot.path == path:
             self._mark_local_mutation()
@@ -611,14 +731,26 @@ class ChainState:
 
     def load_target_file(self, path: str) -> SlotSnapshot:
         """Load a file into the selected target, without implicit Slot creation."""
-        index = self.target_index
-        if index is None:
+        target = self._target
+        if target is None:
             raise ChainStateError("add or select a target slot")
-        return self.load_file(index, path)
+        index = next(index for index, slot in enumerate(self._slots)
+                     if slot is target)
+        return self._load_file_resolved(index, path)
 
     def set_slot_gain(self, index: int, key: str, value: float) -> bool:
         """Set one Slot trim in dB and report whether the value changed."""
         index = self._check_index(index)
+        return self._set_slot_gain_resolved(index, key, value)
+
+    def set_slot_gain_identity(self, identity: int, key: str,
+                               value: float) -> bool:
+        """Set one Slot trim by process-local identity."""
+        return self._set_slot_gain_resolved(
+            self._check_identity(identity), key, value)
+
+    def _set_slot_gain_resolved(self, index: int, key: str, value: float) -> bool:
+        """Set one Slot trim after its index has already been resolved."""
         if key not in {"input_gain_db", "output_gain_db"}:
             raise ChainStateError(f"unknown Slot gain: {key}")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -649,13 +781,30 @@ class ChainState:
             raise ChainStateError("Slot gain delta must be finite")
         value = max(SLOT_GAIN_MIN_DB, min(SLOT_GAIN_MAX_DB,
                                            current + float(delta)))
-        return self.set_slot_gain(index, key, value)
+        return self._set_slot_gain_resolved(index, key, value)
+
+    def adjust_slot_gain_identity(self, identity: int, key: str,
+                                  delta: float) -> bool:
+        """Adjust one Slot trim by process-local identity."""
+        index = self._check_identity(identity)
+        if key not in {"input_gain_db", "output_gain_db"}:
+            raise ChainStateError(f"unknown Slot gain: {key}")
+        if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+            raise ChainStateError("Slot gain delta must be a number")
+        if not math.isfinite(delta):
+            raise ChainStateError("Slot gain delta must be finite")
+        current = float(getattr(self._slots[index], key))
+        value = max(SLOT_GAIN_MIN_DB, min(SLOT_GAIN_MAX_DB,
+                                           current + float(delta)))
+        return self._set_slot_gain_resolved(index, key, value)
 
     def toggle_target_bypass(self) -> bool:
-        index = self.target_index
-        if index is None:
+        target = self._target
+        if target is None:
             raise ChainStateError("add or select a target slot")
-        return self.toggle_bypass(index)
+        index = next(index for index, slot in enumerate(self._slots)
+                     if slot is target)
+        return self._toggle_bypass_resolved(index)
 
     def begin_loading(self, index: int, operation_id: int | str | None = None) -> SlotSnapshot:
         index = self._check_index(index)
@@ -718,7 +867,8 @@ class ChainState:
         self._managed_revision = None
         self._chain_error = None
 
-    def apply_candidate(self, chain: Mapping[str, Any]) -> None:
+    def apply_candidate(self, chain: Mapping[str, Any], *,
+                        identities: Sequence[int] | None = None) -> None:
         """Apply a committed candidate while retaining target identity when possible.
 
         Managed commits prepare a private candidate before the runtime/file
@@ -731,31 +881,55 @@ class ChainState:
         _validate_chain_shape(incoming)
         paths = _slot_paths(incoming)
         current_paths = [slot.path for slot in self._slots]
-        target_index = self.target_index
+        target_identity = self.target_identity
+        if identities is not None:
+            # A managed callback may arrive after another queued reorder. The
+            # candidate's identity order is authoritative, so rebuild the
+            # ordered objects and reattach the current target by identity
+            # instead of copying gain fields by whichever index is current.
+            incoming_slots = _slots_from_chain(
+                incoming, paths, identities=identities)
+            self._slots = incoming_slots
+            self._target = None
+            if target_identity is not None:
+                target_index = self.index_for_identity(target_identity)
+                if target_index is not None:
+                    self._target = self._slots[target_index]
+            self._chain = _chain_with_slots(
+                incoming, [slot.path for slot in self._slots])
+            self._chain_error = None
+            return
         if paths != current_paths:
             self._slots = _slots_from_chain(incoming, paths)
-            self._target = (
-                self._slots[target_index]
-                if target_index is not None and target_index < len(self._slots)
-                else None
-            )
+            self._target = None
+            if target_identity is not None:
+                target_index = self.index_for_identity(target_identity)
+                if target_index is not None:
+                    self._target = self._slots[target_index]
         else:
             incoming_slots = _slots_from_chain(incoming, paths)
             for current, candidate in zip(self._slots, incoming_slots):
                 current.input_gain_db = candidate.input_gain_db
                 current.output_gain_db = candidate.output_gain_db
+            if identities is not None:
+                self.set_slot_identities(identities)
         self._chain = _chain_with_slots(
             incoming, [slot.path for slot in self._slots])
         self._chain_error = None
 
     def reconcile(self, chain: Mapping[str, Any], *, fingerprint: str | None = None,
-                  revision: int | None | object = _UNSET) -> bool:
+                  revision: int | None | object = _UNSET,
+                  preserve_target_index: int | None = None,
+                  preserve_target_identity: int | None = None,
+                  preserve_slot_identities: Sequence[int] | None = None,
+                  ) -> bool:
         """Reconcile one polled chain file.
 
         Returns ``True`` when the poll was treated as an overall replacement.
         Only the exact fingerprint/revision pair recorded for the most recent
-        TUI write preserves bypass candidates.  Unknown or external writes
-        rebuild Slot objects, making every ``path:null`` an Empty Slot.
+        TUI write preserves bypass candidates. ``preserve_target_index`` is
+        used by the managed Slot poll path while its callback is in flight;
+        unknown or external writes rebuild Slot objects and clear the target.
         """
         incoming = _copy_mapping(chain)
         try:
@@ -777,6 +951,7 @@ class ChainState:
             and fingerprint == self._managed_fingerprint
             and observed_revision == self._managed_revision
         )
+        current_target_identity = self.target_identity
         can_preserve = (
             managed_write
             and _persistent_slots(incoming) == _persistent_slots(self.to_chain())
@@ -786,10 +961,35 @@ class ChainState:
             # such as input/parameters/revision. The persisted candidate is
             # authoritative for this exact managed write and may also repair
             # a poll that arrived before its UI callback was published.
-            incoming_slots = _slots_from_chain(incoming, paths)
-            for current, persisted in zip(self._slots, incoming_slots):
-                current.candidate = (
-                    persisted.candidate if persisted.path is None else None)
+            if (preserve_slot_identities is not None
+                    and tuple(preserve_slot_identities)
+                    != self.slot_identities):
+                # Equal paths are not equal Slot order. Rebuild the objects so
+                # duplicate files still carry the identity transition and any
+                # candidate/gain state attached to the persisted position.
+                self._slots = _slots_from_chain(
+                    incoming, paths, identities=preserve_slot_identities)
+                target_identity = preserve_target_identity
+                if (target_identity is None
+                        and current_target_identity in self.slot_identities):
+                    target_identity = current_target_identity
+                self._target = None
+                if target_identity is not None:
+                    target_index = self.index_for_identity(target_identity)
+                    if target_index is not None:
+                        self._target = self._slots[target_index]
+            else:
+                incoming_slots = _slots_from_chain(incoming, paths)
+                for current, persisted in zip(self._slots, incoming_slots):
+                    current.candidate = (
+                        persisted.candidate if persisted.path is None
+                        else None)
+                if preserve_target_identity is not None:
+                    target_index = self.index_for_identity(
+                        preserve_target_identity)
+                    self._target = (
+                        self._slots[target_index]
+                        if target_index is not None else None)
             self._chain = _chain_with_slots(incoming, [slot.path for slot in self._slots])
             self._chain_error = None
             return False
@@ -801,8 +1001,18 @@ class ChainState:
         # state 与磁盘不一致，后续 managed 事务会因 fingerprint 冲突失败。
         self._slots = _slots_from_chain(
             incoming, paths,
-            carry_candidates=(managed_write or self._managed_fingerprint is None))
+            carry_candidates=(managed_write or self._managed_fingerprint is None),
+            identities=(preserve_slot_identities
+                        if managed_write else None))
         self._target = None
+        if managed_write:
+            target_index = (
+                self.index_for_identity(preserve_target_identity)
+                if preserve_target_identity is not None else None)
+            if target_index is None and preserve_target_identity is None:
+                target_index = preserve_target_index
+            if target_index is not None and target_index < len(self._slots):
+                self._target = self._slots[target_index]
         self._managed_fingerprint = None
         self._managed_revision = None
         self._chain_error = None
@@ -847,7 +1057,9 @@ class ChainState:
     def commit(self, adapter: ManagedCommitAdapter,
                mutation: Callable[["ChainState"], Any] | None = None,
                *, fingerprint: str | None = None,
-               revision: int | None = None) -> dict[str, Any]:
+               revision: int | None = None,
+               on_file_written: Callable[..., None] | None = None,
+               ) -> dict[str, Any]:
         """Prepare, write and apply a complete candidate chain atomically.
 
         The mutation runs against a private copy.  A prepare failure therefore
@@ -899,6 +1111,43 @@ class ChainState:
                 raise ChainStateError("file receipt revision does not match prepared runtime")
             if committed_fingerprint is None and committed_revision is not None:
                 committed_fingerprint = chain_fingerprint(prepared_chain)
+            if on_file_written is not None:
+                # This is a best-effort observation hook. The file is already
+                # committed; an observer failure must not turn a successful
+                # file write into a rollback of the runtime transaction.
+                observer_args = (
+                    committed_fingerprint,
+                    committed_revision,
+                    working.target_index,
+                    working.target_identity,
+                    working.slot_identities,
+                    working.slot_paths,
+                )
+                try:
+                    parameters = tuple(
+                        inspect.signature(on_file_written).parameters.values())
+                except (TypeError, ValueError):
+                    parameters = None
+                if parameters is None or any(
+                        parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                        for parameter in parameters):
+                    call_args = observer_args
+                else:
+                    positional_count = sum(
+                        parameter.kind in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        )
+                        for parameter in parameters)
+                    # Preserve the three- and five-argument observer seams
+                    # while calling the identity-aware six-argument form.
+                    arg_count = (6 if positional_count >= 6 else
+                                 5 if positional_count >= 5 else 3)
+                    call_args = observer_args[:arg_count]
+                try:
+                    on_file_written(*call_args)
+                except Exception:
+                    pass
             adapter.apply_runtime(prepared)
         except Exception as exc:
             rollback_errors: list[Exception] = []
@@ -918,6 +1167,10 @@ class ChainState:
 
         working._chain = _chain_with_slots(
             prepared_chain, [slot.path for slot in working._slots])
+        # Index aliases are only for the stale mutation closure that just ran;
+        # retaining them would make later direct UI commands resolve through
+        # an obsolete snapshot.
+        working.set_index_aliases(None)
         self._restore_state(working)
         self.mark_managed_write(committed_fingerprint, committed_revision)
         return self.to_chain()
@@ -958,13 +1211,30 @@ class ChainState:
             overlay=slot.overlay,
             error=slot.error,
             operation_id=slot.operation_id,
+            identity=slot.identity,
         )
 
     def _check_index(self, index: int) -> int:
         if isinstance(index, bool) or not isinstance(index, int):
             raise ChainStateError("slot index must be an integer")
+        if self._index_aliases is not None:
+            if index < 0 or index >= len(self._index_aliases):
+                raise ChainStateError(f"slot index {index} is no longer available")
+            alias = self._index_aliases[index]
+            resolved = self.index_for_identity(alias)
+            if resolved is None:
+                raise ChainStateError(f"slot index {index} is no longer available")
+            return resolved
         if index < 0 or index >= len(self._slots):
             raise ChainStateError(f"slot index {index} is out of range")
+        return index
+
+    def _check_identity(self, identity: int) -> int:
+        if isinstance(identity, bool) or not isinstance(identity, int):
+            raise ChainStateError("slot identity must be an integer")
+        index = self.index_for_identity(identity)
+        if index is None:
+            raise ChainStateError("slot identity is no longer available")
         return index
 
     def _copy_state(self) -> "ChainState":
@@ -978,6 +1248,7 @@ class ChainState:
         other._managed_revision = self._managed_revision
         other._chain_error = self._chain_error
         other._next_operation_id = self._next_operation_id
+        other._index_aliases = self._index_aliases
         return other
 
     def _restore_state(self, other: "ChainState") -> None:
@@ -990,6 +1261,7 @@ class ChainState:
         self._managed_revision = other._managed_revision
         self._chain_error = other._chain_error
         self._next_operation_id = other._next_operation_id
+        self._index_aliases = other._index_aliases
 
 
 __all__ = [

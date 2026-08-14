@@ -29,7 +29,7 @@ import sys
 import tempfile
 import threading
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -37,7 +37,7 @@ from uuid import uuid4
 import tone3000
 import chain_protocol
 
-__version__ = "1.1.4"
+__version__ = "1.2.0"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,6 +46,10 @@ _PRESET_UPDATED_UNSET = object()
 
 class PresetConflictError(ValueError):
     """Raised when an edit is based on an older version of a Preset row."""
+
+
+class PresetImportCancelledError(ValueError):
+    """Raised when a user declines a shareable Preset download."""
 
 
 def model_is_ir(model: dict | None, tone: dict | None = None) -> bool:
@@ -120,9 +124,11 @@ PRESETS_DIR = ROOT / "data" / "presets"
 PACK_MANIFEST_NAME = "gigbuddy.json"
 _PACK_ASSET_FORMATS = {".nam": "nam", ".wav": "ir"}
 PRESET_DOCUMENT_KIND = "gigbuddy-preset"
+SHAREABLE_PRESET_DOCUMENT_KIND = "gigbuddy-shareable-preset"
 _PRESET_FILE_SETTING_PREFIX = "preset_file:"
 _PRESET_SYNC_LOCK = threading.RLock()
 _PRESET_SYNC_ACTIVE = False
+_PRESET_SYNC_TOKEN: tuple | None = None
 
 _IMPORT_LOCKS: dict[str, threading.Lock] = {}
 _IMPORT_LOCKS_GUARD = threading.Lock()
@@ -239,6 +245,16 @@ CREATE INDEX IF NOT EXISTS idx_local_models_path ON local_models(relative_path);
 
 # ---- DB access -----------------------------------------------------------
 
+class _ManagedConnection(sqlite3.Connection):
+    """Make the connection context manager release its OS resources."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
     """Open a configured local connection and create the schema if needed.
 
@@ -248,59 +264,63 @@ def connect() -> sqlite3.Connection:
     """
     db_path = Path(DB_FILE).resolve(strict=False)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    # WAL is deliberately left as a deployment decision; keep rollback-journal
-    # semantics until a real TUI/import workload demonstrates a need for it.
-    with _SCHEMA_READY_LOCK:
-        schema_ready = db_path in _SCHEMA_READY
-        if schema_ready:
-            tables = {
-                row[0] for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'")
-            }
-            # The database may have been removed and recreated at the same
-            # path while this process was alive. Keep the fast path, but do
-            # not let the process-local cache hide a fresh empty database.
-            schema_ready = _SCHEMA_TABLES <= tables
-        if not schema_ready:
-            conn.executescript(SCHEMA)
-            # CREATE TABLE IF NOT EXISTS does not evolve an existing database.
-            # Keep additive upgrades on the one-time initialization path.
-            tone_columns = {
-                row[1] for row in conn.execute(
-                    "PRAGMA table_info(tones)").fetchall()
-            }
-            if "format" not in tone_columns:
-                conn.execute("ALTER TABLE tones ADD COLUMN format TEXT")
-            tone_migrations = {
-                "url": "ALTER TABLE tones ADD COLUMN url TEXT",
-                "user_url": "ALTER TABLE tones ADD COLUMN user_url TEXT",
-            }
-            for column, statement in tone_migrations.items():
-                if column not in tone_columns:
-                    conn.execute(statement)
-            model_columns = {
-                row[1] for row in conn.execute(
-                    "PRAGMA table_info(models)").fetchall()
-            }
-            migrations = {
-                "name": "ALTER TABLE models ADD COLUMN name TEXT",
-                "architecture_version": (
-                    "ALTER TABLE models ADD COLUMN architecture_version TEXT"),
-                "local_size": "ALTER TABLE models ADD COLUMN local_size INTEGER",
-                "local_sha256": "ALTER TABLE models ADD COLUMN local_sha256 TEXT",
-            }
-            for column, statement in migrations.items():
-                if column not in model_columns:
-                    conn.execute(statement)
-            conn.commit()
-            _SCHEMA_READY.add(db_path)
-            with _LOCAL_SCAN_CACHE_LOCK:
-                _LOCAL_SCAN_CACHE.clear()
-    return conn
+    conn = sqlite3.connect(db_path, timeout=5.0, factory=_ManagedConnection)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        # WAL is deliberately left as a deployment decision; keep rollback-journal
+        # semantics until a real TUI/import workload demonstrates a need for it.
+        with _SCHEMA_READY_LOCK:
+            schema_ready = db_path in _SCHEMA_READY
+            if schema_ready:
+                tables = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'")
+                }
+                # The database may have been removed and recreated at the same
+                # path while this process was alive. Keep the fast path, but do
+                # not let the process-local cache hide a fresh empty database.
+                schema_ready = _SCHEMA_TABLES <= tables
+            if not schema_ready:
+                conn.executescript(SCHEMA)
+                # CREATE TABLE IF NOT EXISTS does not evolve an existing database.
+                # Keep additive upgrades on the one-time initialization path.
+                tone_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(tones)").fetchall()
+                }
+                if "format" not in tone_columns:
+                    conn.execute("ALTER TABLE tones ADD COLUMN format TEXT")
+                tone_migrations = {
+                    "url": "ALTER TABLE tones ADD COLUMN url TEXT",
+                    "user_url": "ALTER TABLE tones ADD COLUMN user_url TEXT",
+                }
+                for column, statement in tone_migrations.items():
+                    if column not in tone_columns:
+                        conn.execute(statement)
+                model_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(models)").fetchall()
+                }
+                migrations = {
+                    "name": "ALTER TABLE models ADD COLUMN name TEXT",
+                    "architecture_version": (
+                        "ALTER TABLE models ADD COLUMN architecture_version TEXT"),
+                    "local_size": "ALTER TABLE models ADD COLUMN local_size INTEGER",
+                    "local_sha256": "ALTER TABLE models ADD COLUMN local_sha256 TEXT",
+                }
+                for column, statement in migrations.items():
+                    if column not in model_columns:
+                        conn.execute(statement)
+                conn.commit()
+                _SCHEMA_READY.add(db_path)
+                with _LOCAL_SCAN_CACHE_LOCK:
+                    _LOCAL_SCAN_CACHE.clear()
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _local_tree_token(root: Path | None = None) -> tuple:
@@ -2082,6 +2102,140 @@ def _canonical_preset_chain(raw: object) -> dict:
     }
 
 
+def _shareable_preset_slot(item: object, index: int) -> dict:
+    """Validate one portable Slot that contains no machine-local path."""
+    if not isinstance(item, dict):
+        raise ValueError(f"Shareable Preset Slot {index + 1:02d} must be an object")
+    if "model_id" not in item:
+        raise ValueError(
+            f"Shareable Preset Slot {index + 1:02d} must contain model_id")
+    if any(key in item for key in ("path", "candidate", "model_key", "pack_id")):
+        raise ValueError(
+            f"Shareable Preset Slot {index + 1:02d} cannot contain local paths")
+    bypass = item.get("bypass", False)
+    if not isinstance(bypass, bool):
+        raise ValueError(
+            f"Shareable Preset Slot {index + 1:02d} bypass must be boolean")
+    model_id = _preset_model_id(item.get("model_id"), index)
+    if model_id is None and bypass:
+        raise ValueError(
+            f"Shareable Preset Slot {index + 1:02d} cannot bypass an empty slot")
+    result = {"model_id": model_id, **_preset_slot_gains(item, index)}
+    if bypass:
+        result["bypass"] = True
+    return result
+
+
+def _shareable_preset_chain(raw: object) -> dict:
+    """Parse the path-free chain used by a shareable Preset document."""
+    if not isinstance(raw, dict):
+        raise ValueError("Shareable Preset chain must be an object")
+    raw_slots = raw.get("slots")
+    if not isinstance(raw_slots, list) or len(raw_slots) > 6:
+        raise ValueError("Shareable Preset slots must contain between 0 and 6 items")
+    return {
+        "slots": [_shareable_preset_slot(item, index)
+                  for index, item in enumerate(raw_slots)],
+        "gain": _preset_number(raw.get("gain", _PRESET_DEFAULTS["gain"]),
+                                "gain", 0, 10),
+        "master": _preset_number(raw.get("master", _PRESET_DEFAULTS["master"]),
+                                  "master", 0, 10),
+        "quality": _preset_number(
+            raw.get("quality", _PRESET_DEFAULTS["quality"]), "quality", 0, 1),
+    }
+
+
+def _shareable_model_ids(chain: dict) -> list[int]:
+    """Return unique remote model IDs in first-use order."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for slot in chain["slots"]:
+        model_id = slot.get("model_id")
+        if model_id is not None and model_id not in seen:
+            seen.add(model_id)
+            ids.append(model_id)
+    return ids
+
+
+def _shareable_preset_document(preset: dict) -> dict:
+    """Convert an installed Preset into a portable, TONE3000-backed document."""
+    chain = preset.get("chain")
+    if not isinstance(chain, dict):
+        raise ValueError(f"Preset '{preset.get('name', '?')}' has an invalid chain")
+    slots = []
+    for index, slot in enumerate(chain.get("slots", [])):
+        if not isinstance(slot, dict):
+            raise ValueError(f"Preset Slot {index + 1:02d} is invalid")
+        model_id = slot.get("model_id")
+        path = slot.get("path")
+        if model_id is None and (
+                path is not None
+                or slot.get("candidate") is not None
+                or slot.get("model_key") is not None
+                or slot.get("pack_id") is not None
+                or slot.get("source") == "local"):
+            raise ValueError(
+                f"Preset Slot {index + 1:02d} is a local Pack asset; "
+                "shareable Presets require TONE3000 model_id references")
+        if model_id is not None and path is None and not slot.get("bypass"):
+            raise ValueError(
+                f"Preset Slot {index + 1:02d} has no downloadable model reference")
+        portable = {"model_id": model_id, **_preset_slot_gains(slot, index)}
+        if slot.get("bypass"):
+            portable["bypass"] = True
+        slots.append(portable)
+    portable_chain = _shareable_preset_chain({
+        "slots": slots,
+        "gain": chain.get("gain", _PRESET_DEFAULTS["gain"]),
+        "master": chain.get("master", _PRESET_DEFAULTS["master"]),
+        "quality": chain.get("quality", _PRESET_DEFAULTS["quality"]),
+    })
+    return {
+        "schema_version": 1,
+        "kind": SHAREABLE_PRESET_DOCUMENT_KIND,
+        "provider": "tone3000",
+        "name": preset["name"],
+        "note": _preset_note_value(preset.get("note")),
+        "chain": portable_chain,
+    }
+
+
+def _parse_shareable_preset_document(path: str | Path) -> tuple[str, str, dict]:
+    """Read and validate a portable Preset document from disk."""
+    source = Path(path)
+    try:
+        document = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid shareable Preset JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("shareable Preset document must be an object")
+    if document.get("kind") != SHAREABLE_PRESET_DOCUMENT_KIND:
+        raise ValueError(
+            f"kind must be '{SHAREABLE_PRESET_DOCUMENT_KIND}'")
+    if document.get("schema_version") != 1:
+        raise ValueError("schema_version must be 1")
+    if document.get("provider", "tone3000") != "tone3000":
+        raise ValueError("provider must be 'tone3000'")
+    name = document.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty string")
+    note = _preset_note_value(document.get("note"))
+    chain = _shareable_preset_chain(document.get("chain"))
+    # Older share files may carry a redundant top-level model_ids field.  The
+    # Slot references are canonical, so unknown legacy fields are ignored.
+    return name.strip(), note, chain
+
+
+def _is_shareable_preset_file(path: Path) -> bool:
+    """Identify an untracked share file without validating or importing it."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (isinstance(document, dict)
+            and document.get("kind") == SHAREABLE_PRESET_DOCUMENT_KIND)
+
+
 def _preset_row(row: sqlite3.Row) -> dict | None:
     d = dict(row)
     raw_json = d.pop("chain_json")
@@ -2204,6 +2358,27 @@ def _preset_parse_document(path: Path) -> tuple[str, str, dict, str | None, str 
     return name.strip(), note, chain, created_at, updated_at
 
 
+def _preset_reconcile_token() -> tuple:
+    """Return the local state that can make Preset reconciliation necessary."""
+    def stat_token(path: Path) -> tuple[int, int, int]:
+        try:
+            stat = path.stat()
+        except OSError:
+            return (0, 0, 0)
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    preset_dir = Path(PRESETS_DIR)
+    try:
+        preset_files = tuple(
+            (path.name, *stat_token(path))
+            for path in sorted(preset_dir.glob("*.json"))
+        )
+    except OSError:
+        preset_files = ()
+    return (str(Path(DB_FILE)), stat_token(Path(DB_FILE)),
+            str(preset_dir), preset_files)
+
+
 def _preset_reconcile_files() -> None:
     """Make editable JSON Presets and the SQLite index agree.
 
@@ -2211,9 +2386,11 @@ def _preset_reconcile_files() -> None:
     row. Legacy SQLite-only rows are exported, and untracked GigBuddy JSON
     documents are imported. Invalid files are preserved and ignored.
     """
-    global _PRESET_SYNC_ACTIVE
+    global _PRESET_SYNC_ACTIVE, _PRESET_SYNC_TOKEN
     with _PRESET_SYNC_LOCK:
         if _PRESET_SYNC_ACTIVE:
+            return
+        if _PRESET_SYNC_TOKEN == _preset_reconcile_token():
             return
         _PRESET_SYNC_ACTIVE = True
         try:
@@ -2274,6 +2451,8 @@ def _preset_reconcile_files() -> None:
                         if new_path != path:
                             path.unlink(missing_ok=True)
                     except ValueError as exc:
+                        if _is_shareable_preset_file(path):
+                            continue
                         warnings.warn(
                             f"Ignoring invalid Preset file {path}: {exc}",
                             RuntimeWarning, stacklevel=2)
@@ -2309,10 +2488,13 @@ def _preset_reconcile_files() -> None:
                         if new_path != path:
                             path.unlink(missing_ok=True)
                     except ValueError as exc:
+                        if _is_shareable_preset_file(path):
+                            continue
                         warnings.warn(
                             f"Ignoring invalid Preset file {path}: {exc}",
                             RuntimeWarning, stacklevel=2)
                 conn.commit()
+            _PRESET_SYNC_TOKEN = _preset_reconcile_token()
         finally:
             _PRESET_SYNC_ACTIVE = False
 
@@ -2416,6 +2598,157 @@ def preset_save(name: str, note: str | None = None, *, set_active: bool = True) 
         _preset_write_by_id(conn, preset_id)
         conn.commit()
     return preset_get(name)
+
+
+def preset_export(name: str, path: str | Path | None = None) -> Path:
+    """Write a path-free Preset that can be shared and re-downloaded."""
+    preset = preset_get(name)
+    if not preset:
+        raise ValueError(f"Preset '{name}' not found.")
+    document = _shareable_preset_document(preset)
+    destination = (Path(path) if path is not None
+                   else Path.cwd() / f"{tone3000.slugify(preset['name'], 64)}.json")
+    _write_json_atomic(destination, document)
+    return destination
+
+
+def _shareable_model_tones(model_ids: list[int]) -> dict[int, dict]:
+    """Resolve missing model IDs to their parent Tone rows."""
+    resolved: dict[int, dict] = {}
+    for tone in tone3000.tones_for_model_ids(model_ids):
+        tone_id = tone.get("id")
+        if isinstance(tone_id, bool) or not isinstance(tone_id, int):
+            continue
+        for raw_model_id in tone.get("matched_model_ids", []):
+            try:
+                model_id = int(raw_model_id)
+            except (TypeError, ValueError):
+                continue
+            if model_id in model_ids:
+                resolved[model_id] = tone
+    return resolved
+
+
+def _download_shareable_models(
+        model_ids: list[int], *, quiet: bool,
+        confirm_download: Callable[[list[int], dict[int, dict]], bool] | None = None,
+) -> None:
+    """Download every missing shareable model, grouped by parent Tone."""
+    missing = [model_id for model_id in model_ids
+               if _installed_model_path(model_id) is None]
+    if not missing:
+        return
+    tone_by_model = _shareable_model_tones(missing)
+    unresolved = [model_id for model_id in missing
+                  if model_id not in tone_by_model]
+    if unresolved:
+        raise ValueError(
+            "TONE3000 model ID(s) not found or unsupported: "
+            + ", ".join(str(model_id) for model_id in unresolved))
+    if confirm_download is not None and not confirm_download(missing, tone_by_model):
+        raise PresetImportCancelledError("Preset import cancelled.")
+    grouped: dict[int, list[int]] = {}
+    for model_id in missing:
+        tone_id = int(tone_by_model[model_id]["id"])
+        grouped.setdefault(tone_id, []).append(model_id)
+    for tone_id, tone_model_ids in grouped.items():
+        imported = import_tone(
+            tone_id, quiet=quiet, model_ids=tone_model_ids)
+        if imported is None:
+            raise ValueError(
+                f"TONE3000 tone {tone_id} produced no requested model files")
+    still_missing = [model_id for model_id in model_ids
+                     if _installed_model_path(model_id) is None]
+    if still_missing:
+        raise ValueError(
+            "Downloaded model file(s) are unavailable: "
+            + ", ".join(str(model_id) for model_id in still_missing))
+
+
+def _confirm_shareable_preset_download(
+        preset_name: str, model_ids: list[int], tone_by_model: dict[int, dict],
+        *, load: bool) -> bool:
+    """Ask the interactive CLI before downloading missing shareable models."""
+    print(f"Loading shareable Preset '{preset_name}'.")
+    print("The following TONE3000 model(s) are required and not installed:")
+    for model_id in model_ids:
+        tone = tone_by_model.get(model_id) or {}
+        tone_id = tone.get("id", "unknown")
+        title = str(tone.get("title") or f"Tone {tone_id}").strip()
+        print(f"  - Model {model_id} from Tone {tone_id}: {title}")
+    if load:
+        print("The Preset will be loaded into the live chain after download.")
+    try:
+        answer = input("Download these model(s) now? [y/N]: ")
+    except EOFError:
+        answer = ""
+    if answer.strip().casefold() in {"y", "yes"}:
+        return True
+    print("Preset import cancelled.")
+    return False
+
+
+def _local_chain_from_shareable(chain: dict) -> dict:
+    """Resolve a validated shareable chain to the normal local Preset shape."""
+    slots = []
+    for index, slot in enumerate(chain["slots"]):
+        model_id = slot.get("model_id")
+        result = {"model_id": model_id, **_preset_slot_gains(slot, index)}
+        if model_id is None:
+            result["path"] = None
+        elif slot.get("bypass"):
+            result["path"] = None
+            result["bypass"] = True
+        else:
+            path = _installed_model_path(model_id)
+            if path is None:
+                raise ValueError(
+                    f"Preset Slot {index + 1:02d} model {model_id} is not installed")
+            result["path"] = _preset_storage_path(path, index)
+        slots.append(result)
+    return _canonical_preset_chain({
+        "slots": slots,
+        "gain": chain["gain"],
+        "master": chain["master"],
+        "quality": chain["quality"],
+    })
+
+
+def preset_import(path: str | Path, *, name: str | None = None,
+                  load: bool = False, quiet: bool = False,
+                  confirm_download: Callable[[list[int], dict[int, dict]], bool]
+                  | None = None) -> dict:
+    """Import a shareable JSON Preset, downloading missing TONE3000 models."""
+    source_name, note, shareable_chain = _parse_shareable_preset_document(path)
+    preset_name = source_name if name is None else name.strip()
+    if not preset_name:
+        raise ValueError("Preset name cannot be empty.")
+    model_ids = _shareable_model_ids(shareable_chain)
+    _download_shareable_models(
+        model_ids, quiet=quiet, confirm_download=confirm_download)
+    chain = _local_chain_from_shareable(shareable_chain)
+    now = datetime.now(timezone.utc).isoformat()
+    _preset_reconcile_files()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
+            "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
+            (preset_name, note, json.dumps(chain, ensure_ascii=False), now, now),
+        )
+        preset_id = int(conn.execute(
+            "SELECT id FROM presets WHERE name = ?", (preset_name,)
+        ).fetchone()["id"])
+        _preset_write_by_id(conn, preset_id)
+        conn.commit()
+    imported = preset_get(preset_name)
+    if imported is None:
+        raise ValueError(f"Preset '{preset_name}' could not be imported")
+    if load:
+        preset_load_by_id(int(imported["id"]))
+        imported = preset_get(preset_name) or imported
+    return imported
 
 
 def preset_get(name: str) -> dict | None:
@@ -3478,6 +3811,17 @@ def main(argv: list[str] | None = None) -> int:
     pshow = psub.add_parser("show", help="show one preset (resolved paths)")
     pshow.add_argument("name")
     pshow.add_argument("--json", action="store_true")
+    pexport = psub.add_parser(
+        "export", help="write a shareable TONE3000 model-ID Preset JSON")
+    pexport.add_argument("name")
+    pexport.add_argument("path", nargs="?",
+                         help="output JSON path (default: ./<preset-name>.json)")
+    pimport = psub.add_parser(
+        "import", help="download a shareable Preset JSON and add it locally")
+    pimport.add_argument("path", help="shareable Preset JSON path")
+    pimport.add_argument("--name", help="override the imported Preset name")
+    pimport.add_argument("--load", action="store_true",
+                         help="apply the imported Preset to the live chain")
     psub.add_parser("current", help="show the active preset and dirty state")
     prename = psub.add_parser("rename", help="rename a preset")
     prename.add_argument("old_name")
@@ -3615,6 +3959,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"slots      {_preset_slot_summary(ch)}")
             print(f"gain       {ch.get('gain')}   master {ch.get('master')}   "
                   f"quality {ch.get('quality', 1.0)}")
+        elif args.preset_cmd == "export":
+            try:
+                destination = preset_export(args.name, args.path)
+            except (OSError, ValueError) as exc:
+                print(f"Cannot export Preset: {exc}", file=sys.stderr)
+                return 1
+            print(f"Shareable Preset written to {destination}")
+        elif args.preset_cmd == "import":
+            try:
+                source_name, _note, _chain = _parse_shareable_preset_document(args.path)
+                preset_name = source_name if args.name is None else args.name.strip()
+                imported = preset_import(
+                    args.path, name=args.name, load=args.load,
+                    quiet=True,
+                    confirm_download=lambda model_ids, tone_by_model: (
+                        _confirm_shareable_preset_download(
+                            preset_name, model_ids, tone_by_model, load=args.load)))
+            except PresetImportCancelledError:
+                return 1
+            except (OSError, ValueError, tone3000.AuthenticationRequiredError,
+                    tone3000.Tone3000HTTPError) as exc:
+                print(f"Cannot import Preset: {exc}", file=sys.stderr)
+                return 1
+            print(f"Preset '{imported['name']}' imported"
+                  + (" and loaded." if args.load else "."))
         elif args.preset_cmd == "current":
             name = preset_current()
             if not name:

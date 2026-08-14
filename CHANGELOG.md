@@ -1,11 +1,10 @@
 # Changelog
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-08-14
 
 Full release note: [GigBuddy v1.2.0](docs/releases/v1.2.0.md).
 
-This entry covers the current `main` work after `v1.1.4`. It is not a published
-tag yet.
+This release covers the work since `v1.1.4`.
 
 ### Added
 

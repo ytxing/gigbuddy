@@ -1532,26 +1532,10 @@ def models(tone_id, a2_only=True, tone=None):
     # final classifier below removes A1, Custom, and all other architectures.
     architectures = ["2"] if a2_only else [None, "2"]
     tagged_rows: list[tuple[dict, str | None]] = []
-    seen: dict[int, int] = {}
     for architecture in architectures:
         for model in fetch(architecture):
             if not isinstance(model, dict):
                 continue
-            model_id = model.get("id") if isinstance(model, dict) else None
-            if model_id is not None:
-                try:
-                    key = int(model_id)
-                except (TypeError, ValueError):
-                    key = hash(str(model_id))
-                if key in seen:
-                    # The unfiltered endpoint can repeat a row returned by
-                    # the A2 view. Keep the A2 view's copy because that source
-                    # is the authoritative classification for an otherwise
-                    # metadata-less .nam row.
-                    if architecture == "2":
-                        tagged_rows[seen[key]] = (model, architecture)
-                    continue
-                seen[key] = len(tagged_rows)
             tagged_rows.append((model, architecture))
 
     classification_tone = tone if isinstance(tone, dict) else None
@@ -1562,8 +1546,33 @@ def models(tone_id, a2_only=True, tone=None):
         classification_tone = (
             _canonical_tone(dict(parent)) if isinstance(parent, dict) else {})
 
-    rows: list[dict] = []
+    # The official architecture=2 view may repeat IR rows for an IR Tone. Do
+    # not let that repeated row overwrite the unfiltered IR source and then
+    # get rejected as an A2 row by the parent Tone's format.
+    deduped_rows: list[tuple[dict, str | None]] = []
+    seen: dict[int, int] = {}
     for model, source in tagged_rows:
+        model_id = model.get("id")
+        if model_id is None:
+            deduped_rows.append((model, source))
+            continue
+        try:
+            key = int(model_id)
+        except (TypeError, ValueError):
+            key = hash(str(model_id))
+        previous_index = seen.get(key)
+        if previous_index is None:
+            seen[key] = len(deduped_rows)
+            deduped_rows.append((model, source))
+            continue
+        # The unfiltered endpoint is the correct source for IR rows. For
+        # architectureless A2 rows, the architecture=2 copy remains
+        # authoritative and is selected below.
+        if source == "2" and not _is_ir_model(model, classification_tone):
+            deduped_rows[previous_index] = (model, source)
+
+    rows: list[dict] = []
+    for model, source in deduped_rows:
         candidate = dict(model)
         # The A2 endpoint is authoritative for an otherwise metadata-less row.
         # Preserve it as canonical metadata so downstream Pack/download filters

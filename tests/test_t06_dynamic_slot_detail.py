@@ -16,6 +16,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def _wait_for_dynamic_slots(pilot, panel, count):
+    for _ in range(60):
+        if (len(panel.slot_widgets) == count
+                and not getattr(panel, "_recompose_pending", False)):
+            return
+        await pilot.pause(0.05)
+    raise AssertionError(f"expected {count} stable Slot widgets")
+
+
 def _chain(paths, revision=1):
     return {
         "input": {
@@ -83,6 +92,7 @@ def test_slot_focus_opens_slot_pack_and_tracks_three_states(monkeypatch, tmp_pat
             await pilot.pause(0.15)
             panel = app.query_one(ChainPanel)
             detail = app.query_one(DetailPane)
+            await _wait_for_dynamic_slots(pilot, panel, 1)
             panel.slot_widgets[0].focus()
             await pilot.pause()
 
@@ -240,16 +250,57 @@ def test_adding_empty_slot_clears_previous_detail_pack(monkeypatch, tmp_path):
             await pilot.pause(0.15)
             panel = app.query_one(ChainPanel)
             detail = app.query_one(DetailPane)
+            await _wait_for_dynamic_slots(pilot, panel, 1)
             panel.slot_widgets[0].focus()
-            await pilot.pause()
+            for _ in range(20):
+                if detail._pack_mode:
+                    break
+                await pilot.pause(0.05)
             assert detail._pack_mode
 
             await pilot.click(panel.add_slot)
-            await pilot.pause()
+            for _ in range(20):
+                await pilot.pause()
+                if (len(panel.slot_widgets) == 2
+                        and not detail._pack_mode):
+                    break
             assert panel.state.slot(1).status is SlotStatus.EMPTY
+            assert len(panel.slot_widgets) == 2
+            assert panel.state.target_index == 1
+            assert app.focused is panel.slot_widgets[1]
             assert detail._pack_mode is False
             assert detail._view_mode == "empty"
             assert "NONE" in str(detail._summary.content)
+
+    run(scenario())
+
+
+def test_empty_slot_detail_action_follows_identity_after_reorder(
+        monkeypatch, tmp_path):
+    """Empty-detail delete must not use the row that inherited its index."""
+    current, first, second, _models, _tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+    current["chain"] = _chain([first, None, second])
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            detail = app.query_one(DetailPane)
+            await _wait_for_dynamic_slots(pilot, panel, 3)
+            panel.slot_widgets[1].focus()
+            await pilot.pause()
+            assert detail._view_mode == "empty"
+            empty_identity = panel.state.slot(1).identity
+
+            app._move_slot(1, -1)
+            await pilot.pause()
+            assert panel.state.index_for_identity(empty_identity) == 0
+
+            detail.action_delete_empty_slot()
+            await pilot.pause()
+            assert [slot.path for slot in panel.state.slots] == [first, second]
 
     run(scenario())
 
@@ -265,8 +316,14 @@ def test_slot_pack_loads_by_index_and_esc_restores_slot_focus(
             await pilot.pause(0.15)
             panel = app.query_one(ChainPanel)
             detail = app.query_one(DetailPane)
+            await _wait_for_dynamic_slots(pilot, panel, 1)
             panel.slot_widgets[0].focus()
-            await pilot.pause()
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if (detail._pack_mode
+                        and "m102" in detail._pack_rows):
+                    break
+            assert detail._pack_mode
             table = detail._pack_table
             table.focus()
             table.move_cursor(row=1, animate=False)
@@ -284,6 +341,45 @@ def test_slot_pack_loads_by_index_and_esc_restores_slot_focus(
             await pilot.pause()
             assert app.focused is panel.slot_widgets[0]
             assert panel.state.target_index == 0
+
+    run(scenario())
+
+
+def test_deferred_pack_focus_does_not_survive_view_switch(
+        monkeypatch, tmp_path):
+    """A queued PACK focus must not run after switching to Description."""
+    _current, _first, _second, models, tone = _patch_canonical_chain(
+        monkeypatch, tmp_path)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            detail = app.query_one(DetailPane)
+            await _wait_for_dynamic_slots(pilot, panel, 1)
+            panel.slot_widgets[0].focus()
+            await pilot.pause()
+
+            callbacks = []
+            monkeypatch.setattr(
+                detail, "call_after_refresh",
+                lambda callback: callbacks.append(callback),
+            )
+            detail.show_slot_pack(
+                tone, models, panel.state.to_chain(), 0,
+                panel.state.slot(0), focus_table=True)
+            assert len(callbacks) == 1
+
+            outside = panel.input_node
+            outside.focus()
+            await pilot.pause()
+            assert app.focused is outside
+            callbacks[0]()
+            await pilot.pause()
+
+            assert detail._view_mode == "selection"
+            assert app.focused is outside
 
     run(scenario())
 

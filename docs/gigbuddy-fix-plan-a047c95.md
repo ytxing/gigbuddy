@@ -1,7 +1,7 @@
 # GigBuddy 修复计划
 
-基线：`a047c955e062212f096baca4a0613a5646a53a90`  
-基线提交：`fix: restrict GigBuddy catalog to A2 and IR models`  
+基线：`a047c955e062212f096baca4a0613a5646a53a90`
+基线提交：`fix: restrict GigBuddy catalog to A2 and IR models`
 状态：待实施，本文只记录计划，不包含业务代码修改。
 
 ## 1. 目标

@@ -1079,43 +1079,53 @@ class ChainSlotWidget(Static):
     IO_PARAM_KEYS = ("input_gain_db", "output_gain_db")
 
     class SwitchRequested(Message):
-        def __init__(self, index: int, direction: int) -> None:
+        def __init__(self, index: int, direction: int,
+                     identity: int | None = None) -> None:
             super().__init__()
             self.index = index
             self.direction = direction
+            self.identity = identity
 
     class ToggleRequested(Message):
-        def __init__(self, index: int) -> None:
+        def __init__(self, index: int, identity: int | None = None) -> None:
             super().__init__()
             self.index = index
+            self.identity = identity
 
     class DeleteRequested(Message):
-        def __init__(self, index: int) -> None:
+        def __init__(self, index: int, identity: int | None = None) -> None:
             super().__init__()
             self.index = index
+            self.identity = identity
 
     class ToneRequested(Message):
-        def __init__(self, index: int) -> None:
+        def __init__(self, index: int, identity: int | None = None) -> None:
             super().__init__()
             self.index = index
+            self.identity = identity
 
     class MoveRequested(Message):
-        def __init__(self, index: int, direction: int) -> None:
+        def __init__(self, index: int, direction: int,
+                     identity: int | None = None) -> None:
             super().__init__()
             self.index = index
             self.direction = direction
+            self.identity = identity
 
     class ParamRequested(Message):
-        def __init__(self, index: int, key: str, delta: float) -> None:
+        def __init__(self, index: int, key: str, delta: float,
+                     identity: int | None = None) -> None:
             super().__init__()
             self.index = index
             self.key = key
             self.delta = float(delta)
+            self.identity = identity
 
     class CalibrateRequested(Message):
-        def __init__(self, index: int) -> None:
+        def __init__(self, index: int, identity: int | None = None) -> None:
             super().__init__()
             self.index = index
+            self.identity = identity
 
     BINDINGS = [
         Binding("up", "switch_up", "prev model", show=False),
@@ -1147,6 +1157,7 @@ class ChainSlotWidget(Static):
         self._io_hold_generation: int | None = None
         self._io_hold_key: str | None = None
         self._io_hold_value: float | None = None
+        self._io_hold_identity: int | None = snapshot.identity
         self._io_hold_direction = 0
         self._io_hold_started_at = 0.0
         self._io_next_repeat_at = 0.0
@@ -1262,7 +1273,8 @@ class ChainSlotWidget(Static):
             pass
 
     def _post_param(self, key: str, delta: float) -> None:
-        message = self.ParamRequested(self.index, key, delta)
+        message = self.ParamRequested(
+            self.index, key, delta, identity=self.snapshot.identity)
         message.set_sender(self)
         self.post_message(message)
 
@@ -1273,7 +1285,8 @@ class ChainSlotWidget(Static):
             self._post_param(key, delta)
 
     def _post_calibrate(self) -> None:
-        message = self.CalibrateRequested(self.index)
+        message = self.CalibrateRequested(
+            self.index, identity=self.snapshot.identity)
         message.set_sender(self)
         self.post_message(message)
 
@@ -1354,7 +1367,9 @@ class ChainSlotWidget(Static):
         self._cancel_io_edit()
         self._finish_io_hold()
         generation, current = self.app.begin_chain_param_hold(
-            key, slot_index=self.index)
+            key, slot_index=self.index,
+            slot_identity=self.snapshot.identity)
+        self._io_hold_identity = self.snapshot.identity
         self._io_hold_generation = generation
         self._io_hold_key = key
         self._io_hold_value = current
@@ -1386,7 +1401,8 @@ class ChainSlotWidget(Static):
         self._set_io_hold_display(value)
         self.app.queue_chain_param_hold(
             self._io_hold_generation, self._io_hold_key, value,
-            force=force, slot_index=self.index)
+            force=force, slot_index=self.index,
+            slot_identity=self._io_hold_identity)
         return True
 
     def _repeat_io_hold(self) -> None:
@@ -1415,7 +1431,24 @@ class ChainSlotWidget(Static):
             self._io_hold_end_sent = True
             self.app.end_chain_param_hold(
                 self._io_hold_generation, self._io_hold_key,
-                self._io_hold_value, slot_index=self.index)
+                self._io_hold_value, slot_index=self.index,
+                slot_identity=self._io_hold_identity)
+
+    def _cancel_io_hold_after_retarget(self) -> None:
+        """Finish a hold before this widget is reused for another Slot."""
+        if self._io_hold_generation is None:
+            self._io_hold_identity = None
+            return
+        self._finish_io_hold()
+        # The final commit still carries the original identity. This widget no
+        # longer owns its acknowledgement after a dynamic reorder, however;
+        # the callback resolves the current widget from that identity.
+        self._io_hold_generation = None
+        self._io_hold_key = None
+        self._io_hold_value = None
+        self._io_hold_identity = None
+        self._io_hold_direction = 0
+        self._io_hold_end_sent = False
 
     def _io_hold_commit_ack(self, generation: int, *, final: bool) -> None:
         if generation != self._io_hold_generation or not final:
@@ -1423,6 +1456,7 @@ class ChainSlotWidget(Static):
         self._io_hold_generation = None
         self._io_hold_key = None
         self._io_hold_value = None
+        self._io_hold_identity = None
         self._io_hold_direction = 0
         self._io_hold_end_sent = False
         self._refresh_io_widget()
@@ -1437,6 +1471,7 @@ class ChainSlotWidget(Static):
         self._io_hold_generation = None
         self._io_hold_key = None
         self._io_hold_value = None
+        self._io_hold_identity = None
         self._io_hold_direction = 0
         self._io_hold_end_sent = False
         self._refresh_io_widget()
@@ -1503,15 +1538,22 @@ class ChainSlotWidget(Static):
     def set_snapshot(self, snapshot: SlotSnapshot, *, title: str | None,
                      gear: str | None, quality_unsupported: bool = False) -> None:
         previous = self.snapshot
+        if (self._io_hold_generation is not None
+                and self._io_hold_identity != snapshot.identity):
+            self._cancel_io_hold_after_retarget()
         editing_key = self._io_editing
         editing_value = (self._io_value(editing_key)
                          if editing_key is not None else None)
         same_slot = (
+            previous.identity == snapshot.identity
+            and
             previous.path == snapshot.path
             and previous.candidate == snapshot.candidate
             and previous.status == snapshot.status
         )
         self.snapshot = snapshot
+        if self._io_hold_generation is None:
+            self._io_hold_identity = snapshot.identity
         self.title = title
         self.gear = gear
         self.quality_unsupported = quality_unsupported
@@ -1561,29 +1603,37 @@ class ChainSlotWidget(Static):
     def on_click(self, event: MouseEvent) -> None:
         self.focus()
         if getattr(event, "chain", 1) >= 2:
-            self.post_message(self.ToggleRequested(self.index))
+            self.post_message(self.ToggleRequested(
+                self.index, identity=self.snapshot.identity))
         event.stop()
 
     def action_switch_up(self) -> None:
-        self.post_message(self.SwitchRequested(self.index, -1))
+        self.post_message(self.SwitchRequested(
+            self.index, -1, identity=self.snapshot.identity))
 
     def action_switch_down(self) -> None:
-        self.post_message(self.SwitchRequested(self.index, +1))
+        self.post_message(self.SwitchRequested(
+            self.index, +1, identity=self.snapshot.identity))
 
     def action_toggle_bypass(self) -> None:
-        self.post_message(self.ToggleRequested(self.index))
+        self.post_message(self.ToggleRequested(
+            self.index, identity=self.snapshot.identity))
 
     def action_delete_slot(self) -> None:
-        self.post_message(self.DeleteRequested(self.index))
+        self.post_message(self.DeleteRequested(
+            self.index, identity=self.snapshot.identity))
 
     def action_choose_tone(self) -> None:
-        self.post_message(self.ToneRequested(self.index))
+        self.post_message(self.ToneRequested(
+            self.index, identity=self.snapshot.identity))
 
     def action_move_up(self) -> None:
-        self.post_message(self.MoveRequested(self.index, -1))
+        self.post_message(self.MoveRequested(
+            self.index, -1, identity=self.snapshot.identity))
 
     def action_move_down(self) -> None:
-        self.post_message(self.MoveRequested(self.index, +1))
+        self.post_message(self.MoveRequested(
+            self.index, +1, identity=self.snapshot.identity))
 
     def action_input_down(self) -> None:
         self._post_param("input_gain_db", -self.IO_KEY_STEP_DB)
@@ -1769,16 +1819,21 @@ class ChainSlotRow(Horizontal):
         if slot is None:
             return []
         actions = [
-            ("delete", lambda: self._post(slot.DeleteRequested(self.index))),
-            ("tone", lambda: self._post(slot.ToneRequested(self.index))),
+            ("delete", lambda: self._post(slot.DeleteRequested(
+                self.index, identity=slot.snapshot.identity))),
+            ("tone", lambda: self._post(slot.ToneRequested(
+                self.index, identity=slot.snapshot.identity))),
         ]
         if slot.status is not SlotStatus.EMPTY:
             toggle = "restore" if slot.status is SlotStatus.BYPASS else "bypass"
             actions.append(
-                (toggle, lambda: self._post(slot.ToggleRequested(self.index))))
+                (toggle, lambda: self._post(slot.ToggleRequested(
+                    self.index, identity=slot.snapshot.identity))))
         actions.extend([
-            ("move ↑", lambda: self._post(slot.MoveRequested(self.index, -1))),
-            ("↓", lambda: self._post(slot.MoveRequested(self.index, +1))),
+            ("move ↑", lambda: self._post(slot.MoveRequested(
+                self.index, -1, identity=slot.snapshot.identity))),
+            ("↓", lambda: self._post(slot.MoveRequested(
+                self.index, +1, identity=slot.snapshot.identity))),
         ])
         return actions
 
@@ -1868,7 +1923,9 @@ class ChainSlotAction(Static):
     def on_click(self, event: MouseEvent) -> None:
         self.slot.focus()
         self.slot.post_message(
-            ChainSlotWidget.MoveRequested(self.slot.index, self.direction))
+            ChainSlotWidget.MoveRequested(
+                self.slot.index, self.direction,
+                identity=self.slot.snapshot.identity))
         event.stop()
 
 
@@ -1925,9 +1982,10 @@ class ChainPanel(Vertical):
     class SlotFocused(Message):
         """A canonical Slot became the focused target."""
 
-        def __init__(self, index: int) -> None:
+        def __init__(self, index: int, identity: int | None = None) -> None:
             super().__init__()
             self.index = index
+            self.identity = identity
 
     def action_view_description(self) -> None:
         if not self._legacy_mode:
@@ -1964,13 +2022,30 @@ class ChainPanel(Vertical):
         self._legacy_mode = bool(initial) and "slots" not in initial
         self.set_class(not self._legacy_mode, "chain-panel-dynamic")
         self._state = ChainState(initial if not self._legacy_mode else {})
-        self._observed_chain_fingerprint: str | None = None
+        if not self._legacy_mode:
+            try:
+                # The first file poll observes the same snapshot used to build
+                # ChainState. Marking it here prevents that harmless initial
+                # read from being classified as an unknown external rewrite
+                # after the user has already focused a Slot.
+                self._observed_chain_fingerprint = chain_fingerprint(initial)
+            except (TypeError, ValueError):
+                self._observed_chain_fingerprint = None
+        else:
+            self._observed_chain_fingerprint = None
         self._slot_metadata_cache: dict[
             str, tuple[str | None, str | None, bool]
         ] = {}
         self._slot_widgets: dict[int, ChainSlotWidget] = {}
         self._slot_rows: dict[int, ChainSlotRow] = {}
         self._last_focus_slot: int | None = None
+        self._recompose_request: tuple[
+            int | None, tuple[str, int | None, int | None] | None,
+            tuple[int, ...], int, bool
+        ] | None = None
+        self._focus_generation = 0
+        self._last_semantic_focus_state: (
+            tuple[str, int | None, int | None] | None) = None
         self._mutation_anchor: ViewAnchor | None = None
         # Legacy hint fallback: last focused fixed AMP/CAB node.
         self._last_focus_node: NodeWidget | None = None
@@ -2231,13 +2306,13 @@ class ChainPanel(Vertical):
         target = None
         if anchor.focused_widget.startswith("slot:"):
             index_text = anchor.focused_widget.partition(":")[2]
-            if index_text.isdigit():
+            if index_text.isdigit() and target_index is not None:
                 # A reorder can leave the old index mounted but representing
                 # another Slot, and a deletion can remove it altogether. The
-                # resolved target is the only reliable focus destination.
-                target = self._slot_widgets.get(
-                    target_index if target_index is not None
-                    else int(index_text))
+                # resolved target is the only reliable focus destination. A
+                # whole-chain replacement intentionally clears the target, so
+                # the old anchor index must not select a new Slot.
+                target = self._slot_widgets.get(target_index)
         elif anchor.focused_widget == "input":
             target = getattr(self, "input_node", None)
         elif anchor.focused_widget.startswith("node:"):
@@ -2382,52 +2457,79 @@ class ChainPanel(Vertical):
             operations = _mutation_operations(event)
             if (not self._legacy_mode and operations.intersection(
                     _CHAIN_REPLACEMENT_OPERATIONS)):
+                focus_state = self._capture_recompose_focus()
                 # These operations replace the complete Slot array. The
                 # process-local target and bypass candidates are not portable
                 # across that boundary, even when the paths happen to match.
                 self._state.replace_chain(cfg)
                 self._observed_chain_fingerprint = chain_fingerprint(cfg)
+                self._schedule_dynamic_recompose(
+                    self.state.target_index, focus_state=focus_state)
                 self._refresh_dynamic_slots()
             self.chain = cfg
         except Exception:
             return
 
-    def _capture_recompose_focus(self) -> tuple[str, int | None]:
+    def _capture_recompose_focus(
+            self) -> tuple[str, int | None, int | None]:
         """Capture semantic focus before Textual replaces dynamic children."""
         focused = getattr(self.app, "focused", None)
         if focused is None:
-            return "none", None
+            return "none", None, None
         try:
             in_panel = focused is self or any(
                 ancestor is self for ancestor in focused.ancestors_with_self)
         except AttributeError:
             in_panel = False
         if not in_panel:
-            return "external", None
+            return "external", None, None
         if isinstance(focused, InputNodeWidget):
-            return "input", None
+            return "input", None, None
         if isinstance(focused, ChainSlotWidget):
-            return "slot", focused.index
+            return "slot", focused.index, focused.snapshot.identity
         if isinstance(focused, AddSlotButton):
-            return "add", None
+            return "add", None, None
         if isinstance(focused, ChainParams):
-            return "params", None
-        return "panel", None
+            return "params", None, None
+        return "panel", None, None
 
     def _restore_recompose_focus(
-            self, focus_state: tuple[str, int | None],
+            self, focus_state: tuple[str, int | None, int | None],
             fallback_index: int | None) -> None:
         """Restore the pre-recompose focus without stealing external focus."""
-        kind, index = focus_state
+        kind, index, identity = focus_state
         if kind == "external":
             return
+        focused = getattr(self.app, "focused", None)
+        if focused is not None:
+            try:
+                still_in_panel = focused is self or any(
+                    ancestor is self for ancestor in focused.ancestors_with_self)
+            except AttributeError:
+                still_in_panel = False
+            if not still_in_panel:
+                return
         target = None
         if kind == "input":
             target = getattr(self, "input_node", None)
-        elif kind == "slot" and index is not None:
-            target = self._slot_widgets.get(index)
-            if target is None and fallback_index is not None:
-                target = self._slot_widgets.get(fallback_index)
+        elif kind == "slot":
+            if identity is not None:
+                resolved_index = self.state.index_for_identity(identity)
+                if resolved_index is not None:
+                    target = self._slot_widgets.get(resolved_index)
+                elif (fallback_index is not None
+                      and self.state.target_index == fallback_index):
+                    # Deleting the focused Slot intentionally selects the
+                    # replacement target at this index. A pending recompose
+                    # may outlive a later whole-chain replacement, so only an
+                    # index still owned by the current target can be used.
+                    target = self._slot_widgets.get(fallback_index)
+            elif index is not None:
+                if self.state.target_index == index:
+                    target = self._slot_widgets.get(index)
+                if (target is None and fallback_index is not None
+                        and self.state.target_index == fallback_index):
+                    target = self._slot_widgets.get(fallback_index)
         elif kind == "add":
             # Adding a Slot explicitly changes the destination; keep the
             # existing add-button flow that opens the new Slot's detail view.
@@ -2444,24 +2546,74 @@ class ChainPanel(Vertical):
         if target is not None:
             target.focus()
 
-    async def _recompose_dynamic(self, focus_index: int | None = None) -> None:
-        focus_state = self._capture_recompose_focus()
+    async def _recompose_dynamic(
+            self, focus_index: int | None = None,
+            focus_state: tuple[str, int | None, int | None] | None = None,
+            focus_generation: int | None = None,
+            force_focus: bool = False,
+    ) -> None:
+        if focus_state is None:
+            focus_state = self._capture_recompose_focus()
+        if focus_generation is None:
+            focus_generation = self._focus_generation
         await self.recompose()
         self._refresh_dynamic_slots()
+        current_focus_state = self._capture_recompose_focus()
+        requested_identity = (
+            focus_state[2] if focus_state[0] == "slot" else None)
+        explicit_target_still_current = (
+            force_focus
+            and requested_identity is not None
+            and self.state.target_identity == requested_identity)
+        if (self._focus_generation != focus_generation
+                and self._last_semantic_focus_state is not None):
+            # A real descendant focus event happened while the worker was
+            # waiting. The focused widget may have been unmounted during
+            # recompose, so use the semantic intent recorded by the event
+            # instead of the container fallback Textual leaves focused.
+            focus_state = self._last_semantic_focus_state
+        elif (not explicit_target_still_current
+              and current_focus_state[0] not in {"none", "panel"}):
+            # A user can focus a newly mounted/retained control while the
+            # recompose worker is waiting. Restore that current intent rather
+            # than an older request captured before the wait.
+            focus_state = current_focus_state
         self._restore_recompose_focus(focus_state, focus_index)
 
-    def _schedule_dynamic_recompose(self, focus_index: int | None = None) -> None:
+    def _schedule_dynamic_recompose(
+            self, focus_index: int | None = None, *,
+            focus_state: tuple[str, int | None, int | None] | None = None,
+            force_focus: bool = False,
+    ) -> None:
         if self._legacy_mode or not getattr(self, "is_mounted", False):
             return
+        request = (focus_index, focus_state, self.state.slot_identities,
+                   self._focus_generation, force_focus)
         if getattr(self, "_recompose_pending", False):
+            pending = self._recompose_request
+            if pending is None or pending != request:
+                self._recompose_request = request
             return
+        self._recompose_request = request
         self._recompose_pending = True
 
         async def refresh() -> None:
             try:
-                await self._recompose_dynamic(focus_index)
+                while self._recompose_request is not None:
+                    request = self._recompose_request
+                    self._recompose_request = None
+                    await self._recompose_dynamic(
+                        request[0], request[1], request[3], request[4])
+                    pending = self._recompose_request
+                    if pending is not None and pending == request:
+                        # A duplicate poll observed the same Slot structure
+                        # and the same focus intent while the worker was
+                        # active; its focus was handled from the current
+                        # widget state above.
+                        self._recompose_request = None
             finally:
                 self._recompose_pending = False
+                self._recompose_request = None
 
         self.run_worker(refresh(), name="chain-recompose", exclusive=True)
 
@@ -2479,8 +2631,62 @@ class ChainPanel(Vertical):
                 observed = chain_fingerprint(chain)
             except (TypeError, ValueError):
                 observed = None
+            recompose_focus_state = None
+            identities_changed = False
             if observed != self._observed_chain_fingerprint:
+                previous_identities = self.state.slot_identities
+                recompose_focus_state = self._capture_recompose_focus()
                 observed_file_fingerprint = live.chain_file_fingerprint()
+                preserve_target_index = self.state.target_index
+                preserve_target_identity = self.state.target_identity
+                preserve_slot_identities = None
+                known_target = False
+                transition = None
+                pending_target = getattr(
+                    self.app, "_pending_managed_write_target", None)
+                if callable(pending_target):
+                    known_target, transition = pending_target(
+                        observed_file_fingerprint, chain.get("revision"))
+                    if known_target and transition is not None:
+                        # The file may arrive before the UI callback. Preserve
+                        # every known Slot identity through the transition so
+                        # a focus/detail view that is not the mutation target
+                        # does not get rebuilt with fresh identities.
+                        if (self.state.slot_paths
+                                == transition.before_paths
+                                and self.state.slot_identities
+                                == transition.before_identities):
+                            preserve_slot_identities = (
+                                transition.after_identities)
+                            if self.state.target_identity == (
+                                    transition.before_target_identity):
+                                preserve_target_identity = (
+                                    transition.after_target_identity)
+                            elif (self.state.target_identity is not None
+                                  and self.state.target_identity in
+                                  transition.after_identities):
+                                preserve_target_identity = (
+                                    self.state.target_identity)
+                            else:
+                                preserve_target_identity = None
+                            # Do not fall back to the old numeric index when
+                            # the focused identity was deleted.
+                            preserve_target_index = None
+                        elif (self.state.slot_paths
+                              == transition.after_paths
+                              and self.state.slot_identities
+                              == transition.after_identities):
+                            # A rollback can expose a temporary file and then
+                            # restore the exact original bytes. If the first
+                            # poll already applied this transition, keep those
+                            # identities for the second poll as well.
+                            preserve_slot_identities = (
+                                transition.after_identities)
+                            preserve_target_identity = (
+                                self.state.target_identity
+                                if self.state.target_identity in
+                                transition.after_identities else None)
+                            preserve_target_index = None
                 # A background parameter commit can land on disk before its
                 # UI callback runs. Promote that exact local write before
                 # reconciling, so the poll does not classify its candidate as
@@ -2500,10 +2706,19 @@ class ChainPanel(Vertical):
                     # would preserve bypass candidates after an external
                     # replacement merely because a previous TUI write exists.
                     fingerprint=observed_file_fingerprint,
-                    revision=chain.get("revision"))
+                    revision=chain.get("revision"),
+                    preserve_target_index=preserve_target_index,
+                    preserve_target_identity=preserve_target_identity
+                    if known_target else None,
+                    preserve_slot_identities=preserve_slot_identities)
+                identities_changed = (
+                    self.state.slot_identities != previous_identities)
                 self._observed_chain_fingerprint = observed
-            if len(self._slot_widgets) != self.state.slot_count:
-                self._schedule_dynamic_recompose(self.state.target_index)
+            if (len(self._slot_widgets) != self.state.slot_count
+                    or identities_changed):
+                self._schedule_dynamic_recompose(
+                    self.state.target_index,
+                    focus_state=recompose_focus_state)
             inp = live.chain_input(chain)
             if inp.get("source") == "file" and inp.get("file"):
                 self.input_node.set_file(inp["file"])
@@ -2529,16 +2744,38 @@ class ChainPanel(Vertical):
         quality = float(chain.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"]))
         self.params.set_values(gain, master, quality)
 
+    def _remember_semantic_focus(self, widget) -> None:
+        if isinstance(widget, ChainSlotWidget):
+            state = ("slot", widget.index, widget.snapshot.identity)
+        elif isinstance(widget, InputNodeWidget):
+            state = ("input", None, None)
+        elif isinstance(widget, AddSlotButton):
+            state = ("add", None, None)
+        elif isinstance(widget, ChainParams):
+            state = ("params", None, None)
+        else:
+            return
+        self._focus_generation += 1
+        self._last_semantic_focus_state = state
+
     def on_descendant_focus(self, event) -> None:
         if not self._legacy_mode and isinstance(event.widget, ChainSlotWidget):
-            self._last_focus_slot = event.widget.index
             try:
-                self.state.focus_slot(event.widget.index)
+                if event.widget.snapshot.identity is not None:
+                    self.state.focus_identity(event.widget.snapshot.identity)
+                else:
+                    self.state.focus_slot(event.widget.index)
             except ChainStateError:
                 return
+            self._remember_semantic_focus(event.widget)
+            self._last_focus_slot = self.state.target_index
             self._refresh_dynamic_slots()
-            self.post_message(self.SlotFocused(event.widget.index))
+            self.post_message(self.SlotFocused(
+                self.state.target_index,
+                event.widget.snapshot.identity))
             return
+        if not self._legacy_mode:
+            self._remember_semantic_focus(event.widget)
         if isinstance(event.widget, NodeWidget):
             if event.widget.kind in ("amp", "cab"):
                 self._last_focus_node = event.widget
@@ -2637,7 +2874,8 @@ class PackFileTable(ClickSelectTable):
         pane = self.screen.query_one(DetailPane)
         if pane._pack_origin == "slot" and pane._pack_slot_index is not None:
             self.post_message(DetailPane.PackClosed(
-                self.pack_kind, slot_index=pane._pack_slot_index))
+                self.pack_kind, slot_index=pane._pack_slot_index,
+                slot_identity=pane._pack_slot_identity))
         elif pane._pack_origin == "description":
             # Entered via the view switch: Esc returns to the description
             # view instead of focusing a chain node the user never touched.
@@ -2749,21 +2987,25 @@ class DetailPane(Vertical):
 
         def __init__(self, slot: str | None, path: str,
                      tone_gear: str | None = None, *,
-                     slot_index: int | None = None) -> None:
+                     slot_index: int | None = None,
+                     slot_identity: int | None = None) -> None:
             super().__init__()
             self.slot = slot  # legacy: "model" | "ir"
             self.path = path
             self.tone_gear = tone_gear
             self.slot_index = slot_index
+            self.slot_identity = slot_identity
 
     class PackClosed(Message):
         """Esc on the pack file table — return keyboard focus to the chain node."""
 
         def __init__(self, kind: str | None = None, *,
-                     slot_index: int | None = None) -> None:
+                     slot_index: int | None = None,
+                     slot_identity: int | None = None) -> None:
             super().__init__()
             self.kind = kind
             self.slot_index = slot_index
+            self.slot_identity = slot_identity
 
     class PackInstallRequested(Message):
         """selection 视图里 Enter/双击一行 → 打开该 tone 的二级菜单详情页
@@ -2841,19 +3083,20 @@ class DetailPane(Vertical):
         if self._pack_origin != "slot" or self._pack_slot_index is None:
             return
         self.post_message(self.PackClosed(
-            "slot", slot_index=self._pack_slot_index))
+            "slot", slot_index=self._pack_slot_index,
+            slot_identity=self._pack_slot_identity))
 
     def action_browse_empty_slot(self) -> None:
         if self._view_mode == "empty" and self._pack_slot_index is not None:
             handler = getattr(self.app, "_browse_empty_slot", None)
             if handler is not None:
-                handler(self._pack_slot_index)
+                handler(self._pack_slot_index, self._pack_slot_identity)
 
     def action_delete_empty_slot(self) -> None:
         if self._view_mode == "empty" and self._pack_slot_index is not None:
             handler = getattr(self.app, "_delete_slot", None)
             if handler is not None:
-                handler(self._pack_slot_index)
+                handler(self._pack_slot_index, self._pack_slot_identity)
 
     DEFAULT_CSS = """
     DetailPane #detail-marquee {
@@ -2916,6 +3159,7 @@ class DetailPane(Vertical):
         self._pack_auto_load_first = False
         self._pack_kind = "amp"
         self._pack_slot_index: int | None = None
+        self._pack_slot_identity: int | None = None
         self._pack_slot_status: SlotStatus | None = None
         self._pack_slot_label: str | None = None
         self._pack_tone: dict = {}
@@ -3183,6 +3427,7 @@ class DetailPane(Vertical):
             self._pack_table.clear()
         if not preserve_slot:
             self._pack_slot_index = None
+            self._pack_slot_identity = None
             self._pack_slot_status = None
             self._pack_slot_label = None
         self._pack_error = False
@@ -3195,12 +3440,14 @@ class DetailPane(Vertical):
 
     def clear_slot_target_context(self) -> None:
         """Remove a stale target after a successful whole-chain replacement."""
-        if self._pack_slot_index is None:
+        if (self._pack_slot_index is None
+                and self._pack_slot_identity is None):
             return
         if self._view_mode == "empty":
             self.clear()
             return
         self._pack_slot_index = None
+        self._pack_slot_identity = None
         self._pack_slot_status = None
         self._pack_slot_label = None
         if self._pack_origin == "slot":
@@ -3318,6 +3565,7 @@ class DetailPane(Vertical):
                 "remote": self._pack_remote,
                 "kind": self._pack_kind,
                 "slot_index": self._pack_slot_index,
+                "slot_identity": self._pack_slot_identity,
                 "slot_status": self._pack_slot_status,
                 "slot_label": self._pack_slot_label,
                 "origin": self._pack_origin,
@@ -3485,6 +3733,7 @@ class DetailPane(Vertical):
                     chain=dict(saved.get("chain") or live.read_chain()),
                     kind=saved.get("kind"),
                     slot_index=saved.get("slot_index"),
+                    slot_identity=saved.get("slot_identity"),
                     slot_status=saved.get("slot_status"),
                     slot_label=saved.get("slot_label"),
                     origin=saved.get("origin") or "description",
@@ -3501,6 +3750,7 @@ class DetailPane(Vertical):
                     self._enter_selection(
                         tone=tone,
                         slot_index=self._pack_slot_index,
+                        slot_identity=self._pack_slot_identity,
                         slot_status=self._pack_slot_status,
                         slot_label=self._pack_slot_label,
                         origin=(self._pack_origin
@@ -3508,8 +3758,9 @@ class DetailPane(Vertical):
                                 else "description"),
                         focus_table=True, remote=False, allow_empty=True)
             else:
-                self._enter_selection(tone=tone,
+                    self._enter_selection(tone=tone,
                                       slot_index=self._pack_slot_index,
+                                      slot_identity=self._pack_slot_identity,
                                       slot_status=self._pack_slot_status,
                                       slot_label=self._pack_slot_label,
                                       origin=(self._pack_origin
@@ -3631,13 +3882,22 @@ class DetailPane(Vertical):
             self.app.notify("First model is not downloaded", severity="warning")
             return
         slot_index = self._pack_slot_index
-        if slot_index is None:
+        slot_identity = self._pack_slot_identity
+        if slot_index is None and slot_identity is None:
             self.app.notify("Select a target Slot before loading the first model",
                             severity="warning")
             return
         try:
             panel = self.app.query_one(ChainPanel)
-            if panel.state.target_index != slot_index:
+            if slot_identity is not None:
+                slot_index = panel.state.index_for_identity(slot_identity)
+                if (slot_index is None
+                        or panel.state.target_identity != slot_identity):
+                    self.app.notify(
+                        "Select the target Slot before loading the first model",
+                        severity="warning")
+                    return
+            elif panel.state.target_index != slot_index:
                 self.app.notify("Select the target Slot before loading the first model",
                                 severity="warning")
                 return
@@ -3647,9 +3907,14 @@ class DetailPane(Vertical):
             self.app.notify("Select a target Slot before loading the first model",
                             severity="warning")
             return
+        if slot_identity is None:
+            try:
+                slot_identity = panel.state.slot_identity(slot_index)
+            except Exception:
+                slot_identity = None
         self.post_message(self.PackFilePicked(
             None, path, (self._pack_tone or {}).get("gear"),
-            slot_index=slot_index))
+            slot_index=slot_index, slot_identity=slot_identity))
 
     def _selected_pack_keys(self) -> list[str]:
         """勾选行 key；未勾选任何行时回退光标行（单行语义与多选共存）。"""
@@ -4124,6 +4389,15 @@ class DetailPane(Vertical):
         if not getattr(self, "is_mounted", False):
             return
         operations = _mutation_operations(event)
+        cleared_slot_context = False
+        if operations.intersection(_CHAIN_REPLACEMENT_OPERATIONS):
+            cleared_slot_context = (
+                self._pack_slot_index is not None
+                or self._pack_slot_identity is not None)
+            # Chain/preset/undo/redo replace the complete Slot array. A
+            # DetailPane target is process-local and cannot be inferred from
+            # the replacement's numeric position, even when paths match.
+            self.clear_slot_target_context()
         if getattr(self, "_pack_mode", False):
             if operations.intersection(_LIBRARY_STATE_OPERATIONS):
                 tone_id = int(
@@ -4131,6 +4405,10 @@ class DetailPane(Vertical):
                 if tone_id and self._pack_mutation_affects_tone(event, tone_id):
                     self._refresh_pack_after_change(tone_id, self._view_generation)
                     return
+            if cleared_slot_context:
+                # clear_slot_target_context already refreshed the chain-level
+                # markers after detaching the stale Slot binding.
+                return
             self.refresh_pack_active(live.read_chain())
             return
 
@@ -4218,6 +4496,7 @@ class DetailPane(Vertical):
     def _enter_description(self, tone: dict | None, *,
                            preserve_slot_context: bool = False,
                            slot_index: int | None = None,
+                           slot_identity: int | None = None,
                            slot_status: SlotStatus | None = None,
                            remote: bool | None = None) -> None:
         """Description view: the two-line header carries the key metadata and
@@ -4231,6 +4510,7 @@ class DetailPane(Vertical):
                 remote = remote or self._pack_remote
         if preserve_slot_context:
             slot_index = self._pack_slot_index
+            slot_identity = self._pack_slot_identity
             slot_status = self._pack_slot_status
             slot_label = self._pack_slot_label
         else:
@@ -4238,6 +4518,7 @@ class DetailPane(Vertical):
         origin = self._pack_origin if preserve_slot_context else "description"
         self._exit_pack_mode(preserve_slot=preserve_slot_context)
         self._pack_slot_index = slot_index
+        self._pack_slot_identity = slot_identity
         self._pack_slot_status = slot_status
         self._pack_slot_label = slot_label
         self._pack_origin = origin
@@ -4276,6 +4557,7 @@ class DetailPane(Vertical):
                          chain: dict | None = None,
                          kind: str | None = None,
                          slot_index: int | None = None,
+                         slot_identity: int | None = None,
                          slot_status: SlotStatus | None = None,
                          slot_label: str | None = None,
                          origin: str | None = None,
@@ -4293,7 +4575,8 @@ class DetailPane(Vertical):
         pack (未下载): shell 先立起来，模型列表由 show_remote_pack 后台拉取，
         Enter 走安装二级页而不是热换链槽。
         """
-        self._invalidate_view()
+        generation = self._invalidate_view()
+        scheduled_focus = getattr(self.app, "focused", None)
         tone = tone or self._current_tone or {}
         models = models if models is not None else tone.get("models") or []
         if not models:
@@ -4306,9 +4589,48 @@ class DetailPane(Vertical):
             try:
                 panel = self.app.query_one(ChainPanel)
                 if not panel._legacy_mode:
-                    slot_index = panel.state.target_index
+                    resolved_index = (
+                        panel.state.index_for_identity(slot_identity)
+                        if slot_identity is not None
+                        else panel.state.target_index)
+                    if slot_identity is not None and resolved_index is None:
+                        # The logical Slot was deleted while this view was
+                        # retained. An old index must never become a new
+                        # target just because the row shifted into its place.
+                        slot_identity = None
+                        slot_status = None
+                    slot_index = resolved_index
                     if slot_index is not None and slot_status is None:
                         slot_status = panel.state.slot(slot_index).status
+            except Exception:
+                if slot_identity is not None:
+                    slot_identity = None
+                    slot_index = None
+                    slot_status = None
+        elif slot_identity is not None:
+            try:
+                panel = self.app.query_one(ChainPanel)
+                if not panel._legacy_mode:
+                    slot_index = panel.state.index_for_identity(slot_identity)
+                    if slot_index is None:
+                        # The logical Slot was deleted while the detail view
+                        # was retained. Do not retarget the view to the row
+                        # that inherited its old index.
+                        slot_identity = None
+                        slot_index = None
+                        slot_status = None
+                    elif slot_status is None:
+                        slot_status = panel.state.slot(slot_index).status
+            except Exception:
+                # An identity-bound view must not fall back to its stale index
+                # if the dynamic panel is temporarily unavailable.
+                slot_identity = None
+                slot_index = None
+                slot_status = None
+        if slot_identity is None and slot_index is not None:
+            try:
+                slot_identity = self.app.query_one(ChainPanel).state.slot_identity(
+                    slot_index)
             except Exception:
                 pass
         self._pack_tone = tone
@@ -4317,6 +4639,7 @@ class DetailPane(Vertical):
         self._pack_creator = None
         self._pack_kind = kind or "amp"
         self._pack_slot_index = slot_index
+        self._pack_slot_identity = slot_identity
         self._pack_slot_status = slot_status
         self._pack_slot_label = slot_label or tone.get("gear")
         self._pack_table.pack_kind = self._pack_kind
@@ -4346,7 +4669,20 @@ class DetailPane(Vertical):
         if focus_table:
             # Take keyboard focus so Esc/← (the pack table bindings) work
             # right after the view switch.
-            self.call_after_refresh(self._pack_table.focus)
+            def focus_pack_table() -> None:
+                if (not self._view_alive(generation)
+                        or self._view_mode != "selection"
+                        or not self._pack_mode):
+                    return
+                current_focus = getattr(self.app, "focused", None)
+                if (current_focus is not None
+                        and current_focus is not scheduled_focus):
+                    # The user moved focus while the view was being mounted;
+                    # an old refresh callback must not steal it back.
+                    return
+                self._pack_table.focus()
+
+            self.call_after_refresh(focus_pack_table)
 
     @staticmethod
     def _arch_tag(architecture: str | None, colors: dict[str, str]) -> str:
@@ -4436,16 +4772,19 @@ class DetailPane(Vertical):
             chain=chain,
             kind="slot",
             slot_index=slot_index,
+            slot_identity=snapshot.identity,
             slot_status=snapshot.status,
             slot_label=tone.get("gear") if tone else None,
             origin="slot",
             focus_table=focus_table)
 
-    def show_slot_empty(self, slot_index: int, *, target: bool = True) -> None:
+    def show_slot_empty(self, slot_index: int, *, target: bool = True,
+                        slot_identity: int | None = None) -> None:
         """Show an Empty Slot without retaining the previous pack context."""
         self._invalidate_view()
         self._exit_pack_mode()
         self._pack_slot_index = slot_index
+        self._pack_slot_identity = slot_identity
         self._pack_slot_status = SlotStatus.EMPTY
         self._pack_origin = "slot"
         self._current_tone = None
@@ -4761,13 +5100,20 @@ class DetailPane(Vertical):
         self._pack_chain = chain
         if self._pack_slot_index is not None:
             try:
-                snapshot = self.app.query_one(ChainPanel).state.slot(
-                    self._pack_slot_index)
+                panel = self.app.query_one(ChainPanel)
+                if self._pack_slot_identity is not None:
+                    resolved_index = panel.state.index_for_identity(
+                        self._pack_slot_identity)
+                    if resolved_index is None:
+                        self.clear_slot_target_context()
+                        return
+                    self._pack_slot_index = resolved_index
+                snapshot = panel.state.slot(self._pack_slot_index)
+                self._pack_slot_status = snapshot.status
             except Exception:
                 return
             active_path = snapshot.path
             candidate_path = snapshot.candidate
-            self._pack_slot_status = snapshot.status
         else:
             model_path = chain.get("model")
             ir_path = chain.get("ir")
@@ -4859,7 +5205,8 @@ class DetailPane(Vertical):
         if self._pack_slot_index is not None:
             self.post_message(self.PackFilePicked(
                 None, model["local_path"], tone.get("gear"),
-                slot_index=self._pack_slot_index))
+                slot_index=self._pack_slot_index,
+                slot_identity=self._pack_slot_identity))
         else:
             slot = ("ir" if model_architecture(model, tone=tone) == "IR"
                     else "model")
@@ -4945,16 +5292,19 @@ class DetailPane(Vertical):
         # Preserve the canonical ChainState target so switching to Pack can
         # still load this tone into the already selected Slot.
         target_index = None
+        target_identity = None
         target_status = None
         try:
             panel = self.app.query_one(ChainPanel)
             if not panel._legacy_mode:
                 target_index = panel.state.target_index
                 if target_index is not None:
+                    target_identity = panel.state.target_identity
                     target_status = panel.state.slot(target_index).status
         except Exception:
             pass
         self._enter_description(t, slot_index=target_index,
+                                slot_identity=target_identity,
                                 slot_status=target_status, remote=remote)
 
     def show_model(self, tone: dict | None, model: dict) -> None:

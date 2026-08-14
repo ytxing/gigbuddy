@@ -24,12 +24,12 @@ tone pack，里面又是一长串 NAM 文件，每个文件都是不同 setting 
 我可以用同一段干音或自己的乐器试听，知道当前听的到底是哪一个文件，找到
 合适的声音后直接搭建整条音色链。
 
-*v1.1.4 · 2026-08-11* · [main 上 v1.2.0 的变更说明](docs/releases/v1.2.0.md)
+*v1.2.0 · 2026-08-14* · [发布说明](docs/releases/v1.2.0.md) · [Tone Pack 与分享 preset 完整使用指南](docs/tone-file-management.zh-CN.md)
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.0/scripts/install.sh | bash
 ```
 
 ![GigBuddy 安装](docs/screenshots/gigbuddy.gif)
@@ -87,10 +87,10 @@ british-green、surf-cream 之间循环。
 
 ## 主要特性
 
-`v1.1.4` 之后 `main` 的完整变更见 [v1.2.0 release note](docs/releases/v1.2.0.md)。
+完整变更见 [v1.2.0 release note](docs/releases/v1.2.0.md)。
 简单说：TONE3000 搜索现在跟随官方默认排序和 A2 过滤，LOCAL 也可以统一管理
 远程下载的 Pack 与用户自己的本地 Pack。面向客户的[音色文件管理指南](docs/tone-file-management.zh-CN.md)
-说明目录、导入、manifest、preset 和文件限制。
+说明目录、导入、manifest、分享 preset 和文件限制。
 
 **音色链全面升级。** 原来固定的 AMP/CAB 两段，现在是最多六个 Slot 的
 有序链，每个 Slot 可放任意受支持的 NAM 模型或 `.wav` IR，信号路径完全
@@ -141,7 +141,7 @@ AUDIO 面板把电平、静音、设备、缓冲、采样率、延迟控制在�
 可跳过询问。卸载同样一行完成：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.0/scripts/uninstall.sh | bash
 ```
 
 独立卸载脚本会删除本地安装、生成的运行时文件和持久化的 TONE3000 会话。
@@ -149,7 +149,7 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/unins
 参数；登录会话仍会被删除：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.0/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 从源码检出开始：
@@ -208,6 +208,18 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.1.4/scripts/unins
 preset 同时保存为 `data/presets/<id>-<name>.json`，可以直接备份和编辑；
 SQLite 继续作为本地索引。GigBuddy 读取 preset 时会同步已修改的 JSON，
 JSON 损坏时保留文件并提示，不会覆盖 SQLite 里最后一份可用快照。
+
+如果要把音色链发给其他 GigBuddy 用户，请导出单独的分享文件。分享文件只保存
+TONE3000 `model_id` 和链参数，不保存你电脑上的路径；接收方导入时，GigBuddy
+会下载所需模型，再在自己的本地库里生成 preset：
+
+```sh
+gigbuddy preset export <name> preset-name.json
+gigbuddy preset import preset-name.json --load
+```
+
+分享文件需要显式执行 `preset import`，不要直接放进 `data/presets/`。完整字段、
+下载流程和本地 Pack 的限制见[分享 preset 格式](docs/tone-file-management.zh-CN.md#分享-preset)。
 
 全局命令面板（`ctrl+p`）可以聚焦 Presets、打开音频设置、切换主题或查找
 主要命令，不必记忆快捷键。
@@ -297,6 +309,8 @@ gigbuddy tone login
 gigbuddy tone logout
 gigbuddy preset list
 gigbuddy preset load <name>
+gigbuddy preset export <name> preset-name.json
+gigbuddy preset import preset-name.json --load
 gigbuddy chain get
 gigbuddy chain set '{"slots": [], "gain": 1.0, "master": 1.0}'
 ```
@@ -364,7 +378,7 @@ TONE3000 的 API 政策与 endpoint 范围可能变化。OAuth 流程、免费�
 
 ## 依赖
 
-版本固定（v1.1.4）。升级时需同步更新 `requirements.txt` 与 `install.sh`
+版本固定（v1.2.0）。升级时需同步更新 `requirements.txt` 与 `install.sh`
 中的 NeuralAudio commit。
 
 **Python 运行时**（`requirements.txt`）：

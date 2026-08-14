@@ -104,6 +104,35 @@ class _ManagedChainJob:
     note: str
     failure_note: str | None = None
     on_success: Callable[[dict, int | None], None] | None = None
+    target_index: int | None = None
+    target_identity: int | None = None
+    slot_paths: tuple[str | None, ...] | None = None
+    slot_identities: tuple[int, ...] | None = None
+    # The UI snapshot this job was created from. A queued job may follow a
+    # known local transition, but must not silently rebase onto an external
+    # whole-chain replacement with the same Slot paths.
+    base_fingerprint: str | None = None
+    base_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class _ManagedWriteTarget:
+    """Process-local Slot identity transition for one committed file."""
+
+    before_target_identity: int | None
+    after_target_identity: int | None
+    before_paths: tuple[str | None, ...]
+    after_paths: tuple[str | None, ...]
+    before_identities: tuple[int, ...]
+    after_identities: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _ManagedParamCommit:
+    """One parameter commit plus the process-local Slot order it used."""
+
+    chain: dict
+    slot_identities: tuple[int, ...] | None = None
 
 
 class _ManagedChainAdapter:
@@ -143,6 +172,7 @@ class _ManagedChainAdapter:
         self._runtime_session_id: str | None = None
         self._transaction_id: str | None = None
         self._candidate_fingerprint: str | None = None
+        self._candidate_revision: int | None = None
         self._file_write_succeeded = False
         self._file_restore_succeeded = False
         self._restore_transaction_id: str | None = None
@@ -178,6 +208,7 @@ class _ManagedChainAdapter:
     def write_file(self, chain: dict) -> CommitReceipt:
         self._candidate_fingerprint = chain_protocol.serialized_chain_fingerprint(
             chain, root=live.ROOT)
+        self._candidate_revision = chain.get("revision")
         self._file_write_succeeded = False
         self._file_restore_succeeded = False
         self._restore_transaction_id = None
@@ -265,6 +296,11 @@ class _ManagedChainAdapter:
         )
         self._restore_file_fingerprint = live.chain_file_fingerprint()
         self._file_restore_succeeded = True
+        remember_rollback = getattr(
+            self._app, "_remember_managed_rollback_target", None)
+        if callable(remember_rollback):
+            remember_rollback(
+                (self._candidate_fingerprint, self._candidate_revision))
 
     def restore_runtime(self, _snapshot) -> None:
         if not self._file_restore_succeeded:
@@ -296,6 +332,11 @@ class _ManagedChainAdapter:
             None if self._restore_file_was_absent else self._previous_payload,
             expected_fingerprint=self._restore_file_fingerprint,
         )
+        remember_rollback = getattr(
+            self._app, "_remember_managed_rollback_target", None)
+        if callable(remember_rollback):
+            remember_rollback(
+                (self._candidate_fingerprint, self._candidate_revision))
 
 # Guitar-amp inspired palettes. Keep the source tokens in one table so each
 # theme has the same semantic surface and only its visual material changes.
@@ -1088,7 +1129,12 @@ class GigBuddyApp(App):
         self._param_hold_lock = threading.Lock()
         self._param_hold_generation = 0
         self._param_hold_pending: tuple[
-            int, int | None, str, float, bool, bool] | None = None
+            int, int | None, int | None, str, float, bool, bool,
+            tuple[str | None, ...] | None, tuple[int, ...] | None
+        ] | None = None
+        self._param_hold_slot_identity: int | None = None
+        self._param_hold_slot_paths: tuple[str | None, ...] | None = None
+        self._param_hold_slot_identities: tuple[int, ...] | None = None
         self._param_hold_worker_active = False
         self._param_hold_last_commit_at = 0.0
         # All managed chain writes share one file/runtime critical section.
@@ -1099,6 +1145,11 @@ class GigBuddyApp(App):
         self._managed_writer_thread: threading.Thread | None = None
         self._managed_writer_lock = threading.Lock()
         self._managed_writer_stopping = False
+        self._managed_write_targets: dict[
+            tuple[str, int], _ManagedWriteTarget] = {}
+        self._managed_write_targets_lock = threading.Lock()
+        self._managed_slot_projection: tuple[
+            str, int, _ManagedWriteTarget] | None = None
         self._calibration_generation = 0
         for guitar_theme in GUITAR_AMP_THEMES:
             self.register_theme(guitar_theme)
@@ -1502,10 +1553,36 @@ class GigBuddyApp(App):
             and self._engine.poll() is None
         )
 
+    def _current_chain_target_index(self) -> int | None:
+        """Read the current canonical target for non-Slot managed writes."""
+        try:
+            panel = self.query_one(ChainPanel)
+        except NoMatches:
+            return None
+        state = getattr(panel, "state", None)
+        return getattr(state, "target_index", None)
+
+    def _current_chain_identity_snapshot(
+            self) -> tuple[tuple[str | None, ...], tuple[int, ...]] | None:
+        try:
+            panel = self.query_one(ChainPanel)
+        except NoMatches:
+            return None
+        state = getattr(panel, "state", None)
+        if state is None:
+            return None
+        return state.slot_paths, state.slot_identities
+
     def _enqueue_managed_mutation(
             self, mutation: Callable[[ChainState], object], note: str, *,
             failure_note: str | None = None,
             on_success: Callable[[dict, int | None], None] | None = None,
+            target_index: int | None = None,
+            target_identity: int | None = None,
+            slot_paths: tuple[str | None, ...] | None = None,
+            slot_identities: tuple[int, ...] | None = None,
+            base_fingerprint: str | None = None,
+            base_revision: int | None = None,
     ) -> bool:
         """Queue one managed mutation without blocking Textual's event loop."""
         if not self._managed_engine_active():
@@ -1515,6 +1592,12 @@ class GigBuddyApp(App):
             note=note,
             failure_note=failure_note,
             on_success=on_success,
+            target_index=target_index,
+            target_identity=target_identity,
+            slot_paths=slot_paths,
+            slot_identities=slot_identities,
+            base_fingerprint=base_fingerprint,
+            base_revision=base_revision,
         )
         with self._managed_writer_lock:
             if self._managed_writer_stopping:
@@ -1529,6 +1612,155 @@ class GigBuddyApp(App):
             self._managed_writer_queue.put(job)
         return True
 
+    def _remember_managed_write_target(self, fingerprint: str | None,
+                                       revision: int | None,
+                                       before_target: int | None,
+                                       after_target: int | None,
+                                       before_paths: tuple[str | None, ...],
+                                       after_paths: tuple[str | None, ...],
+                                       before_identities: tuple[int, ...],
+                                       after_identities: tuple[int, ...]) -> None:
+        """Expose a just-written target before runtime acknowledgement."""
+        if (not isinstance(fingerprint, str) or not fingerprint
+                or isinstance(revision, bool)
+                or not isinstance(revision, int)):
+            return
+        with self._managed_write_targets_lock:
+            latest = self._managed_slot_projection
+            if (latest is not None
+                    and (latest[2].after_paths != before_paths
+                         or latest[2].after_identities != before_identities)):
+                # The file/runtime chain was replaced outside the known
+                # managed sequence. Old process-local identities cannot be
+                # safely projected through that boundary.
+                self._managed_write_targets.clear()
+            transition = _ManagedWriteTarget(
+                before_target, after_target,
+                before_paths, after_paths,
+                before_identities, after_identities)
+            self._managed_write_targets[(fingerprint, revision)] = transition
+            self._managed_slot_projection = (
+                fingerprint, revision,
+                transition)
+            # Keep enough recent transitions for queued jobs and an early
+            # poll to resolve either side of the runtime-ack race.
+            if len(self._managed_write_targets) > 32:
+                for key in list(self._managed_write_targets)[:-16]:
+                    self._managed_write_targets.pop(key, None)
+
+    def _pending_managed_write_target(
+            self, fingerprint: str | None,
+            revision: int | None) -> tuple[bool, _ManagedWriteTarget | None]:
+        """Return the target transition for one exact managed file write."""
+        if (not isinstance(fingerprint, str) or not fingerprint
+                or isinstance(revision, bool)
+                or not isinstance(revision, int)):
+            return False, None
+        with self._managed_write_targets_lock:
+            key = (fingerprint, revision)
+            if key not in self._managed_write_targets:
+                return False, None
+            return True, self._managed_write_targets[key]
+
+    def _projected_slot_identities(
+            self, fingerprint: str | None, revision: int | None,
+            paths: tuple[str | None, ...]
+    ) -> tuple[int, ...] | None:
+        with self._managed_write_targets_lock:
+            projection = self._managed_slot_projection
+        if projection is None or projection[:2] != (fingerprint, revision):
+            return None
+        transition = projection[2]
+        if transition.after_paths != paths:
+            return None
+        return transition.after_identities
+
+    def _managed_state_from_snapshot(
+            self, chain: dict, fingerprint: str | None,
+            *, slot_paths: tuple[str | None, ...] | None = None,
+            slot_identities: tuple[int, ...] | None = None,
+    ) -> ChainState:
+        """Rebuild a managed state while retaining known Slot identities."""
+        paths = tuple(
+            slot.get("path") for slot in chain.get("slots", ()))
+        projected = self._projected_slot_identities(
+            fingerprint, chain.get("revision"), paths)
+        if projected is not None:
+            return ChainState.from_chain_with_identities(chain, projected)
+        if slot_identities is not None:
+            if slot_paths != paths:
+                raise ChainStateError(
+                    "queued Slot identity is no longer available")
+            return ChainState.from_chain_with_identities(chain, slot_identities)
+        return ChainState(chain)
+
+    def _validate_managed_job_snapshot(
+            self, job: _ManagedChainJob, chain: dict,
+            fingerprint: str | None) -> None:
+        """Reject a queued Slot job that crossed an unknown chain boundary."""
+        if job.slot_identities is None:
+            return
+        revision = chain.get("revision")
+        same_base = (
+            job.base_revision is not None
+            and revision == job.base_revision
+            and ((job.base_fingerprint is None and fingerprint is None)
+                 or (job.base_fingerprint is not None
+                     and fingerprint == job.base_fingerprint))
+        )
+        if same_base:
+            return
+        known, transition = self._pending_managed_write_target(
+            fingerprint, revision)
+        if (not known or transition is None
+                or transition.before_paths != tuple(job.slot_paths or ())
+                or transition.before_identities != job.slot_identities):
+            raise ChainStateError(
+                "queued Slot mutation discarded: chain was replaced")
+
+    def _discard_managed_write_target(self, fingerprint: str | None,
+                                      revision: int | None) -> None:
+        """Remove a projection whose file write was rolled back."""
+        if (not isinstance(fingerprint, str) or not fingerprint
+                or isinstance(revision, bool)
+                or not isinstance(revision, int)):
+            return
+        with self._managed_write_targets_lock:
+            self._managed_write_targets.pop((fingerprint, revision), None)
+            if (self._managed_slot_projection is not None
+                    and self._managed_slot_projection[:2]
+                    == (fingerprint, revision)):
+                self._managed_slot_projection = None
+
+    def _remember_managed_rollback_target(
+            self, forward_identity: tuple[str, int] | None) -> None:
+        """Publish the inverse identity transition after a failed commit."""
+        if forward_identity is None:
+            return
+        with self._managed_write_targets_lock:
+            forward = self._managed_write_targets.get(forward_identity)
+        if forward is None:
+            return
+        try:
+            chain, fingerprint = live.read_chain_snapshot()
+        except Exception:
+            return
+        paths = tuple(
+            slot.get("path") for slot in chain.get("slots", ()))
+        if paths != forward.before_paths:
+            # The file was changed again or rollback did not reach the base
+            # chain. Do not attach process-local identities to that state.
+            return
+        revision = chain.get("revision")
+        self._remember_managed_write_target(
+            fingerprint, revision,
+            forward.after_target_identity,
+            forward.before_target_identity,
+            forward.after_paths,
+            forward.before_paths,
+            forward.after_identities,
+            forward.before_identities)
+
     def _drain_managed_mutations(self) -> None:
         """Serialize managed file/runtime transactions on a background thread."""
         while True:
@@ -1538,6 +1770,27 @@ class GigBuddyApp(App):
             with self._managed_writer_lock:
                 if self._managed_writer_stopping:
                     continue
+            write_identity: tuple[str, int] | None = None
+            before_identities: tuple[int, ...] = ()
+            before_paths: tuple[str | None, ...] = ()
+            before_target_identity: int | None = None
+
+            def observe_file_write(fingerprint: str | None,
+                                   revision: int | None,
+                                   target_index: int | None,
+                                   target_identity: int | None,
+                                   slot_identities: tuple[int, ...],
+                                   slot_paths: tuple[str | None, ...]) -> None:
+                nonlocal write_identity
+                if (isinstance(fingerprint, str)
+                        and isinstance(revision, int)
+                        and not isinstance(revision, bool)):
+                    write_identity = (fingerprint, revision)
+                self._remember_managed_write_target(
+                    fingerprint, revision, before_target_identity,
+                    target_identity, before_paths, slot_paths,
+                    before_identities, slot_identities)
+
             try:
                 if not self._managed_engine_active():
                     raise RuntimeError("managed engine is no longer active")
@@ -1545,8 +1798,29 @@ class GigBuddyApp(App):
                 # clicks even while the UI callback for the previous job is
                 # waiting in Textual's message queue.
                 with self._managed_transaction_lock:
-                    base_chain, _ = live.read_chain_snapshot()
-                    state = ChainState(base_chain)
+                    base_chain, base_fingerprint = live.read_chain_snapshot()
+                    self._validate_managed_job_snapshot(
+                        job, base_chain, base_fingerprint)
+                    state = self._managed_state_from_snapshot(
+                        base_chain, base_fingerprint,
+                        slot_paths=job.slot_paths,
+                        slot_identities=job.slot_identities)
+                    before_identities = state.slot_identities
+                    before_paths = state.slot_paths
+                    before_target_identity = (
+                        job.target_identity
+                        if job.target_identity is not None
+                        else state.target_identity)
+                    if job.target_identity is not None:
+                        try:
+                            state.focus_identity(job.target_identity)
+                        except ChainStateError:
+                            pass
+                    elif (job.target_index is not None
+                          and job.target_index < state.slot_count):
+                        state.focus_slot(job.target_index)
+                    if job.slot_identities is not None:
+                        state.set_index_aliases(job.slot_identities)
 
                     def transactional_mutation(draft: ChainState):
                         result = job.mutation(draft)
@@ -1557,44 +1831,105 @@ class GigBuddyApp(App):
                     persisted = state.commit(
                         _ManagedChainAdapter(
                             self, expected_chain=base_chain),
-                        transactional_mutation)
+                        transactional_mutation,
+                        on_file_written=observe_file_write)
                     target_index = state.target_index
+                    write_fingerprint = state.managed_fingerprint
+                    target_identity = state.target_identity
             except _ManagedNoOp:
+                if write_identity is not None:
+                    self._discard_managed_write_target(*write_identity)
                 self._dispatch_managed_writer_callback(
                     self._managed_job_failed, job,
                     job.failure_note or job.note)
             except Exception as exc:
+                if write_identity is not None:
+                    self._remember_managed_rollback_target(write_identity)
+                    self._discard_managed_write_target(*write_identity)
                 self._dispatch_managed_writer_callback(
                     self._managed_job_failed, job,
                     f"Chain unchanged: {exc}")
             else:
                 self._dispatch_managed_writer_callback(
-                    self._managed_job_succeeded, job, persisted, target_index)
+                    self._managed_job_succeeded, job, persisted, target_index,
+                    write_fingerprint, target_identity, state.slot_identities)
 
     def _dispatch_managed_writer_callback(self, callback, *args) -> None:
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        completed = threading.Event()
+
+        def invoke() -> None:
+            try:
+                with self._context():
+                    callback(*args)
+            except Exception:
+                # The app may unmount between dispatch and execution. The
+                # file transaction is already complete, so no UI callback is
+                # safe or useful after that boundary.
+                pass
+            finally:
+                completed.set()
+
         try:
-            self.call_from_thread(callback, *args)
-        except Exception:
-            # The app may be unmounting while an in-flight runtime transaction
-            # finishes. The file transaction is already complete; no widget
-            # callback is safe after the Textual message pump is gone.
-            pass
+            # ``call_from_thread`` creates its coroutine before it notices a
+            # closing loop. Queue directly so teardown cannot leak an
+            # unawaited coroutine. Keep the normal writer queue serialized by
+            # waiting for the UI callback; a closing loop is bounded below.
+            loop.call_soon_threadsafe(invoke)
+        except RuntimeError:
+            return
+        completed.wait(timeout=1.0)
 
     def _managed_job_succeeded(self, job: _ManagedChainJob,
                                persisted: dict,
-                               target_index: int | None) -> None:
+                               target_index: int | None,
+                               write_fingerprint: str | None = None,
+                               target_identity: int | None = None,
+                               slot_identities: tuple[int, ...] | None = None
+                               ) -> None:
         if not getattr(self, "is_mounted", False):
             return
         try:
             panel = self.query_one(ChainPanel)
+            owns_target = panel.state.target_identity == job.target_identity
+            should_refocus = (
+                owns_target
+                and job.target_identity is not None
+                and self._focused_slot_identity(panel) == job.target_identity)
             # A poll may have observed the file before this callback. Applying
             # the candidate first keeps the callback correct in both orders.
-            panel.state.apply_candidate(persisted)
-            if target_index is not None and target_index < panel.state.slot_count:
-                panel.state.focus_slot(target_index)
+            panel.state.apply_candidate(persisted, identities=slot_identities)
+            if owns_target:
+                # DetailPane focus is intentionally allowed to remain external,
+                # but the transaction still owns the canonical target when the
+                # user has not selected another Slot during the wait. Apply the
+                # worker's post-mutation target independently of keyboard focus.
+                try:
+                    if target_identity is None:
+                        panel.state.clear_target()
+                    else:
+                        panel.state.focus_identity(target_identity)
+                except ChainStateError:
+                    pass
+            if should_refocus and target_identity is not None:
+                try:
+                    panel.state.focus_identity(target_identity)
+                except ChainStateError:
+                    should_refocus = False
             committed = self._publish_chain_write(persisted)
+            # A path/order-changing commit can make adopt_managed_chain fall
+            # through to conservative reconciliation. Reapply only the
+            # transaction's target when the user did not focus another Slot.
+            if should_refocus and target_identity is not None:
+                try:
+                    panel.state.focus_identity(target_identity)
+                except ChainStateError:
+                    should_refocus = False
             if job.on_success is not None:
-                job.on_success(committed, target_index)
+                job.on_success(
+                    committed, target_index if should_refocus else None)
             if job.note:
                 self.notify(job.note)
         except Exception as exc:
@@ -1664,6 +1999,9 @@ class GigBuddyApp(App):
             # touching widgets after the app has been unmounted.
             self._param_hold_generation += 1
             self._param_hold_pending = None
+            self._param_hold_slot_identity = None
+            self._param_hold_slot_paths = None
+            self._param_hold_slot_identities = None
         with self._managed_writer_lock:
             self._managed_writer_stopping = True
             while True:
@@ -1672,6 +2010,9 @@ class GigBuddyApp(App):
                 except Empty:
                     break
             self._managed_writer_queue.put(None)
+        with self._managed_write_targets_lock:
+            self._managed_write_targets.clear()
+            self._managed_slot_projection = None
         self._calibration_generation += 1
         if self._header_status_timer is not None:
             self._header_status_timer.stop()
@@ -1980,19 +2321,48 @@ class GigBuddyApp(App):
         persisted = live.read_chain() or cfg
         managed_fingerprint = live.last_chain_write_fingerprint()
         managed_revision = persisted.get("revision")
-        try:
-            # This write is already reflected in the process-local Slot
-            # objects.  Adopt only its chain-level fields so a writer without
-            # a byte fingerprint cannot turn a just-created BYPASS into
-            # EMPTY.  A path/order change (preset load, undo, redo) falls
-            # through to the normal replacement rules below.
-            panel.state.adopt_managed_chain(persisted)
-        except ChainStateError:
-            panel.state.reconcile(
-                persisted,
-                fingerprint=managed_fingerprint,
-                revision=managed_revision,
-            )
+        known_write, transition = self._pending_managed_write_target(
+            managed_fingerprint, managed_revision)
+        identity_transition = bool(
+            known_write
+            and transition is not None
+            and panel.state.slot_paths == transition.before_paths
+            and panel.state.slot_identities == transition.before_identities)
+        if identity_transition and transition is not None:
+            # The callback may race the file poll. Publish the exact known
+            # identity transition first; otherwise a rollback/swap that has
+            # the same paths could be mistaken for an ordinary chain write.
+            try:
+                panel.state.mark_managed_write(
+                    managed_fingerprint, managed_revision)
+                panel.state.reconcile(
+                    persisted,
+                    fingerprint=managed_fingerprint,
+                    revision=managed_revision,
+                    preserve_target_index=None,
+                    preserve_target_identity=transition.after_target_identity,
+                    preserve_slot_identities=transition.after_identities,
+                )
+            except ChainStateError:
+                panel.state.reconcile(
+                    persisted,
+                    fingerprint=managed_fingerprint,
+                    revision=managed_revision,
+                )
+        else:
+            try:
+                # This write is already reflected in the process-local Slot
+                # objects. Adopt only its chain-level fields so a writer
+                # without a byte fingerprint cannot turn a just-created
+                # BYPASS into EMPTY. A path/order change (preset load, undo,
+                # redo) falls through to conservative reconciliation.
+                panel.state.adopt_managed_chain(persisted)
+            except ChainStateError:
+                panel.state.reconcile(
+                    persisted,
+                    fingerprint=managed_fingerprint,
+                    revision=managed_revision,
+                )
         try:
             panel.state.mark_managed_write(
                 managed_fingerprint, managed_revision,
@@ -2071,6 +2441,7 @@ class GigBuddyApp(App):
                 on_success=lambda persisted, _target: self._publish_mutation(
                     "chain-param", (f"chain:{key}",),
                     persisted.get("revision")),
+                target_index=self._current_chain_target_index(),
             )
             return
         cfg = live.read_chain()
@@ -2108,6 +2479,7 @@ class GigBuddyApp(App):
                 on_success=lambda persisted, _target: self._publish_mutation(
                     "chain-param", (f"chain:{key}",),
                     persisted.get("revision")),
+                target_index=self._current_chain_target_index(),
             )
             return
         cfg = live.read_chain()
@@ -2123,7 +2495,8 @@ class GigBuddyApp(App):
             "chain-param", (f"chain:{key}",), cfg.get("revision"))
 
     def begin_chain_param_hold(
-            self, key: str, *, slot_index: int | None = None
+            self, key: str, *, slot_index: int | None = None,
+            slot_identity: int | None = None
     ) -> tuple[int, float]:
         """Start a global or Slot parameter hold and return its value."""
         if slot_index is None and key not in live.CHAIN_PARAMETER_DEFAULTS:
@@ -2135,16 +2508,42 @@ class GigBuddyApp(App):
             self._param_hold_generation += 1
             generation = self._param_hold_generation
             self._param_hold_pending = None
+            self._param_hold_slot_identity = slot_identity
+            self._param_hold_slot_paths = None
+            self._param_hold_slot_identities = None
         cfg = live.read_chain()
         if slot_index is None:
             value = float(cfg.get(key, live.CHAIN_PARAMETER_DEFAULTS[key]))
         else:
-            value = float(getattr(ChainState(cfg).slot(slot_index), key))
+            panel = None
+            try:
+                panel = self.query_one(ChainPanel)
+            except NoMatches:
+                pass
+            ui_state = getattr(panel, "state", None)
+            slot_paths = getattr(ui_state, "slot_paths", None)
+            slot_identities = getattr(ui_state, "slot_identities", None)
+            with self._param_hold_lock:
+                self._param_hold_slot_paths = slot_paths
+                self._param_hold_slot_identities = slot_identities
+            state = self._managed_state_from_snapshot(
+                cfg, live.chain_file_fingerprint(),
+                slot_paths=slot_paths, slot_identities=slot_identities)
+            if slot_identity is not None:
+                resolved = state.index_for_identity(slot_identity)
+                if resolved is None:
+                    raise ChainStateError("slot identity is no longer available")
+                value = float(getattr(state.slot(resolved), key))
+            else:
+                if slot_identities is not None:
+                    state.set_index_aliases(slot_identities)
+                value = float(getattr(state.slot(slot_index), key))
         return generation, value
 
     def queue_chain_param_hold(self, generation: int, key: str,
                                value: float, *, force: bool = False,
-                               slot_index: int | None = None) -> None:
+                               slot_index: int | None = None,
+                               slot_identity: int | None = None) -> None:
         """Coalesce a hold value and keep at most one commit worker active."""
         if slot_index is None and key not in live.CHAIN_PARAMETER_DEFAULTS:
             return
@@ -2159,9 +2558,15 @@ class GigBuddyApp(App):
         with self._param_hold_lock:
             if generation != self._param_hold_generation:
                 return
+            slot_identity = (slot_identity
+                             if slot_identity is not None
+                             else self._param_hold_slot_identity)
+            slot_paths = self._param_hold_slot_paths
+            slot_identities = self._param_hold_slot_identities
             # generation, slot index, key, value, force, final
             self._param_hold_pending = (
-                generation, slot_index, key, value, force, False)
+                generation, slot_index, slot_identity, key, value, force, False,
+                slot_paths, slot_identities)
             if not self._param_hold_worker_active:
                 self._param_hold_worker_active = True
                 start_worker = True
@@ -2171,7 +2576,8 @@ class GigBuddyApp(App):
                 name="chain-param-hold", daemon=True).start()
 
     def end_chain_param_hold(self, generation: int, key: str,
-                             value: float, *, slot_index: int | None = None
+                             value: float, *, slot_index: int | None = None,
+                             slot_identity: int | None = None
                              ) -> None:
         """Queue the final hold value without waiting on the UI thread."""
         if slot_index is None and key not in live.CHAIN_PARAMETER_DEFAULTS:
@@ -2187,8 +2593,14 @@ class GigBuddyApp(App):
         with self._param_hold_lock:
             if generation != self._param_hold_generation:
                 return
+            slot_identity = (slot_identity
+                             if slot_identity is not None
+                             else self._param_hold_slot_identity)
+            slot_paths = self._param_hold_slot_paths
+            slot_identities = self._param_hold_slot_identities
             self._param_hold_pending = (
-                generation, slot_index, key, value, True, True)
+                generation, slot_index, slot_identity, key, value, True, True,
+                slot_paths, slot_identities)
             if not self._param_hold_worker_active:
                 self._param_hold_worker_active = True
                 start_worker = True
@@ -2209,7 +2621,8 @@ class GigBuddyApp(App):
                     return
                 self._param_hold_pending = None
 
-            generation, slot_index, key, value, force, final = pending
+            (generation, slot_index, slot_identity, key, value,
+             force, final, slot_paths, slot_identities) = pending
             if not force and last_commit_at:
                 remaining = (
                     self.PARAM_HOLD_COMMIT_INTERVAL
@@ -2222,16 +2635,20 @@ class GigBuddyApp(App):
                     newer = self._param_hold_pending
                     if newer is not None:
                         self._param_hold_pending = None
-                        generation, slot_index, key, value, force, final = newer
+                        (generation, slot_index, slot_identity, key, value,
+                         force, final, slot_paths, slot_identities) = newer
 
             try:
-                persisted = self._commit_chain_param_hold(
-                    key, value, slot_index=slot_index)
+                committed = self._commit_chain_param_hold(
+                    key, value, slot_index=slot_index,
+                    slot_identity=slot_identity,
+                    slot_paths=slot_paths,
+                    slot_identities=slot_identities)
             except Exception as exc:
                 try:
                     self.call_from_thread(
                         self._param_hold_failed, generation, slot_index,
-                        str(exc))
+                        slot_identity, str(exc))
                 except Exception:
                     pass
                 with self._param_hold_lock:
@@ -2246,13 +2663,17 @@ class GigBuddyApp(App):
             try:
                 self.call_from_thread(
                     self._param_hold_committed,
-                    generation, slot_index, key, value, final, persisted)
+                    generation, slot_index, slot_identity, key, value, final,
+                    committed)
             except Exception:
                 pass
 
     def _commit_chain_param_hold(
-            self, key: str, value: float, *, slot_index: int | None = None
-    ) -> dict | None:
+            self, key: str, value: float, *, slot_index: int | None = None,
+            slot_identity: int | None = None,
+            slot_paths: tuple[str | None, ...] | None = None,
+            slot_identities: tuple[int, ...] | None = None,
+    ) -> _ManagedParamCommit | None:
         """Commit one absolute global or Slot parameter value."""
         with self._managed_transaction_lock:
             base_chain, base_fingerprint = live.read_chain_snapshot()
@@ -2269,39 +2690,68 @@ class GigBuddyApp(App):
             else:
                 lo, hi = SLOT_GAIN_MIN_DB, SLOT_GAIN_MAX_DB
                 value = round(max(lo, min(hi, value)), 2)
-                state = ChainState(base_chain)
-                previous = float(getattr(state.slot(slot_index), key))
+                state = self._managed_state_from_snapshot(
+                    base_chain, base_fingerprint,
+                    slot_paths=slot_paths, slot_identities=slot_identities)
+                if slot_identity is not None:
+                    resolved = state.index_for_identity(slot_identity)
+                    if resolved is None:
+                        raise ChainStateError(
+                            "Slot changed before gain commit")
+                    previous = float(getattr(state.slot(resolved), key))
+                else:
+                    if slot_identities is not None:
+                        state.set_index_aliases(slot_identities)
+                    previous = float(getattr(state.slot(slot_index), key))
                 if value == previous:
                     return None
-                state.set_slot_gain(slot_index, key, value)
+                if slot_identity is not None:
+                    state.set_slot_gain_identity(slot_identity, key, value)
+                else:
+                    if slot_identities is not None:
+                        state.set_slot_gain_identity(
+                            slot_identities[slot_index], key, value)
+                    else:
+                        state.set_slot_gain(slot_index, key, value)
                 cfg = state.to_chain()
             if self._managed_engine_active():
                 # The adapter's expected chain is the file state read before
                 # the candidate edit. Passing the already-mutated cfg makes
                 # its CAS check reject every managed mouse commit as a false
                 # conflict.
-                state = ChainState(base_chain)
-                return state.commit(
+                state = self._managed_state_from_snapshot(
+                    base_chain, base_fingerprint,
+                    slot_paths=slot_paths if slot_index is not None else None,
+                    slot_identities=(
+                        slot_identities if slot_index is not None else None))
+                persisted = state.commit(
                     _ManagedChainAdapter(self, expected_chain=base_chain),
                     lambda draft: draft.apply_candidate(cfg),
                 )
+                return _ManagedParamCommit(
+                    persisted,
+                    state.slot_identities if slot_index is not None else None)
             persisted = live.write_chain(
                 cfg,
                 expected_fingerprint=base_fingerprint,
                 expected_revision=base_chain.get("revision", 0),
             )
-            if isinstance(persisted, dict):
-                return persisted
-            return live.read_chain() or cfg
+            committed = (persisted if isinstance(persisted, dict)
+                         else live.read_chain() or cfg)
+            return _ManagedParamCommit(
+                committed,
+                state.slot_identities if slot_index is not None else None)
 
-    def _param_hold_committed(self, generation: int, slot_index: int | None,
-                              key: str, value: float, final: bool,
-                              persisted: dict | None) -> None:
+    def _param_hold_committed(
+            self, generation: int, slot_index: int | None,
+            slot_identity: int | None, key: str, value: float, final: bool,
+            commit: _ManagedParamCommit | None) -> None:
         """Publish a completed hold write without refreshing every pane per tick."""
         if generation != self._param_hold_generation:
             return
-        if persisted is not None:
+        if commit is not None:
             try:
+                persisted = commit.chain
                 if slot_index is not None:
                     # The hold worker owns a separate ChainState snapshot. Copy
                     # its committed Slot trim into the live UI state before
@@ -2309,10 +2759,12 @@ class GigBuddyApp(App):
                     # fields; adopt_managed_chain intentionally preserves the
                     # existing Slot objects.
                     panel = self.query_one(ChainPanel)
-                    panel.state.apply_candidate(persisted)
+                    panel.state.apply_candidate(
+                        persisted, identities=commit.slot_identities)
                 committed = self._publish_chain_write(persisted)
             except Exception as exc:
-                self._param_hold_failed(generation, slot_index, str(exc))
+                self._param_hold_failed(
+                    generation, slot_index, slot_identity, str(exc))
                 return
             if final:
                 if slot_index is None:
@@ -2322,8 +2774,13 @@ class GigBuddyApp(App):
                 else:
                     label = ("Input" if key == "input_gain_db"
                              else "Output")
+                    focus_index = (
+                        panel.state.index_for_identity(slot_identity)
+                        if slot_identity is not None
+                        and panel.state.target_identity == slot_identity
+                        else None)
                     self._publish_slot_commit(
-                        committed, slot_index,
+                        committed, focus_index,
                         f"Slot {slot_index + 1:02d} {label} set to "
                         f"{value:+.1f} dB")
         try:
@@ -2331,14 +2788,18 @@ class GigBuddyApp(App):
             if slot_index is None:
                 panel.params._hold_commit_ack(generation, final=final)
             else:
-                widget = panel._slot_widgets.get(slot_index)
+                resolved_index = (
+                    panel.state.index_for_identity(slot_identity)
+                    if slot_identity is not None else slot_index)
+                widget = (panel._slot_widgets.get(resolved_index)
+                          if resolved_index is not None else None)
                 if widget is not None:
                     widget._io_hold_commit_ack(generation, final=final)
         except Exception:
             pass
 
     def _param_hold_failed(self, generation: int, slot_index: int | None,
-                           error: str) -> None:
+                           slot_identity: int | None, error: str) -> None:
         """Stop a failed hold and restore the last persisted display value."""
         if generation != self._param_hold_generation:
             return
@@ -2349,7 +2810,11 @@ class GigBuddyApp(App):
             if slot_index is None:
                 panel.params.abort_param_hold(generation)
             else:
-                widget = panel._slot_widgets.get(slot_index)
+                resolved_index = (
+                    panel.state.index_for_identity(slot_identity)
+                    if slot_identity is not None else slot_index)
+                widget = (panel._slot_widgets.get(resolved_index)
+                          if resolved_index is not None else None)
                 if widget is not None:
                     widget.abort_io_hold(generation)
             cfg = live.read_chain()
@@ -2398,9 +2863,15 @@ class GigBuddyApp(App):
             self.notify("Instrument input active — click the INPUT row to pick a dry file")
             return
         managed_playback = self._managed_engine_active()
+        target_index = None
+        target_identity = None
         if managed_playback:
             try:
-                managed_playback = not self.query_one(ChainPanel)._legacy_mode
+                panel = self.query_one(ChainPanel)
+                managed_playback = not panel._legacy_mode
+                state = getattr(panel, "state", None)
+                target_index = getattr(state, "target_index", None)
+                target_identity = getattr(state, "target_identity", None)
             except (AttributeError, NoMatches):
                 # Unit seams without a mounted panel still exercise the
                 # managed writer; the real App always has ChainPanel here.
@@ -2418,7 +2889,9 @@ class GigBuddyApp(App):
             queued = self._enqueue_managed_mutation(
                 mutation, "", failure_note="Dry playback unchanged",
                 on_success=lambda _persisted, _target: setattr(
-                    self, "_playback_op_ts", time.monotonic()))
+                    self, "_playback_op_ts", time.monotonic()),
+                target_index=target_index,
+                target_identity=target_identity)
             if not queued:
                 self.notify("Managed engine is no longer active", severity="error")
             return
@@ -2632,9 +3105,11 @@ class GigBuddyApp(App):
             index = getattr(widget, "index", None)
             if index is None:
                 return
-            self._focus_slot(index)
+            identity = getattr(getattr(widget, "snapshot", None),
+                               "identity", None)
+            self._focus_slot_identity(identity, index)
             if getattr(event, "chain", 1) >= 2:
-                self._toggle_slot(index)
+                self._toggle_slot(index, identity)
             return
         if widget.has_class("chain-node"):
             # Clicking a node focuses it AND opens its Selection (pack list)
@@ -2673,9 +3148,10 @@ class GigBuddyApp(App):
                 if slot is None:
                     return
                 event.stop()
-                self._focus_slot(slot.index)
+                identity = slot.snapshot.identity
+                self._focus_slot_identity(identity, slot.index)
                 if getattr(event, "chain", 1) >= 2:
-                    self._toggle_slot(slot.index)
+                    self._toggle_slot(slot.index, identity)
                 return
         # 链面板的其余空白（节点行之间的空隙、effect/params 之外的区域）：
         # 点击聚焦面板本身，←/→ 即可切换 detail 视图。
@@ -2688,11 +3164,56 @@ class GigBuddyApp(App):
         if node:
             node.focus()
 
+    @staticmethod
+    def _focused_slot_identity(panel: ChainPanel) -> int | None:
+        """Return the logical Slot owning the current keyboard focus."""
+        focused = getattr(panel.app, "focused", None)
+        if focused is None:
+            return None
+        try:
+            ancestors = focused.ancestors_with_self
+        except Exception:
+            ancestors = (focused,)
+        for widget in ancestors:
+            if isinstance(widget, ChainSlotWidget):
+                return widget.snapshot.identity
+        return None
+
     def _focus_slot(self, index: int) -> None:
         panel = self.query_one(ChainPanel)
         slot = panel._slot_widgets.get(index)
         if slot is not None:
             slot.focus()
+
+    def _focus_slot_identity(self, identity: int | None,
+                             fallback_index: int | None = None) -> None:
+        panel = self.query_one(ChainPanel)
+        if identity is not None:
+            index = panel.state.index_for_identity(identity)
+            if index is None:
+                return
+        else:
+            index = fallback_index
+        if index is not None:
+            self._focus_slot(index)
+
+    def _resolve_slot_index(self, index: int,
+                            identity: int | None = None) -> int | None:
+        """Resolve a UI Slot event without retargeting a stale identity."""
+        panel = self.query_one(ChainPanel)
+        if identity is not None:
+            resolved = panel.state.index_for_identity(identity)
+            if resolved is None:
+                self.notify("Slot action discarded: Slot no longer exists",
+                            severity="warning")
+                return None
+            return resolved
+        try:
+            panel.state.slot(index)
+        except ChainStateError as exc:
+            self.notify(str(exc), severity="warning")
+            return None
+        return index
 
     def _publish_slot_commit(self, persisted: dict,
                              focus_index: int | None, note: str) -> None:
@@ -2700,13 +3221,56 @@ class GigBuddyApp(App):
         panel = self.query_one(ChainPanel)
         detail = self.query_one(DetailPane)
         keep_pack_focus = detail._pack_mode and detail._pack_origin != "slot"
+        focus_identity = (
+            panel.state.target_identity if focus_index is not None else None)
         if detail._pack_slot_index is not None:
             detail.refresh_pack_active(persisted)
         if not panel.state.slot_count:
             detail.clear()
-        if focus_index is not None and not keep_pack_focus:
-            self.call_after_refresh(
-                lambda index=focus_index: self._focus_slot(index))
+        # Structural Slot changes schedule an asynchronous dynamic recompose.
+        # Schedule it from the commit boundary rather than waiting for the
+        # polling tick. The publisher has already advanced the observed file
+        # fingerprint, so a later poll can legitimately see no change and
+        # leave a newly added Slot without a widget or SlotFocused message.
+        needs_recompose = (
+            not panel._legacy_mode
+            and len(panel._slot_widgets) != panel.state.slot_count)
+        if needs_recompose:
+            focus_state = panel._capture_recompose_focus()
+            if focus_index is not None and not keep_pack_focus:
+                try:
+                    focus_identity = panel.state.slot_identity(focus_index)
+                except ChainStateError:
+                    focus_identity = None
+                if focus_identity is not None:
+                    focus_state = ("slot", focus_index, focus_identity)
+            panel._schedule_dynamic_recompose(
+                focus_index if not keep_pack_focus else None,
+                focus_state=focus_state,
+                force_focus=(focus_index is not None and not keep_pack_focus))
+
+        # Do not focus the old numeric row before a structural worker finishes:
+        # the old widget can still be mounted at the same index and overwrite
+        # the identity-aware focus restoration with a stale Slot object.
+        recompose_pending = getattr(panel, "_recompose_pending", False)
+        if (focus_index is not None and not keep_pack_focus
+                and not recompose_pending):
+            def restore_focus() -> None:
+                if focus_identity is None:
+                    return
+                focused = getattr(self, "focused", None)
+                if focused is not None:
+                    try:
+                        inside_panel = focused is panel or any(
+                            ancestor is panel
+                            for ancestor in focused.ancestors_with_self)
+                    except AttributeError:
+                        inside_panel = False
+                    if not inside_panel:
+                        return
+                self._focus_slot_identity(focus_identity, focus_index)
+
+            self.call_after_refresh(restore_focus)
         self._publish_mutation(
             "slot",
             (f"slot:{focus_index}" if focus_index is not None else "chain",),
@@ -2729,11 +3293,18 @@ class GigBuddyApp(App):
             return False
         state = panel.state
         if self._managed_engine_active():
+            slot_snapshot = self._current_chain_identity_snapshot()
             queued = self._enqueue_managed_mutation(
                 mutation, "", failure_note=failure_note or note,
                 on_success=lambda persisted, focus_index: (
                     self._publish_slot_commit(
-                        persisted, focus_index, note)))
+                        persisted, focus_index, note)),
+                target_index=state.target_index,
+                target_identity=state.target_identity,
+                slot_paths=slot_snapshot[0] if slot_snapshot else None,
+                slot_identities=slot_snapshot[1] if slot_snapshot else None,
+                base_fingerprint=live.chain_file_fingerprint(),
+                base_revision=state.to_chain().get("revision"))
             if not queued:
                 self.notify("Managed engine is no longer active",
                             severity="error")
@@ -2771,38 +3342,31 @@ class GigBuddyApp(App):
             panel._observed_chain_fingerprint = None
         panel.chain = persisted
         panel._refresh_dynamic_slots()
-        detail = self.query_one(DetailPane)
-        keep_pack_focus = detail._pack_mode and detail._pack_origin != "slot"
-        if detail._pack_slot_index is not None:
-            detail.refresh_pack_active(persisted)
-        if not panel.state.slot_count:
-            detail.clear()
-        if focus_index is not None and not keep_pack_focus:
-            self.call_after_refresh(
-                lambda index=focus_index: self._focus_slot(index))
-        self._publish_mutation(
-            "slot", (f"slot:{focus_index}" if focus_index is not None else "chain",),
-            persisted.get("revision"))
-        self.notify(note)
+        self._publish_slot_commit(persisted, focus_index, note)
         return True
 
     def _add_slot(self) -> None:
         panel = self.query_one(ChainPanel)
         index = panel.state.slot_count
-        managed = self._managed_engine_active()
         if self._commit_slot_mutation(
                 lambda state: state.add_slot(),
                 f"Added Slot {index + 1:02d}"):
-            if not managed:
-                self._focus_slot(index)
+            # _publish_slot_commit schedules identity-aware focus after the
+            # new widget is mounted. Focusing by index here races that mount.
+            return
 
-    def _delete_slot(self, index: int) -> None:
-        panel = self.query_one(ChainPanel)
+    def _delete_slot(self, index: int, identity: int | None = None) -> None:
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         self._commit_slot_mutation(
             lambda state: state.delete_slot(index),
             f"Deleted Slot {index + 1:02d}")
 
-    def _toggle_slot(self, index: int) -> None:
+    def _toggle_slot(self, index: int, identity: int | None = None) -> None:
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         panel = self.query_one(ChainPanel)
         snapshot = panel.state.slot(index)
         if snapshot.status is SlotStatus.EMPTY:
@@ -2813,14 +3377,22 @@ class GigBuddyApp(App):
             lambda state: state.toggle_bypass(index),
             f"Slot {index + 1:02d} {label}")
 
-    def _move_slot(self, index: int, direction: int) -> None:
+    def _move_slot(self, index: int, direction: int,
+                   identity: int | None = None) -> None:
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         verb = "up" if direction < 0 else "down"
         self._commit_slot_mutation(
             lambda state: state.move_slot(index, direction),
             f"Moved Slot {index + 1:02d} {verb}",
             failure_note=f"Slot {index + 1:02d} cannot move {verb}")
 
-    def _switch_slot_model(self, index: int, direction: int) -> None:
+    def _switch_slot_model(self, index: int, direction: int,
+                           identity: int | None = None) -> None:
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         panel = self.query_one(ChainPanel)
         snapshot = panel.state.slot(index)
         path = snapshot.path or snapshot.candidate
@@ -2850,7 +3422,11 @@ class GigBuddyApp(App):
             lambda state: state.load_file(index, next_path),
             f"Slot {index + 1:02d} → {live.short_name(next_path)}")
 
-    def _adjust_slot_gain(self, index: int, key: str, delta: float) -> None:
+    def _adjust_slot_gain(self, index: int, key: str, delta: float,
+                          identity: int | None = None) -> None:
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         if key not in {"input_gain_db", "output_gain_db"}:
             self.notify("Unknown Slot parameter", severity="warning")
             return
@@ -2861,7 +3437,11 @@ class GigBuddyApp(App):
             f"Slot {index + 1:02d} {label} {direction}{abs(delta):g} dB",
             failure_note=f"Slot {index + 1:02d} {label} is already at its limit")
 
-    def _calibrate_slot_output(self, index: int) -> None:
+    def _calibrate_slot_output(self, index: int,
+                               identity: int | None = None) -> None:
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         panel = self.query_one(ChainPanel)
         try:
             snapshot = panel.state.slot(index)
@@ -2875,20 +3455,54 @@ class GigBuddyApp(App):
             return
         self._calibration_generation += 1
         generation = self._calibration_generation
+        identity = snapshot.identity
+        slot_paths = panel.state.slot_paths
+        slot_identities = panel.state.slot_identities
         threading.Thread(
             target=self._calibrate_slot_worker,
-            args=(generation, index, path),
+            args=(generation, index, identity, path,
+                  slot_paths, slot_identities),
             name="slot-output-calibration", daemon=True).start()
         self.notify(f"Calibrating Slot {index + 1:02d}…")
 
     def _calibrate_slot_worker(self, generation: int, index: int,
-                               expected_path: str) -> None:
+                               identity: int | None,
+                               expected_path: str,
+                               slot_paths: tuple[str | None, ...] | None = None,
+                               slot_identities: tuple[int, ...] | None = None
+                               ) -> None:
         try:
             # Calibration and managed prepare share one control/reply sidecar.
             # Serialize the request so a concurrent mutation cannot replace
             # the reply before this worker consumes it.
             with self._managed_transaction_lock:
-                result = live.request_output_calibration(index)
+                request_index = index
+                if slot_paths is not None and slot_identities is not None:
+                    chain, fingerprint = live.read_chain_snapshot()
+                    state = self._managed_state_from_snapshot(
+                        chain, fingerprint,
+                        slot_paths=slot_paths,
+                        slot_identities=slot_identities)
+                    if identity is not None:
+                        request_index = state.index_for_identity(identity)
+                        if request_index is None:
+                            raise ChainStateError(
+                                "Calibration discarded: Slot no longer exists")
+                        snapshot = state.slot(request_index)
+                        if snapshot.path != expected_path:
+                            raise ChainStateError(
+                                "Calibration discarded: Slot changed while waiting")
+                    else:
+                        state.set_index_aliases(slot_identities)
+                        snapshot = state.slot(index)
+                        request_index = snapshot.index
+                        if snapshot.path != expected_path:
+                            raise ChainStateError(
+                                "Calibration discarded: Slot changed while waiting")
+                elif identity is not None:
+                    raise ChainStateError(
+                        "Calibration discarded: Slot identity is unavailable")
+                result = live.request_output_calibration(request_index)
                 value = float(result)
                 recommended = float(
                     getattr(result, "recommended_output_gain_db", value))
@@ -2903,7 +3517,8 @@ class GigBuddyApp(App):
         try:
             self.call_from_thread(
                 self._apply_slot_calibration, generation, index,
-                expected_path, value, clamped, recommended)
+                expected_path, value, clamped, recommended,
+                identity=identity)
         except Exception:
             pass
 
@@ -2915,11 +3530,15 @@ class GigBuddyApp(App):
     def _apply_slot_calibration(self, generation: int, index: int,
                                 expected_path: str, value: float,
                                 clamped: bool = False,
-                                recommended_output_gain_db: float | None = None
+                                recommended_output_gain_db: float | None = None,
+                                *, identity: int | None = None
                                 ) -> None:
         if generation != self._calibration_generation:
             return
         panel = self.query_one(ChainPanel)
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         try:
             snapshot = panel.state.slot(index)
         except ChainStateError as exc:
@@ -2945,12 +3564,21 @@ class GigBuddyApp(App):
             return
 
         def apply_calibration(state: ChainState):
-            try:
-                current = state.slot(index)
-            except ChainStateError:
-                return False
+            if identity is not None:
+                resolved = state.index_for_identity(identity)
+                if resolved is None:
+                    return False
+                current = state.slot(resolved)
+            else:
+                try:
+                    current = state.slot(index)
+                except ChainStateError:
+                    return False
             if current.path != expected_path:
                 return False
+            if identity is not None:
+                return state.set_slot_gain_identity(
+                    identity, "output_gain_db", value)
             return state.set_slot_gain(index, "output_gain_db", value)
 
         self._commit_slot_mutation(
@@ -2963,31 +3591,32 @@ class GigBuddyApp(App):
 
     def on_chain_slot_widget_switch_requested(
             self, event: ChainSlotWidget.SwitchRequested) -> None:
-        self._switch_slot_model(event.index, event.direction)
+        self._switch_slot_model(event.index, event.direction, event.identity)
 
     def on_chain_slot_widget_toggle_requested(
             self, event: ChainSlotWidget.ToggleRequested) -> None:
-        self._toggle_slot(event.index)
+        self._toggle_slot(event.index, event.identity)
 
     def on_chain_slot_widget_delete_requested(
             self, event: ChainSlotWidget.DeleteRequested) -> None:
-        self._delete_slot(event.index)
+        self._delete_slot(event.index, event.identity)
 
     def on_chain_slot_widget_tone_requested(
             self, event: ChainSlotWidget.ToneRequested) -> None:
-        self._browse_slot(event.index)
+        self._browse_slot(event.index, event.identity)
 
     def on_chain_slot_widget_move_requested(
             self, event: ChainSlotWidget.MoveRequested) -> None:
-        self._move_slot(event.index, event.direction)
+        self._move_slot(event.index, event.direction, event.identity)
 
     def on_chain_slot_widget_param_requested(
             self, event: ChainSlotWidget.ParamRequested) -> None:
-        self._adjust_slot_gain(event.index, event.key, event.delta)
+        self._adjust_slot_gain(
+            event.index, event.key, event.delta, event.identity)
 
     def on_chain_slot_widget_calibrate_requested(
             self, event: ChainSlotWidget.CalibrateRequested) -> None:
-        self._calibrate_slot_output(event.index)
+        self._calibrate_slot_output(event.index, event.identity)
 
     def on_clear_slots_confirm_confirmed(
             self, _event: ClearSlotsConfirm.Confirmed) -> None:
@@ -2998,12 +3627,24 @@ class GigBuddyApp(App):
 
     def on_chain_panel_slot_focused(self, event: ChainPanel.SlotFocused) -> None:
         """Slot focus establishes target and updates the matching Detail view."""
-        self._show_slot_detail(event.index)
+        # Focus messages can still be queued while Textual is unmounting the
+        # current screen. A late message must not query a panel that no longer
+        # exists or recreate Detail state during shutdown.
+        if not getattr(self, "is_mounted", False):
+            return
+        try:
+            self._show_slot_detail(event.index, event.identity)
+        except NoMatches:
+            return
 
-    def _show_slot_detail(self, index: int) -> None:
+    def _show_slot_detail(self, index: int,
+                          identity: int | None = None) -> None:
         panel = self.query_one(ChainPanel)
         detail = self.query_one(DetailPane)
         if panel._legacy_mode:
+            return
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
             return
         try:
             snapshot = panel.state.slot(index)
@@ -3011,13 +3652,15 @@ class GigBuddyApp(App):
             return
         if snapshot.status is SlotStatus.EMPTY:
             detail.show_slot_empty(
-                index, target=panel.state.target_index == index)
+                index, target=panel.state.target_index == index,
+                slot_identity=snapshot.identity)
             return
 
         path = snapshot.path or snapshot.candidate
         if not path:
             detail.show_slot_empty(
-                index, target=panel.state.target_index == index)
+                index, target=panel.state.target_index == index,
+                slot_identity=snapshot.identity)
             return
         try:
             local_models = library.local_models_by_tone(path) or []
@@ -3056,9 +3699,12 @@ class GigBuddyApp(App):
         detail.show_slot_pack(
             tone, models, panel.state.to_chain(), index, snapshot)
 
-    def _browse_slot(self, index: int) -> None:
+    def _browse_slot(self, index: int, identity: int | None = None) -> None:
         """Focus a Slot and return to LOCAL so the user can choose its Tone."""
         panel = self.query_one(ChainPanel)
+        index = self._resolve_slot_index(index, identity)
+        if index is None:
+            return
         try:
             panel.state.focus_slot(index)
         except ChainStateError:
@@ -3071,9 +3717,10 @@ class GigBuddyApp(App):
         library_panel.query_one("#lib-table-local").focus()
         self.notify(f"Select a tone for Slot {index + 1:02d}")
 
-    def _browse_empty_slot(self, index: int) -> None:
+    def _browse_empty_slot(self, index: int,
+                           identity: int | None = None) -> None:
         """Compatibility alias for callers that specifically target an empty Slot."""
-        self._browse_slot(index)
+        self._browse_slot(index, identity)
 
     def _show_node_pack(self, kind: str) -> None:
         """Open the focused node's tone pack (all files) in the detail pane."""
@@ -3425,7 +4072,9 @@ class GigBuddyApp(App):
                 self.notify("v0.2 Slot action unavailable for legacy chain",
                             severity="warning")
                 return
-            if panel.state.target_index != index:
+            target_index = (panel.state.index_for_identity(event.slot_identity)
+                            if event.slot_identity is not None else index)
+            if target_index is None or panel.state.target_index != target_index:
                 self.notify("Select the target Slot before loading a file",
                             severity="warning")
                 return
@@ -3434,8 +4083,11 @@ class GigBuddyApp(App):
                             severity="error")
                 return
             if self._commit_slot_mutation(
-                    lambda state: state.load_file(index, event.path),
-                    f"Slot {index + 1:02d} → {live.short_name(event.path)}"):
+                    lambda state: (
+                        state.load_file_identity(event.slot_identity, event.path)
+                        if event.slot_identity is not None
+                        else state.load_file(index, event.path)),
+                    f"Slot {target_index + 1:02d} → {live.short_name(event.path)}"):
                 self.query_one(DetailPane).refresh_pack_active(
                     panel.state.to_chain())
             return
@@ -3486,7 +4138,7 @@ class GigBuddyApp(App):
     def on_detail_pane_pack_closed(self, event) -> None:
         """Esc 从 pack 文件列表回到链节点（其 ↑/↓ 换模型、双击切换恢复）。"""
         if event.slot_index is not None:
-            self._focus_slot(event.slot_index)
+            self._focus_slot_identity(event.slot_identity, event.slot_index)
         elif event.kind:
             self._focus_node(event.kind)
 

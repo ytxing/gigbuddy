@@ -30,6 +30,8 @@ bin/gigbuddy preset list [--json]
 bin/gigbuddy preset save <name> [--note "..."]
 bin/gigbuddy preset load <name>
 bin/gigbuddy preset show <name> [--json]
+bin/gigbuddy preset export <name> [path]
+bin/gigbuddy preset import <preset-name.json> [--name NAME] [--load]
 bin/gigbuddy preset current | preset rename <old> <new> | preset note <name> [text]
 bin/gigbuddy preset delete <name> | preset seed [--replace] [--local-only]
 bin/gigbuddy preset bootstrap
@@ -58,6 +60,15 @@ Interpret the commands as follows:
 - preset bootstrap downloads the starter model catalog and seeds the built-in
   presets; preset save snapshots the CURRENT live chain (never builds a chain
   from arguments).
+- preset export writes a shareable JSON document containing TONE3000 model IDs,
+  Slot order, bypass state, trims, chain parameters, name, and note. It is
+  separate from the editable local files under data/presets/ and contains no
+  local path or Pack identity.
+- preset import takes a shareable JSON document, resolves missing model IDs
+  through the exact TONE3000 model lookup endpoint, downloads only the requested
+  models grouped by parent Tone, and writes the local Preset after all files are
+  available. `--load` applies it to the live chain and `--name` overrides the
+  local name. A local-only Pack asset cannot be exported in this format.
 
 Remote TONE3000 work must stay within the public integration boundary: use the
 documented per-user OAuth flow, keep list/search requests bounded, download only
@@ -338,6 +349,16 @@ snapshot each chain:
 5. Verify: preset list (all + active marker), preset show <name> --json
    (slots/model_id/paths/gain/master/note), preset load <name> (spot-check the
    engine hot-swap).
+
+For a portable rig, export after the local Preset is verified:
+
+~~~bash
+bin/gigbuddy preset export "<name>" preset-name.json
+~~~
+
+The recipient imports that file explicitly. Do not treat the share file as a
+local Preset document or place it under `data/presets/`; the receiver needs a
+current TONE3000 session when any referenced model is missing locally.
 
 After batch saving, remember that the last saved preset becomes active; use
 preset load <name> when a different one should drive the engine. Maintain

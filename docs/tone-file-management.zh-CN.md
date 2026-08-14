@@ -29,13 +29,13 @@ preset 如何处理这些文件。
 同一个 GigBuddy home 下还会有本地索引 `data/gigbuddy.db`、当前音色链
 `data/live_chain.json`，以及 `data/presets/` 下可编辑的 preset 文件。
 
-不要把 Pack 放在 `~/.local/share/gigbuddy/tones/`，也不要放在源码目录的
-`src/` 旁边。GigBuddy 只扫描受管理的 `data/tones/` 根目录。
+Pack 放在 `~/.local/share/gigbuddy/tones/` 或源码目录的 `src/` 旁边都不会
+被扫描。GigBuddy 只扫描受管理的 `data/tones/` 根目录。
 
 ## 从 TONE3000 远程导入
 
-如果需要保留 TONE3000 元数据、来源链接和作者信息，并让 GigBuddy 跟踪下载
-状态，请使用远程导入。
+远程导入会保留 TONE3000 元数据、来源链接和作者信息，并让 GigBuddy 跟踪
+下载状态。
 
 ### 在 TUI 中导入
 
@@ -56,7 +56,7 @@ bin/gigbuddy tone list
 bin/gigbuddy tone show <tone-id>
 ```
 
-用户目录安装版使用 `gigbuddy`：
+用户安装版把 `bin/gigbuddy` 换成 `gigbuddy`：
 
 ```sh
 gigbuddy tone search "fender super reverb"
@@ -125,9 +125,9 @@ data/tones/my-pack/
   v30.wav
 ```
 
-GigBuddy 不会修改、移动或删除你复制过来的原始文件。复制完成后切到
-`LOCAL`、重新打开 LOCAL 视图，或等待文件变化刷新。目录的直接子文件中至少
-有一个受支持文件时，才会显示为 Pack。
+GigBuddy 不会修改、移动或删除你复制过来的原始文件。复制完成后打开
+`LOCAL`；GigBuddy 会自动重扫，重新打开视图也会触发一次扫描。目录里至少
+有一个受支持的直接子文件时，才会显示为 Pack。
 
 ## 文件规则
 
@@ -212,6 +212,76 @@ LOCAL 显示文件和 Pack 信息时按以下顺序确定：
 - Preset 保存 Chain 快照。对本地文件，能识别时还会保存 Pack 身份和相对文件名，
   加载时按这个身份解析当前路径，而不是猜一个远程 ID。
 
+## 分享 preset
+
+`data/presets/` 下的 JSON 是 GigBuddy 的本地 preset 快照。它们引用的是当前
+GigBuddy home 里已经存在的文件，适合备份或在本机编辑，但不是跨机器分享格式。
+
+要让其他用户在自己的音色库里重建这条链，使用分享命令：
+
+```sh
+gigbuddy preset export <name> preset-name.json
+gigbuddy preset import preset-name.json
+```
+
+导出的 JSON 是独立文件。每个远程 A2 或 IR 模型用 TONE3000 的 `model_id`
+表示，不包含本机路径、Pack 目录、SQLite ID 或机器相关的文件名。接收方导入时，
+GigBuddy 会通过 TONE3000 查找这些 ID，下载本地缺少的模型，然后生成普通的本地
+preset。已经下载的模型会直接复用。加上 `--load` 可以导入后立即应用，`--name`
+可以指定本地保存名：
+
+```sh
+gigbuddy preset import preset-name.json --name "My copy" --load
+```
+
+### 分享 preset 格式
+
+当前格式的 `kind` 是 `gigbuddy-shareable-preset`，数据来源是 `tone3000`：
+
+```json
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-shareable-preset",
+  "provider": "tone3000",
+  "name": "blackface-clean",
+  "note": "Clean amp and cabinet",
+  "chain": {
+    "slots": [
+      {"model_id": 12345, "input_gain_db": 1.5},
+      {"model_id": 67890, "bypass": true},
+      {"model_id": 12345}
+    ],
+    "gain": 0.8,
+    "master": 0.9,
+    "quality": 1.0
+  }
+}
+```
+
+`chain.slots` 按信号顺序保存，可以重复使用同一个模型，也可以用
+`{"model_id": null}` 表示空 Slot。文件还会保存 bypass 状态、Slot 输入/输出
+trim（`-24` 到 `24` dB）以及链级的 gain、master、quality。Slot 中的
+`model_id` 是格式里唯一的模型引用；GigBuddy 会据此派生出按首次出现顺序排列、
+去重后的下载列表。为兼容旧文件，如果顶层仍有重复的 `model_ids` 字段，
+GigBuddy 会忽略它。
+
+这个格式只支持 TONE3000 模型。包含用户自己本地 Pack 文件的链不能导出为分享
+preset，因为接收方没有可用于下载该文件的 TONE3000 ID。这类链应继续使用普通
+本地 preset；如果需要分享，还要另外分享对应的 Pack 文件。
+
+### 导入过程
+
+1. GigBuddy 先检查 JSON、Slot 顺序、model ID、参数和 provider。
+2. 对每个本地缺少的 model ID，调用 TONE3000 的精确模型查询接口找到所属 Tone。
+   它不会按标题搜索，也不会把 model ID 当成 Tone ID。
+3. 属于同一个 Tone 的模型会合并下载，而且只请求分享文件中实际使用的模型。
+4. 所有模型文件都可用后，GigBuddy 才写入本地 preset 及其
+   `data/presets/` 文件。
+
+查询、认证或下载失败时，本地 preset 不会写入。分享源文件不会被移动或修改。
+放在 `data/presets/` 下的分享文件不会被后台自动当成本地 preset；请显式执行
+`gigbuddy preset import`。
+
 从 LOCAL 选中本地或远程 Model 后，载入 Slot 的方式相同。只要文件位于
 GigBuddy 音色目录内，并且是受支持的 `.nam` 或 `.wav`，来源不会影响载入方式。
 
@@ -226,7 +296,7 @@ GigBuddy 音色目录内，并且是受支持的 `.nam` 或 `.wav`，来源不�
 ### 删除本地文件
 
 由用户自行删除或移动文件。下一次扫描会把它从 LOCAL 的 Pack/Model 列表中移除。
-扫描不会顺便删除其他本地文件。manifest 里旧条目的描述可能保留，但
+扫描不会顺便删除其他本地文件。manifest 里可能还留着旧条目的描述，但
 文件不存在时不能选择，文件恢复后才会重新出现。
 
 ### 卸载远程文件
@@ -254,7 +324,7 @@ GigBuddy 音色目录内，并且是受支持的 `.nam` 或 `.wav`，来源不�
 不要把 Pack 移到 `data/tones/` 之外；移出去就不再受管理。Chain 和 preset 会
 拒绝根目录之外的路径。
 
-## 离线与故障行为
+## 离线与故障
 
 - 本地 Pack、已导入文件和已保存 preset 可以离线浏览。
 - 远程搜索、创作者页面、模型详情和下载需要网络与有效 TONE3000 会话。

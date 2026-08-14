@@ -59,6 +59,37 @@ def test_detail_reconcile_uses_operations_set(monkeypatch):
     run(scenario())
 
 
+@pytest.mark.parametrize("operation", ["chain", "preset-load", "undo", "redo"])
+def test_chain_replacement_clears_retained_slot_context(monkeypatch, operation):
+    """A whole-chain event cannot leave DetailPane bound to an old Slot."""
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(DetailPane)
+            pane._pack_mode = True
+            pane._view_mode = "selection"
+            pane._pack_origin = "slot"
+            pane._pack_slot_index = 1
+            pane._pack_slot_identity = 42
+            refreshed = []
+            monkeypatch.setattr(
+                "tui.panels.live.read_chain", lambda: {"slots": []})
+            monkeypatch.setattr(
+                pane, "refresh_pack_active",
+                lambda chain: refreshed.append(chain),
+            )
+
+            pane.reconcile_after_mutation(MutationCommitted(operation))
+
+            assert pane._pack_slot_index is None
+            assert pane._pack_slot_identity is None
+            assert pane._pack_origin == "description"
+            assert refreshed == [{"slots": []}]
+
+    run(scenario())
+
+
 def test_pack_anchor_restores_first_visible_row_and_offset(monkeypatch):
     async def scenario():
         models = _pack_models()

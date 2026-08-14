@@ -4,7 +4,7 @@
 
 This guide is for GigBuddy users. It explains
 where tone files live, how to download a Pack from TONE3000, how to add a Pack
-from your own disk, and what LOCAL, Chain, and Presets do with those files.
+from your own disk, and how LOCAL, Chain, and Presets use those files.
 
 ## The short version
 
@@ -31,8 +31,8 @@ The path depends on how GigBuddy was installed:
 The same home contains the local index at `data/gigbuddy.db`, the live Chain at
 `data/live_chain.json`, and editable Presets under `data/presets/`.
 
-Do not put a Pack in `~/.local/share/gigbuddy/tones/` or beside the checkout's
-`src/` directory. GigBuddy will only scan the managed `data/tones/` root.
+A Pack in `~/.local/share/gigbuddy/tones/` or beside the checkout's `src/`
+directory is not scanned. GigBuddy only scans the managed `data/tones/` root.
 
 ## Remote import from TONE3000
 
@@ -98,8 +98,7 @@ failed transfer never appears as an installed `.nam` or `.wav` file.
 
 Remote imports also create or update `gigbuddy.json`. GigBuddy keeps user-edited
 display fields and unknown fields in an existing GigBuddy manifest. A malformed
-or foreign JSON file is left alone; it does not make valid model files
-unavailable.
+or foreign JSON file is left alone and does not hide valid model files.
 
 ## Add a local Tone Pack
 
@@ -205,11 +204,11 @@ LOCAL uses this order when it builds its display:
 
 `models[].format` is display metadata only. If it disagrees with the extension,
 the extension wins. A missing, malformed, or foreign manifest is reported as a
-metadata problem, but valid `.nam` and `.wav` files remain usable.
+metadata problem, but valid `.nam` and `.wav` files stay usable.
 
 Without a manifest, GigBuddy uses the directory name as the Pack name, the
 filename as the model name, `LOCAL` as the author, and a path-derived Pack
-identity. A Pack ID in the manifest gives the Pack a named identity, but moving
+identity. A Pack ID in the manifest gives the Pack a stable identity, but moving
 a Pack does not automatically migrate existing Presets. After moving a Pack,
 open LOCAL and save affected Presets again with the newly selected files.
 
@@ -228,6 +227,85 @@ open LOCAL and save affected Presets again with the newly selected files.
   identity and relative filename when available, so loading can resolve the
   current path instead of guessing a remote ID.
 
+## Shareable Presets
+
+The JSON files in `data/presets/` are GigBuddy's editable local snapshots. They
+refer to files installed in that GigBuddy home and are suitable for backup or
+local editing, but they are not the portable sharing format.
+
+Use the share commands when another user should recreate the rig in their own
+library:
+
+```sh
+gigbuddy preset export <name> preset-name.json
+gigbuddy preset import preset-name.json
+```
+
+The export is a standalone JSON document. It uses the TONE3000 `model_id` for
+each remote A2 or IR model and does not include a local path, Pack directory,
+SQLite id, or machine-specific filename. The recipient's GigBuddy resolves each
+ID through TONE3000, downloads missing models, and then creates its normal local
+Preset. A model that is already installed is reused. Add `--load` to apply the
+imported chain immediately, or `--name NAME` to choose a different local name:
+
+```sh
+gigbuddy preset import preset-name.json --name "My copy" --load
+```
+
+### Shareable Preset format
+
+The current document kind is `gigbuddy-shareable-preset` and the provider is
+`tone3000`:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-shareable-preset",
+  "provider": "tone3000",
+  "name": "blackface-clean",
+  "note": "Clean amp and cabinet",
+  "chain": {
+    "slots": [
+      {"model_id": 12345, "input_gain_db": 1.5},
+      {"model_id": 67890, "bypass": true},
+      {"model_id": 12345}
+    ],
+    "gain": 0.8,
+    "master": 0.9,
+    "quality": 1.0
+  }
+}
+```
+
+`chain.slots` is kept in signal order. It can contain the same model more than
+once, an empty Slot as `{"model_id": null}`, bypass state, and Slot input or
+output trims from `-24` to `24` dB. The chain-level values are the same values
+used by a local Preset. Slot `model_id` values are the only model references;
+GigBuddy derives the unique, first-use-ordered download list from them. Older
+files may contain a redundant top-level `model_ids` field, which GigBuddy
+ignores for compatibility.
+
+The format is limited to TONE3000-backed models. A chain that contains a
+user-owned local Pack file cannot be exported as a shareable Preset, because
+another user's GigBuddy cannot download that file from a TONE3000 ID. Keep that
+chain as the regular local JSON Preset or share the Pack separately.
+
+### What import does
+
+1. GigBuddy validates the document, Slot order, model IDs, gains, and provider.
+2. For every missing model ID, it calls TONE3000's exact model lookup endpoint
+   to find the parent Tone. It does not search by title or treat the model ID as
+   a Tone ID.
+3. IDs belonging to the same Tone are downloaded together, and only the models
+   referenced by the share file are requested.
+4. After all requested files are present, GigBuddy writes the local Preset and
+   its editable file under `data/presets/`.
+
+If lookup, authentication, or download fails, the local Preset is not written.
+The source share file is never moved or modified. A share file placed directly
+under `data/presets/` is ignored by automatic local-Preset reconciliation; use
+`gigbuddy preset import` explicitly.
+
 Select a local or remote Model from LOCAL and load it into the focused Slot in
 the same way. The realtime engine accepts supported managed `.nam` and `.wav`
 files regardless of whether their source was TONE3000 or your own disk.
@@ -245,7 +323,7 @@ it, then load the replacement into the Slot.
 
 Delete or move the file yourself. The next local scan removes it from the
 visible Pack/model list. GigBuddy does not delete your other local files as a
-side effect of scanning. A removed file's old description may remain in a
+side effect of scanning. A removed file's old description may stay in a
 manifest as history, but it is not selectable until the file exists again.
 
 ### Uninstalling a remote file
@@ -254,10 +332,10 @@ Use the uninstall action in LOCAL or the Pack/model detail view. GigBuddy checks
 whether the file is in the active Chain and whether a Preset refers to it. A
 confirmation is required for a Preset reference. Managed remote files are
 moved to `data/.trash/<operation>/` rather than immediately erased; remote
-metadata remains so the Tone can be installed again later.
+metadata stays available so the Tone can be installed again later.
 
 Uninstalling one model does not remove the other models in the Pack. When the
-last remote model is removed, the remote Tone remains in the metadata index but
+last remote model is removed, the remote Tone stays in the metadata index but
 no longer counts as locally installed.
 
 Under normal operation, GigBuddy rejects an uninstall target that resolves
@@ -265,7 +343,7 @@ outside the managed `data/tones/` root. Do not have another process replace the
 same Pack while an uninstall is running. Changes made by another process at the
 same time are unsupported.
 
-## Moving a Pack and Preset behavior
+## Moving a Pack and Presets
 
 Keep the Pack directory name and its manifest when moving it inside a GigBuddy
 home. The manifest keeps the Pack's metadata, but moving the directory is not a
@@ -276,10 +354,10 @@ it creates a new local Pack identity. A Preset that still points to the old
 path will report the file as unavailable until the file is restored or the
 Preset is saved again with the new model.
 
-Do not move a Pack outside `data/tones/` and expect it to remain managed. Chain
-and Preset validation intentionally rejects paths outside that root.
+A Pack moved outside `data/tones/` is no longer managed. Chain and Preset
+validation intentionally rejects paths outside that root.
 
-## Offline and failure behavior
+## Offline use and failures
 
 - Local Packs, imported files, and saved Presets can be browsed offline.
 - Remote search, creator pages, model details, and downloads need the network

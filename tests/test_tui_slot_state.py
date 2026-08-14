@@ -168,6 +168,25 @@ def test_duplicate_paths_do_not_share_candidate_or_target():
     assert state.target_index == 1
 
 
+def test_managed_duplicate_path_reorder_applies_identity_transition():
+    state = _state("same.nam", "same.nam")
+    state.focus_slot(1)
+    before_identities = state.slot_identities
+    state.mark_managed_write("tui-write", 4)
+
+    assert state.reconcile(
+        {"slots": [{"path": "same.nam"}, {"path": "same.nam"}],
+         "revision": 4},
+        fingerprint="tui-write", revision=4,
+        preserve_slot_identities=before_identities[::-1],
+        preserve_target_identity=before_identities[1],
+    ) is False
+
+    assert state.slot_identities == before_identities[::-1]
+    assert state.target_identity == before_identities[1]
+    assert state.target_index == 0
+
+
 def test_whole_replacement_clears_target_and_candidates():
     state = _state("a")
     state.focus_slot(0)
@@ -192,6 +211,54 @@ def test_same_tui_fingerprint_and_revision_preserve_candidates():
     assert state.target_index == 0
     assert state.slot(0).status is SlotStatus.BYPASS
     assert state.slot(0).candidate == "a"
+
+
+def test_managed_path_change_can_preserve_explicit_target():
+    state = _state("a")
+    state.focus_slot(0)
+    state.mark_managed_write("tui-write", 4)
+
+    assert state.reconcile(
+        {"slots": [{"path": None, "candidate": "a"}], "revision": 4},
+        fingerprint="tui-write", revision=4,
+        preserve_target_index=0) is True
+    assert state.target_index == 0
+    assert state.slot(0).status is SlotStatus.BYPASS
+
+
+def test_commit_file_write_observer_receives_post_mutation_target():
+    state = _state("a", "b")
+    state.focus_slot(0)
+    adapter = _Adapter(state.to_chain())
+    observed = []
+
+    state.commit(
+        adapter,
+        lambda draft: draft.move_slot(0, 1),
+        on_file_written=lambda fingerprint, revision, target_index: observed.append(
+            (fingerprint, revision, target_index)),
+    )
+
+    assert observed == [("tui-write", 4, 1)]
+    assert state.target_index == 1
+
+
+def test_commit_file_write_observer_type_error_is_not_retried():
+    state = _state("a")
+    adapter = _Adapter(state.to_chain())
+    calls = []
+
+    def observer(*args):
+        calls.append(len(args))
+        raise TypeError("observer body failed")
+
+    state.commit(
+        adapter,
+        lambda draft: draft.toggle_bypass(0),
+        on_file_written=observer,
+    )
+
+    assert calls == [6]
 
 
 def test_exact_managed_poll_rehydrates_a_persisted_candidate():

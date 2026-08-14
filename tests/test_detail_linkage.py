@@ -7,6 +7,7 @@ REQ-011：搜索/换排序/刷新等"操作一下"后，detail 不得清成空�
 """
 import asyncio
 
+from textual.events import MouseScrollDown
 from textual.widgets import DataTable, TabPane
 
 from tui.app import GigBuddyApp
@@ -628,5 +629,50 @@ def test_creator_load_more_keeps_exact_values_and_cursor(monkeypatch):
             assert table.scroll_y == scroll_before
             cursor_key = table.ordered_rows[table.cursor_row].key.value
             assert cursor_key == "creator:alice"
+
+    run(scenario())
+
+
+def test_creator_mouse_scroll_loads_when_first_page_fills_viewport(monkeypatch):
+    """A downward wheel event can load page two without a scroll offset."""
+    pages = {
+        1: [_creator(f"creator{i}", i, i * 2, i, i + 1)
+            for i in range(10)],
+        2: [_creator(f"creator{i}", i, i * 2, i, i + 1)
+            for i in range(10, 20)],
+    }
+    calls = []
+
+    def top_creators(*, page_number, **_kwargs):
+        calls.append(page_number)
+        return [dict(row) for row in pages[page_number]]
+
+    monkeypatch.setattr("tui.library_panel.library.tone3000.top_creators",
+                        top_creators)
+    monkeypatch.setattr("tui.library_panel.library.tone3000.search",
+                        lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("tui.panels.tone3000.user",
+                        lambda name: {"username": name, "bio": "bio"})
+    monkeypatch.setattr("library.tone3000.verify_username", lambda name: None)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.5)
+            app.query_one(LibraryPanel).activate_view_tab("pane-creators")
+            await pilot.pause(1.0)
+            panel = app.query_one(LibraryPanel)
+            table = app.query_one("#lib-table-creators", DataTable)
+            assert table.row_count == 10
+            assert table.max_scroll_y == 0
+            assert panel._creator_has_more
+
+            table.post_message(MouseScrollDown(
+                table, 1, 1, 0, 1, 0, False, False, False))
+            await pilot.pause(0.8)
+
+            assert calls[-1] == 2
+            assert table.row_count == 20
+            assert table.ordered_rows[-1].key.value == "creator:creator19"
 
     run(scenario())

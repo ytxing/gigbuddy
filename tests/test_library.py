@@ -313,6 +313,14 @@ def test_schema_created():
     assert {"tones", "models"} <= tables
 
 
+def test_connection_context_closes_connection():
+    with library.connect() as conn:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
 def test_existing_schema_gets_semantic_name_column():
     raw = sqlite3.connect(library.DB_FILE)
     raw.executescript("""
@@ -1198,7 +1206,7 @@ def test_cli_reports_the_frozen_release_version(capsys):
         library.main(["--version"])
 
     assert exc_info.value.code == 0
-    assert capsys.readouterr().out.strip() == "gigbuddy 1.1.4"
+    assert capsys.readouterr().out.strip() == "gigbuddy 1.2.0"
 
 
 def test_cli_search_json(capsys, monkeypatch):
@@ -1265,6 +1273,140 @@ def test_preset_save_load_roundtrip(tmp_path):
     ]
     assert cfg["gain"] == 0.8 and cfg["master"] == 0.65
     assert library.chain_get()["slots"][0]["path"] == amp["local_path"]
+
+
+def test_shareable_preset_export_uses_slot_model_ids_without_local_paths(tmp_path):
+    amp, ir = _put_models(tmp_path)
+    library.chain_set({"slots": [{"path": amp["local_path"]},
+                                  {"path": ir["local_path"]}],
+                       "gain": 0.8, "master": 0.65})
+    library.preset_save("share-rig", note="portable")
+
+    destination = tmp_path / "share-rig.json"
+    exported = library.preset_export("share-rig", destination)
+    document = json.loads(exported.read_text(encoding="utf-8"))
+
+    assert document["kind"] == "gigbuddy-shareable-preset"
+    assert document["provider"] == "tone3000"
+    assert "model_ids" not in document
+    assert document["chain"]["slots"] == [
+        {"model_id": 1001}, {"model_id": 1002},
+    ]
+    assert "path" not in document["chain"]["slots"][0]
+
+
+def test_shareable_preset_export_rejects_local_pack_asset(tmp_path):
+    local = library.TONES_DIR / "local-pack" / "pedal.nam"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"local")
+    library.scan_local_packs(force=True)
+    library.chain_set({"slots": [{"path": str(local)}]})
+    library.preset_save("local-only")
+
+    with pytest.raises(ValueError, match="local Pack"):
+        library.preset_export("local-only", tmp_path / "local.json")
+
+
+def test_shareable_preset_export_rejects_bypassed_local_pack_asset(tmp_path):
+    local = library.TONES_DIR / "local-pack" / "pedal.nam"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"local")
+    library.scan_local_packs(force=True)
+    library.chain_set({"slots": [{"path": str(local)}]})
+    library.chain_set({"slots": [{"path": None, "candidate": str(local)}]})
+    library.preset_save("local-bypass")
+
+    with pytest.raises(ValueError, match="local Pack"):
+        library.preset_export("local-bypass", tmp_path / "local-bypass.json")
+
+
+def test_shareable_preset_import_reuses_installed_model_and_can_load(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "downloaded-rig",
+        "note": "from a friend",
+        # A stale field from the previous share format must be ignored.
+        "model_ids": [999999],
+        "chain": {"slots": [{"model_id": 1001}],
+                  "gain": 0.7, "master": 0.9, "quality": 0.8},
+    }), encoding="utf-8")
+
+    imported = library.preset_import(source, load=True, quiet=True)
+
+    assert imported["name"] == "downloaded-rig"
+    assert imported["note"] == "from a friend"
+    assert imported["chain"]["slots"] == [
+        {"model_id": 1001, "path": "data/tones/SR AKG 414.nam"},
+    ]
+    assert library.chain_get()["slots"] == [{"path": amp["local_path"]}]
+    assert library.preset_current() == "downloaded-rig"
+
+
+def test_shareable_preset_import_downloads_missing_models_by_tone(
+        tmp_path, monkeypatch):
+    _put_models(tmp_path)
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "remote-rig",
+        "chain": {"slots": [{"model_id": 2001}, {"model_id": 2002}]},
+    }), encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(
+        tone3000, "tones_for_model_ids",
+        lambda ids: [{"id": 77, "matched_model_ids": list(ids)}],
+    )
+
+    def fake_import(tone_id, *, model_ids, quiet):
+        calls.append((tone_id, model_ids, quiet))
+        with library.connect() as conn:
+            library.upsert_tone(conn, {**SAMPLE, "id": tone_id}, commit=False)
+            conn.commit()
+        for index, model_id in enumerate(model_ids):
+            path = library.TONES_DIR / f"remote-{model_id}.nam"
+            path.write_bytes(b"remote")
+            with library.connect() as conn:
+                library.upsert_model(conn, {
+                    "id": model_id, "tone_id": tone_id,
+                    "model_url": f"https://example/{model_id}",
+                    "name": path.name,
+                    "architecture": "SlimmableContainer",
+                    "local_path": str(path),
+                }, commit=False)
+                conn.commit()
+        return {"id": tone_id}
+
+    monkeypatch.setattr(library, "import_tone", fake_import)
+
+    imported = library.preset_import(source, quiet=True)
+
+    assert calls == [(77, [2001, 2002], True)]
+    assert [slot["model_id"] for slot in imported["chain"]["slots"]] == [2001, 2002]
+    assert [slot["path"] for slot in imported["chain"]["slots"]] == [
+        "data/tones/remote-2001.nam", "data/tones/remote-2002.nam",
+    ]
+
+
+def test_shareable_file_in_preset_directory_is_not_auto_imported(tmp_path):
+    library.PRESETS_DIR.mkdir(parents=True)
+    source = library.PRESETS_DIR / "shared-rig.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "shared-rig",
+        "chain": {"slots": []},
+    }), encoding="utf-8")
+
+    assert library.preset_list() == []
+    assert source.is_file()
 
 
 def test_preset_active_dirty_and_quality_roundtrip(tmp_path):
@@ -1405,6 +1547,26 @@ def test_preset_save_writes_editable_json_and_external_edit_reconciles(tmp_path)
     assert reconciled["note"] == "edited by hand"
     assert reconciled["chain"]["gain"] == 0.25
     assert reconciled["updated_at"] != saved["updated_at"]
+
+
+def test_preset_reconcile_skips_unchanged_files(monkeypatch, tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+    saved = library.preset_save("stable")
+    library.preset_get_by_id(saved["id"])
+
+    calls = 0
+    original = library._preset_tracked_files
+
+    def counted(conn):
+        nonlocal calls
+        calls += 1
+        return original(conn)
+
+    monkeypatch.setattr(library, "_preset_tracked_files", counted)
+
+    assert library.preset_get_by_id(saved["id"])["name"] == "stable"
+    assert calls == 0
 
 
 def test_preset_mutations_keep_json_filename_and_content_in_sync(tmp_path):
@@ -1548,6 +1710,111 @@ def test_cli_preset_roundtrip(tmp_path, capsys):
     assert library.main(["preset", "show", "missing"]) == 1
     assert library.main(["preset", "delete", "cli-new"]) == 0
     assert library.main(["preset", "delete", "cli-new"]) == 1
+
+
+def test_cli_shareable_preset_export_and_import(tmp_path, capsys):
+    amp, _ir = _put_models(tmp_path)
+    library.chain_set({"model": amp["local_path"]})
+    assert library.main(["preset", "save", "cli-share"]) == 0
+    capsys.readouterr()
+
+    share_path = tmp_path / "preset-name.json"
+    assert library.main(["preset", "export", "cli-share", str(share_path)]) == 0
+    assert "Shareable Preset written" in capsys.readouterr().out
+    document = json.loads(share_path.read_text(encoding="utf-8"))
+    assert document["kind"] == "gigbuddy-shareable-preset"
+    assert "model_ids" not in document
+    assert "path" not in json.dumps(document)
+
+    assert library.main(["preset", "delete", "cli-share"]) == 0
+    capsys.readouterr()
+    library.chain_set({"slots": []})
+
+    assert library.main([
+        "preset", "import", str(share_path), "--name", "cli-imported", "--load",
+    ]) == 0
+    assert "cli-imported" in capsys.readouterr().out
+    assert library.preset_current() == "cli-imported"
+    assert library.chain_get()["slots"] == [{"path": amp["local_path"]}]
+
+
+def test_cli_shareable_preset_import_confirms_missing_models_before_download(
+        tmp_path, monkeypatch, capsys):
+    _put_models(tmp_path)
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "remote-rig",
+        "chain": {"slots": [{"model_id": 2001}]},
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        library, "_shareable_model_tones",
+        lambda ids: {2001: {"id": 77, "title": "Classic Amp"}},
+    )
+    calls = []
+
+    def fake_import(tone_id, *, model_ids, quiet):
+        calls.append((tone_id, model_ids, quiet))
+        path = library.TONES_DIR / "remote-2001.nam"
+        path.write_bytes(b"remote")
+        with library.connect() as conn:
+            library.upsert_tone(conn, {**SAMPLE, "id": tone_id}, commit=False)
+            library.upsert_model(conn, {
+                "id": 2001, "tone_id": tone_id,
+                "model_url": "https://example/2001",
+                "name": path.name,
+                "architecture": "SlimmableContainer",
+                "local_path": str(path),
+            }, commit=False)
+            conn.commit()
+        return {"id": tone_id}
+
+    monkeypatch.setattr(library, "import_tone", fake_import)
+    answers = iter(["yes"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert library.main(["preset", "import", str(source), "--load"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Loading shareable Preset 'remote-rig'." in output
+    assert "Model 2001 from Tone 77: Classic Amp" in output
+    assert "The Preset will be loaded into the live chain after download." in output
+    assert "Preset 'remote-rig' imported and loaded." in output
+    assert calls == [(77, [2001], True)]
+
+
+def test_cli_shareable_preset_import_decline_does_not_write_or_load(
+        tmp_path, monkeypatch, capsys):
+    _put_models(tmp_path)
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "remote-rig",
+        "chain": {"slots": [{"model_id": 2001}]},
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        library, "_shareable_model_tones",
+        lambda ids: {2001: {"id": 77, "title": "Classic Amp"}},
+    )
+    monkeypatch.setattr(
+        library, "import_tone",
+        lambda *_args, **_kwargs: pytest.fail("download must not start after decline"),
+    )
+    prompts = []
+    monkeypatch.setattr(
+        "builtins.input", lambda prompt: prompts.append(prompt) or "n")
+
+    assert library.main(["preset", "import", str(source), "--load"]) == 1
+
+    output = capsys.readouterr().out
+    assert prompts == ["Download these model(s) now? [y/N]: "]
+    assert "Preset import cancelled." in output
+    assert library.preset_get("remote-rig") is None
+    assert library.preset_current() is None
 
 
 def test_mark_download_state(monkeypatch, tmp_path):
