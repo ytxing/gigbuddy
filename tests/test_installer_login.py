@@ -1,6 +1,7 @@
 """Tests for the install-time TONE3000 login gate."""
 
 import io
+import os
 import subprocess
 from types import SimpleNamespace
 from pathlib import Path
@@ -147,3 +148,39 @@ def test_user_installer_fetches_tags_despite_a_legacy_tag_refspec(tmp_path):
         encoding="utf-8")
     assert 'fetch --quiet --force origin "+refs/tags/*:refs/tags/*"' in script
     assert "fetch --quiet --tags --force origin" not in script
+
+
+def test_user_installer_prints_the_complete_failed_command_output(tmp_path):
+    """The first diagnostic line must survive a command log longer than 40 lines."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        "for number in $(seq 1 45); do\n"
+        "  printf '<diagnostic-%03d>\\n' \"$number\" >&2\n"
+        "done\n"
+        "exit 23\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "GIGBUDDY_HOME": str(tmp_path / "install"),
+        "GIGBUDDY_REPO_URL": "https://example.test/gigbuddy.git",
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+    }
+
+    result = subprocess.run(
+        ["bash", str(Path(__file__).resolve().parents[1] / "scripts" / "install.sh"),
+         "--skip-presets", "--skip-dry-inputs"],
+        env=env, text=True, capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "GigBuddy install failed while running (exit 23):" in result.stderr
+    assert "----- command output -----" in result.stderr
+    assert "<diagnostic-001>" in result.stderr
+    assert "<diagnostic-045>" in result.stderr
+    assert "----- end command output -----" in result.stderr

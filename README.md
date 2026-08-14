@@ -27,12 +27,12 @@ So I built GigBuddy: a searchable library for tone packs, NAM files, and IRs. I
 can try them with the same dry recording or my own instrument, keep track of
 which file I am hearing, and build the chain once I find a sound that works.
 
-*v1.2.2 · 2026-08-14* · [release notes](docs/releases/v1.2.2.md) · [Tone Pack and shareable Preset guide](docs/tone-file-management.md)
+*v1.2.3 · 2026-08-14* · [release notes](docs/releases/v1.2.3.md) · [Tone Pack and shareable Preset guide](docs/tone-file-management.md)
 
 **One line from the terminal — downloads, installs, and initializes everything:**
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.2/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
@@ -162,7 +162,7 @@ skip the prompt. To remove a user-level install, run the matching uninstall
 script:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.2/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/uninstall.sh | bash
 ```
 
 The standalone uninstaller removes the local install, generated runtime files,
@@ -171,7 +171,7 @@ the runtime while keeping downloaded tones and local data; the login session is
 still removed:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.2/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 From a fresh checkout:
@@ -431,7 +431,7 @@ integration.
 
 ## Dependencies
 
-Pinned versions (v1.2.2). Update `requirements.txt` and the NeuralAudio commit
+Pinned versions (v1.2.3). Update `requirements.txt` and the NeuralAudio commit
 in `install.sh` together when bumping.
 
 **Python runtime** (`requirements.txt`):

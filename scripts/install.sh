@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="${GIGBUDDY_REPO_URL:-https://github.com/ytxing/gigbuddy.git}"
-REPO_REF="${GIGBUDDY_REF:-v1.2.2}"
+REPO_REF="${GIGBUDDY_REF:-v1.2.3}"
 USER_HOME="${HOME:-}"
 INSTALL_ROOT="${GIGBUDDY_HOME:-${USER_HOME}/.local/share/gigbuddy}"
 BIN_DIR="${GIGBUDDY_BIN_DIR:-${USER_HOME}/.local/bin}"
@@ -320,6 +320,7 @@ if [[ -t 0 && -z "${GIGBUDDY_HOME:-}" ]]; then
 fi
 
 run_quiet() {
+  local status
   if [[ "${GIGBUDDY_VERBOSE:-0}" == "1" ]]; then
     "$@"
     return
@@ -327,12 +328,20 @@ run_quiet() {
   : >"$COMMAND_LOG"
   if "$@" >"$COMMAND_LOG" 2>&1; then
     return
+  else
+    status=$?
   fi
-  printf 'GigBuddy install failed while running:' >&2
+  printf 'GigBuddy install failed while running (exit %d):' "$status" >&2
   printf ' %q' "$@" >&2
   printf '\n' >&2
-  tail -n 40 "$COMMAND_LOG" >&2
-  return 1
+  printf '%s\n' '----- command output -----' >&2
+  if [[ -s "$COMMAND_LOG" ]]; then
+    cat "$COMMAND_LOG" >&2
+  else
+    printf '%s\n' '(command produced no output)' >&2
+  fi
+  printf '%s\n' '----- end command output -----' >&2
+  return "$status"
 }
 
 announce_visible_step() {
