@@ -754,6 +754,49 @@ def test_a2_model_fetch_rejects_non_nam_files_and_formats(monkeypatch):
     assert [row["id"] for row in tone3000.models(9, a2_only=True)] == [1]
 
 
+def test_model_fetch_uses_download_suffix_when_display_name_has_decimal(
+        monkeypatch):
+    """TONE3000 display names such as ``G5.0`` are not file extensions."""
+    def fake_get(_url, **params):
+        if params.get("architecture") == "2":
+            return {
+                "data": [{
+                    "id": 419198,
+                    "name": "GALLIEN KRUEGER - RB800 - G5.0",
+                    "model_url": "https://example.test/gk-rb800_a2.nam",
+                }],
+                "total_pages": 1,
+            }
+        return {"data": [], "total_pages": 1}
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    assert [row["id"] for row in tone3000.models(2694, a2_only=True)] == [419198]
+
+
+def test_ir_model_fetch_uses_download_suffix_when_display_name_has_decimal(
+        monkeypatch):
+    """IR microphone-position labels also contain decimal points."""
+    def fake_get(_url, **params):
+        return {
+            "data": [{
+                "id": 656897,
+                "name": "M25 LL 1960TV 4x12 M201 0.25in 0.0in SA73",
+                "model_url": "https://example.test/greenback.wav",
+            }],
+            "total_pages": 1,
+        }
+
+    monkeypatch.setattr(tone3000, "_get", fake_get)
+
+    rows = tone3000.models(
+        75087, a2_only=False,
+        tone={"id": 75087, "gear": "cab", "format": "ir"})
+
+    assert [row["id"] for row in rows] == [656897]
+    assert rows[0]["architecture"] == "IR"
+
+
 def test_a2_model_fetch_keeps_architectureless_nam_rows_from_a2_view(monkeypatch):
     def fake_get(_url, **params):
         if params.get("architecture") == "2":

@@ -610,6 +610,11 @@ def _model_file_suffix(model: dict) -> str:
         source = raw.split("?", 1)[0].replace("\\", "/")
         suffix = PurePosixPath(source).suffix.casefold()
         if suffix:
+            # ``name`` is a human-facing TONE3000 label, not necessarily a
+            # filename. Labels such as "G5.0" and "0.25in" must fall through
+            # to the actual local path or download URL.
+            if key == "name" and suffix not in (_NAM_SUFFIXES | _IR_SUFFIXES):
+                continue
             return suffix
     return ""
 
