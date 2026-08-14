@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-shareable-preset",
+  "provider": "tone3000",
+  "name": "slamminmofo-fender-twin-oxford-clean",
+  "note": "@slamminmofo Fender Twin Reverb '65 Blackface RI, paired with a Fender Twin Reverb Oxford 12T6-10 SM57 Cone Edge IR. The amp capture is a V5 cranked vibrato-channel A2 model; the cabinet description reports original Oxford speakers and close-mic captures.",
+  "chain": {
+    "slots": [
+      {
+        "model_id": 413665,
+        "output_gain_db": 3.4
+      },
+      {
+        "model_id": 55659
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

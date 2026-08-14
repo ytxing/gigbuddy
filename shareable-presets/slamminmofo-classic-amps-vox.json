@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-shareable-preset",
+  "provider": "tone3000",
+  "name": "slamminmofo-vox-ac30-blue-alnico",
+  "note": "@slamminmofo VOX AC30 CH, paired with a 1964 Vox AC30 2x12 Celestion T530 Blue Alnico IR. The amp description covers the normal and top-boost channels; this top-boost A2 capture is a full-crank setting. The cabinet description calls out chime, warmth, glassy highs, woody mids, and musical lows.",
+  "chain": {
+    "slots": [
+      {
+        "model_id": 494069,
+        "output_gain_db": 2.33
+      },
+      {
+        "model_id": 690292
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

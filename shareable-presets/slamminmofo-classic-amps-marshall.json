@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-shareable-preset",
+  "provider": "tone3000",
+  "name": "slamminmofo-marshall-jtm45-greenback",
+  "note": "@slamminmofo Marshall JTM 45 Reissue, paired with a Marshall JTM-45 Greenback cabinet IR. The amp capture is a V10 Beano A2 model; the cabinet description explicitly covers Celestion Greenback 2x12 and 4x10 options for JTM-45 and other amps.",
+  "chain": {
+    "slots": [
+      {
+        "model_id": 494384,
+        "output_gain_db": 5.46
+      },
+      {
+        "model_id": 74211
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}
