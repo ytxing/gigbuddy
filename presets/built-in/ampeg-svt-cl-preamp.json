@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "ampeg-svt-cl-preamp",
+  "name": "ampeg-svt-cl-preamp",
+  "note": "Ampeg SVT-CL bass preamp capture (Deathblossom Audio, verified) into an Ampeg SVT 8x10 cabinet (SM57) - studio-grade preamp front end with the classic all-tube bass cabinet tone.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -4.74,
+        "tone_id": 45809,
+        "model_id": 382790
+      },
+      {
+        "tone_id": 1708,
+        "model_id": 80912
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

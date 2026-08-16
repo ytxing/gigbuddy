@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "darkglass-alpha-omega",
+  "name": "darkglass-alpha-omega",
+  "note": "Darkglass Alpha Omega fuzz channel (official Darkglass account) into an Aguilar DB751 and DG412ES cabinet (SM7B) - heavy modern metal bass.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 15.39,
+        "tone_id": 27697,
+        "model_id": 418277
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

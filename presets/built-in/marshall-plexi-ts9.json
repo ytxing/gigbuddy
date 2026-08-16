@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "marshall-plexi-ts9",
+  "name": "marshall-plexi-ts9",
+  "note": "Marshall JMP-50 Lead 1969 Plexi (Amalgam Audio, verified, 33K downloads) with an Ibanez TS9 at Drive 0 / Tone 6 / Level 6 used as a clean boost - golden-era Plexi crunch.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 2.01,
+        "tone_id": 36827,
+        "model_id": 381614
+      },
+      {
+        "output_gain_db": 1.41,
+        "tone_id": 65578,
+        "model_id": 418470
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

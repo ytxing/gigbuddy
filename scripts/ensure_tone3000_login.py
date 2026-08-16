@@ -2,8 +2,8 @@
 """Ensure a TONE3000 session exists before an installer bootstrap.
 
 Exit status 10 means the user declined; installers should continue without
-starter presets in that case. A missing interactive terminal is an error so
-non-interactive installs cannot silently skip the login check.
+remote model preparation in that case. A missing interactive terminal is an
+error so non-interactive installs cannot silently skip the login check.
 """
 from __future__ import annotations
 
@@ -62,7 +62,8 @@ def ensure_login(*, input_stream: TextIO | None = None,
         print(
             "No interactive terminal is available for TONE3000 login. "
             "Run this installer from a terminal, or pass --skip-presets "
-            "explicitly to install without starter presets.",
+            "explicitly to skip install-time Preset registration and the "
+            "login check.",
             file=error,
         )
         return NO_INTERACTIVE_TERMINAL
@@ -77,8 +78,9 @@ def ensure_login(*, input_stream: TextIO | None = None,
 
     if answer in {"n", "no"}:
         print(
-            "Skipping starter presets. Run `gigbuddy tone login` and "
-            "`gigbuddy preset bootstrap` later.",
+            "Skipping remote model preparation. The built-in Preset catalog "
+            "will still appear when GigBuddy starts. Run `gigbuddy tone "
+            "login` and load a built-in Preset later.",
             file=output,
         )
         return SKIP_STARTER_PRESETS

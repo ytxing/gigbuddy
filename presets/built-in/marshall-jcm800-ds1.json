@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "marshall-jcm800-ds1",
+  "name": "marshall-jcm800-ds1",
+  "note": "Marshall JCM800 2203 Modified (2dor, verified, 38K downloads) with a Boss DS-1 at Tone 5 / Volume 10 / Gain 7 - the classic 80s distortion-into-marshall combination.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -5.88,
+        "tone_id": 38560,
+        "model_id": 381655
+      },
+      {
+        "output_gain_db": -0.93,
+        "tone_id": 44209,
+        "model_id": 567079
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

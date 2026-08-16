@@ -25,11 +25,22 @@ The path depends on how GigBuddy was installed:
 | Installation | Tone Pack directory |
 |---|---|
 | Source checkout | `<checkout>/data/tones/` |
-| Default user install | `~/.local/share/gigbuddy/data/tones/` |
-| Custom install location | `<GigBuddy home>/data/tones/` |
+| Default user install | `~/.local/share/gigbuddy-data/tones/` |
+| Custom install location | `<GigBuddy home>-data/tones/` |
+| Explicit data location | `<GIGBUDDY_DATA_HOME>/tones/` |
 
-The same home contains the local index at `data/gigbuddy.db`, the live Chain at
-`data/live_chain.json`, and editable Presets under `data/presets/`.
+For a user install, `<GigBuddy home>/data` is a symbolic link to the external
+data directory. Both paths reach the same files, but the external location is
+the durable owner: code updates can replace the checkout without moving user
+data. The same data directory contains the local index at `gigbuddy.db`, the
+live Chain at `live_chain.json`, and editable Presets under `presets/`.
+
+Set `GIGBUDDY_DATA_HOME` before the first install to choose the external data
+location. Re-running the installer accepts an existing absolute or relative
+`data` link only when it resolves to that same directory. The uninstaller uses
+the installed link as its source of truth and refuses a conflicting
+`GIGBUDDY_DATA_HOME`. Use `--keep-data` to remove the code checkout while
+retaining this directory.
 
 A Pack in `~/.local/share/gigbuddy/tones/` or beside the checkout's `src/`
 directory is not scanned. GigBuddy only scans the managed `data/tones/` root.

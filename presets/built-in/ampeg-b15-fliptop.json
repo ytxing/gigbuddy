@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "ampeg-b15-fliptop",
+  "name": "ampeg-b15-fliptop",
+  "note": "1960s Ampeg B-15 Fliptop (TONE3000 official) - Motown vintage bass combo tone.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 1.66,
+        "tone_id": 26828,
+        "model_id": 379842
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

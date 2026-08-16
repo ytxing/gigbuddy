@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "fender-deluxe-reverb-morning-glory",
+  "name": "fender-deluxe-reverb-morning-glory",
+  "note": "Fender Deluxe Reverb '65 Reissue (69K downloads) with a JHS Morning Glory v3 at Drive 2 / Tone 8 - transparent blackface sparkle pushed into edge-of-breakup.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 0.43,
+        "tone_id": 2805,
+        "model_id": 419178
+      },
+      {
+        "output_gain_db": 3.08,
+        "tone_id": 51649,
+        "model_id": 383453
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

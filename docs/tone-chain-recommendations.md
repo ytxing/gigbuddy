@@ -93,7 +93,7 @@ bin/gigbuddy chain set '{"model": "data/tones/<id>-<slug>/<模型名>.nam", "ir"
 Built-in presets are grouped as Band Gear and Classic Pairing, then as Guitar or Bass:
 
 ```bash
-bin/gigbuddy preset seed --replace    # download starter models and rebuild the catalog
+bin/gigbuddy preset bootstrap         # retry missing models for built-in Presets
 bin/gigbuddy preset list              # list presets
 bin/gigbuddy preset load band-guitar-rhcp  # load with engine hot-swap
 ```

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "hartke-lh1000",
+  "name": "hartke-lh1000",
+  "note": "Hartke LH1000 rack bass head into a Gallien-Krueger 4x10 cabinet (Studio Amp Captures, 11K downloads) - modern rock bass.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -0.66,
+        "tone_id": 5867,
+        "model_id": 413046
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

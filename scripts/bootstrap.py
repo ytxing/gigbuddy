@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Prepare a fresh GigBuddy checkout for the v0.2 TUI.
 
-This script owns orchestration only. Library bootstrap handles the starter
-model-to-tone mapping and canonical preset writes; tone3000 handles the
-official dry-input downloads.
+This script owns orchestration only. The library registers the repository's
+built-in Preset catalog; the TUI or an explicit ``gigbuddy preset bootstrap``
+command prepares any missing remote models. ``tone3000`` handles the official
+dry-input downloads.
 """
 from __future__ import annotations
 
@@ -36,11 +37,11 @@ def _download_dry_inputs(kind: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Initialize GigBuddy v0.2 starter assets and runtime data"
+        description="Register GigBuddy built-in Presets and prepare runtime data"
     )
     parser.add_argument(
         "--skip-presets", action="store_true",
-        help="do not download starter models or create built-in presets",
+        help="do not register the built-in Preset catalog",
     )
     parser.add_argument(
         "--skip-dry-inputs", action="store_true",
@@ -60,8 +61,12 @@ def main(argv: list[str] | None = None) -> int:
 
     ok = True
     if not args.skip_presets:
-        result = library.bootstrap_starter_presets()
-        if result["failed"] or result["unresolved_model_ids"]:
+        result = library.sync_bundled_presets(download=False)
+        if result["failed"]:
+            print(
+                f"Built-in Presets: {result['failed']} invalid document(s)",
+                file=sys.stderr,
+            )
             ok = False
 
     if not args.skip_dry_inputs:

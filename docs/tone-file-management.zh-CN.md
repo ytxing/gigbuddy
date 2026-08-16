@@ -23,11 +23,19 @@ preset 如何处理这些文件。
 | 安装方式 | 音色 Pack 目录 |
 |---|---|
 | 源码 checkout | `<checkout>/data/tones/` |
-| 默认用户安装 | `~/.local/share/gigbuddy/data/tones/` |
-| 自定义安装位置 | `<GigBuddy home>/data/tones/` |
+| 默认用户安装 | `~/.local/share/gigbuddy-data/tones/` |
+| 自定义安装位置 | `<GigBuddy home>-data/tones/` |
+| 显式数据目录 | `<GIGBUDDY_DATA_HOME>/tones/` |
 
-同一个 GigBuddy home 下还会有本地索引 `data/gigbuddy.db`、当前音色链
-`data/live_chain.json`，以及 `data/presets/` 下可编辑的 preset 文件。
+用户安装版的 `<GigBuddy home>/data` 是指向外部数据目录的符号链接，两条路径
+访问的是同一批文件，但外部目录才是持久数据的实际位置。代码升级可以替换
+checkout，而无需搬动用户数据。该目录还包含本地索引 `gigbuddy.db`、当前音色链
+`live_chain.json`，以及 `presets/` 下可编辑的 preset 文件。
+
+首次安装前可用 `GIGBUDDY_DATA_HOME` 指定外部数据目录。重复安装只会接受解析后
+指向同一目录的绝对或相对 `data` 链接。卸载器以已安装链接为准；如果显式设置的
+`GIGBUDDY_DATA_HOME` 与链接不一致，会拒绝删除。使用 `--keep-data` 可以只移除
+代码 checkout 并保留该数据目录。
 
 Pack 放在 `~/.local/share/gigbuddy/tones/` 或源码目录的 `src/` 旁边都不会
 被扫描。GigBuddy 只扫描受管理的 `data/tones/` 根目录。

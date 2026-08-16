@@ -21,31 +21,47 @@ import argparse
 import filecmp
 import hashlib
 import json
-import math
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
 import threading
+import tomllib
 import warnings
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-import tone3000
 import chain_protocol
-
-__version__ = "1.2.1"
+import preset_document
+import preset_catalog as preset_catalog_module
+import tone3000
 
 ROOT = Path(__file__).resolve().parent.parent
 
-_PRESET_UPDATED_UNSET = object()
+
+def _project_version() -> str:
+    """Read the installed checkout's single runtime version source."""
+    metadata_path = ROOT / "pyproject.toml"
+    try:
+        metadata = tomllib.loads(metadata_path.read_text(encoding="utf-8"))
+        version = metadata["project"]["version"]
+    except (KeyError, OSError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError(
+            f"Cannot read GigBuddy version from {metadata_path}: {exc}") from exc
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError(
+            f"GigBuddy version in {metadata_path} must be a non-empty string")
+    return version.strip()
 
 
-class PresetConflictError(ValueError):
-    """Raised when an edit is based on an older version of a Preset row."""
+__version__ = _project_version()
+
+_PRESET_UPDATED_UNSET = preset_catalog_module.PRESET_UPDATED_UNSET
+PresetConflictError = preset_catalog_module.PresetConflictError
 
 
 class PresetImportCancelledError(ValueError):
@@ -121,14 +137,16 @@ DB_FILE = ROOT / "data" / "gigbuddy.db"
 CHAIN_FILE = ROOT / "data" / "live_chain.json"  # same path as tui/live.py (engine protocol)
 TONES_DIR = ROOT / "data" / "tones"             # same as tui/live.py
 PRESETS_DIR = ROOT / "data" / "presets"
+BUNDLED_PRESETS_DIR = ROOT / "presets" / "built-in"
 PACK_MANIFEST_NAME = "gigbuddy.json"
 _PACK_ASSET_FORMATS = {".nam": "nam", ".wav": "ir"}
-PRESET_DOCUMENT_KIND = "gigbuddy-preset"
-SHAREABLE_PRESET_DOCUMENT_KIND = "gigbuddy-shareable-preset"
-_PRESET_FILE_SETTING_PREFIX = "preset_file:"
-_PRESET_SYNC_LOCK = threading.RLock()
-_PRESET_SYNC_ACTIVE = False
-_PRESET_SYNC_TOKEN: tuple | None = None
+PRESET_DOCUMENT_KIND = preset_catalog_module.PRESET_DOCUMENT_KIND
+BUNDLED_PRESET_DOCUMENT_KIND = preset_catalog_module.BUNDLED_PRESET_DOCUMENT_KIND
+SHAREABLE_PRESET_DOCUMENT_KIND = (
+    preset_catalog_module.SHAREABLE_PRESET_DOCUMENT_KIND)
+_PRESET_FILE_SETTING_PREFIX = preset_catalog_module.PRESET_FILE_SETTING_PREFIX
+_PRESET_CATALOG = preset_catalog_module.PresetCatalog(
+    lambda: sys.modules[__name__])
 
 _IMPORT_LOCKS: dict[str, threading.Lock] = {}
 _IMPORT_LOCKS_GUARD = threading.Lock()
@@ -227,6 +245,8 @@ CREATE TABLE IF NOT EXISTS presets (
     name        TEXT UNIQUE NOT NULL,
     note        TEXT,
     chain_json  TEXT NOT NULL,  -- ordered Slot refs plus gain, master, quality
+    source      TEXT NOT NULL DEFAULT 'user',
+    source_key  TEXT,
     created_at  TEXT,
     updated_at  TEXT
 );
@@ -282,6 +302,21 @@ def connect() -> sqlite3.Connection:
                 # path while this process was alive. Keep the fast path, but do
                 # not let the process-local cache hide a fresh empty database.
                 schema_ready = _SCHEMA_TABLES <= tables
+                if schema_ready:
+                    preset_columns = {
+                        row[1] for row in conn.execute(
+                            "PRAGMA table_info(presets)").fetchall()
+                    }
+                    index_row = conn.execute(
+                        "SELECT sql FROM sqlite_master "
+                        "WHERE type='index' AND name='idx_presets_source_key'"
+                    ).fetchone()
+                    index_sql = str(index_row[0]).lower() if index_row else ""
+                    schema_ready = (
+                        {"source", "source_key"} <= preset_columns
+                        and "source = 'bundled'" in index_sql
+                        and "trim(source_key) != ''" in index_sql
+                    )
             if not schema_ready:
                 conn.executescript(SCHEMA)
                 # CREATE TABLE IF NOT EXISTS does not evolve an existing database.
@@ -313,6 +348,26 @@ def connect() -> sqlite3.Connection:
                 for column, statement in migrations.items():
                     if column not in model_columns:
                         conn.execute(statement)
+                preset_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(presets)").fetchall()
+                }
+                if "source" not in preset_columns:
+                    conn.execute(
+                        "ALTER TABLE presets ADD COLUMN source TEXT NOT NULL "
+                        "DEFAULT 'user'")
+                if "source_key" not in preset_columns:
+                    conn.execute(
+                        "ALTER TABLE presets ADD COLUMN source_key TEXT")
+                # The key identifies repository ownership. User rows are
+                # deliberately excluded so stale/externally-created user data
+                # cannot block a bundled row from being registered.
+                conn.execute("DROP INDEX IF EXISTS idx_presets_source_key")
+                conn.execute(
+                    "CREATE UNIQUE INDEX idx_presets_source_key "
+                    "ON presets(source_key) "
+                    "WHERE source = 'bundled' AND source_key IS NOT NULL "
+                    "AND TRIM(source_key) != ''")
                 conn.commit()
                 _SCHEMA_READY.add(db_path)
                 with _LOCAL_SCAN_CACHE_LOCK:
@@ -377,6 +432,11 @@ def database_change_token() -> tuple:
     )
     return (stat_token(Path(DB_FILE)) + stat_token(Path(TONES_DIR))
             + (_local_tree_token(), preset_files))
+
+
+def bundled_preset_change_token() -> tuple:
+    """Return filesystem signals for repository Preset catalog changes."""
+    return _PRESET_CATALOG.change_token()
 
 
 def chain_change_token() -> tuple:
@@ -680,11 +740,13 @@ def list_local_packs(*, scan: bool = True) -> list[dict]:
         return packs
 
 
-def _local_model_rows_for_path(path: str) -> list[dict]:
+def _local_model_rows_for_path(path: str, *, scan: bool = True) -> list[dict]:
     if not path:
         return []
     target = _path_key(Path(_to_abs_path(path)))
-    packs = {pack["pack_id"]: pack for pack in list_local_packs()}
+    packs = {
+        pack["pack_id"]: pack for pack in list_local_packs(scan=scan)
+    }
     matches = []
     for pack in packs.values():
         root = _path_key(Path(pack["root_path"]))
@@ -694,9 +756,9 @@ def _local_model_rows_for_path(path: str) -> list[dict]:
     return matches
 
 
-def local_model_for_path(path: str) -> dict | None:
+def local_model_for_path(path: str, *, scan: bool = True) -> dict | None:
     """Resolve a local Pack model by path, without inventing a remote ID."""
-    rows = _local_model_rows_for_path(path)
+    rows = _local_model_rows_for_path(path, scan=scan)
     return rows[0] if len(rows) == 1 else None
 
 
@@ -1085,6 +1147,10 @@ def _uninstall_plan_for_models(models: list[dict]) -> dict:
     Used by both tone-level and model-level uninstall so the two entry points
     report identical blocks (active chain / unmanaged paths / preset refs).
     """
+    # Uninstall is a safety boundary: dependency checks must include Preset
+    # documents added or edited outside the process since the last catalog
+    # view. Normal Preset getters stay pure and do not perform this sync.
+    refresh_preset_catalog()
     tone_ids = sorted({int(m["tone_id"]) for m in models})
     # DB 行可能是相对（REQ-035 后）或绝对（旧行）：统一绝对化再与链比较，
     # 否则新格式库的活动链拦截会漏判（相对路径对不上链上的绝对路径）。
@@ -1814,7 +1880,7 @@ def _preset_has_unsupported_registered_asset(chain: dict) -> bool:
                         for row in rows):
                     return True
                 continue
-            if local_model_for_path(path) is not None:
+            if local_model_for_path(path, scan=False) is not None:
                 continue
             try:
                 if (Path(_to_abs_path(path)).is_file()
@@ -1949,15 +2015,12 @@ def _setting_set(key: str, value: str | None) -> None:
 
 def preset_current() -> str | None:
     """Return the active preset shared by the TUI and CLI."""
-    name = _setting_get("active_preset")
-    return name if name and preset_get(name) else None
+    return _PRESET_CATALOG.current_name()
 
 
 def preset_set_active(name: str | None) -> None:
     """Set the active preset, rejecting names that do not exist."""
-    if name is not None and not preset_get(name):
-        raise ValueError(f"Preset '{name}' not found.")
-    _setting_set("active_preset", name)
+    _PRESET_CATALOG.set_active(name)
 
 
 _PRESET_DEFAULTS = {"gain": 1.0, "master": 1.0, "quality": 1.0}
@@ -1967,42 +2030,22 @@ _PRESET_SLOT_GAIN_MAX_DB = 24.0
 
 
 def _preset_number(value: object, name: str, lower: float, upper: float) -> int | float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"Preset {name} must be a finite number")
-    if not math.isfinite(value) or not lower <= value <= upper:
-        raise ValueError(f"Preset {name} must be between {lower} and {upper}")
-    return value
+    return preset_document.number(value, name, lower, upper)
 
 
 def _preset_model_id(value: object, index: int) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"Preset Slot {index + 1:02d} model_id is invalid")
-    return value
+    return preset_document.model_id(value, index)
 
 
-def _preset_slot_gains(item: dict, index: int) -> dict[str, int | float]:
-    """Validate Slot trims and omit zero defaults from legacy-shaped presets."""
-    values: dict[str, int | float] = {}
-    for key in ("input_gain_db", "output_gain_db"):
-        value = _preset_number(
-            item.get(key, _PRESET_SLOT_GAIN_DEFAULT_DB),
-            f"Slot {index + 1:02d} {key}",
-            _PRESET_SLOT_GAIN_MIN_DB,
-            _PRESET_SLOT_GAIN_MAX_DB,
-        )
-        if value != _PRESET_SLOT_GAIN_DEFAULT_DB:
-            values[key] = value
-    return values
+def _preset_slot_gains(
+        item: dict, index: int, *, preserve_explicit_defaults: bool = False,
+) -> dict[str, int | float]:
+    return preset_document.slot_gains(
+        item, index, preserve_explicit_defaults=preserve_explicit_defaults)
 
 
 def _preset_note_value(note: str | None) -> str:
-    if note is None:
-        return ""
-    if not isinstance(note, str):
-        raise ValueError("Preset note must be a string")
-    return note if note.strip() else ""
+    return preset_document.normalize_note(note)
 
 
 def _preset_storage_path(path: object, index: int | None = None) -> str:
@@ -2014,10 +2057,12 @@ def _preset_storage_path(path: object, index: int | None = None) -> str:
     return _to_rel_path(_to_abs_path(path))
 
 
-def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
+def _preset_slot_ref(
+        item: dict, index: int, *, legacy: bool = False,
+        scan_local: bool = True) -> dict:
     if not isinstance(item, dict):
         raise ValueError(f"Preset Slot {index + 1:02d} must be an object")
-    if not legacy and "path" not in item:
+    if not legacy and "path" not in item and item.get("model_id") is None:
         raise ValueError(f"Preset Slot {index + 1:02d} must contain path")
     model_id = _preset_model_id(item.get("model_id"), index)
     gains = _preset_slot_gains(item, index)
@@ -2030,13 +2075,10 @@ def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
             return {"model_id": model_id, "path": None, **gains,
                     "candidate": _preset_storage_path(candidate),
                     "bypass": True}
-        if model_id is not None and not legacy and not item.get("bypass"):
-            raise ValueError(
-                f"Preset Slot {index + 1:02d} cannot have model_id without path")
         return {"model_id": model_id, "path": None, **gains,
                 **({"bypass": True} if item.get("bypass") else {})}
     stored_path = _preset_storage_path(raw_path, index)
-    local = local_model_for_path(raw_path)
+    local = local_model_for_path(raw_path, scan=scan_local)
     if local is not None:
         return {
             "model_id": None, **gains, "path": stored_path,
@@ -2047,8 +2089,9 @@ def _preset_slot_ref(item: dict, index: int, *, legacy: bool = False) -> dict:
     return {"model_id": model_id, **gains, "path": stored_path}
 
 
-def _legacy_slot(raw: dict, index: int, id_key: str,
-                 path_keys: tuple[str, ...]) -> dict | None:
+def _legacy_slot(
+        raw: dict, index: int, id_key: str, path_keys: tuple[str, ...], *,
+        scan_local: bool = True) -> dict | None:
     model_id = raw.get(id_key)
     raw_path = next((raw[key] for key in path_keys if key in raw), None)
     if model_id is None and raw_path is None:
@@ -2057,11 +2100,13 @@ def _legacy_slot(raw: dict, index: int, id_key: str,
     # the in-memory view when possible; an unresolved id remains load-invalid.
     if raw_path is None and model_id is not None:
         raw_path = _model_path(_preset_model_id(model_id, index))
-    return _preset_slot_ref({"model_id": model_id, "path": raw_path}, index,
-                            legacy=True)
+    return _preset_slot_ref(
+        {"model_id": model_id, "path": raw_path}, index,
+        legacy=True, scan_local=scan_local)
 
 
-def _canonical_preset_chain(raw: object) -> dict:
+def _canonical_preset_chain(
+        raw: object, *, scan_local: bool = True) -> dict:
     """Parse a stored snapshot into the in-memory canonical Preset shape.
 
     This function is deliberately read-only. It does not update SQLite, so
@@ -2082,13 +2127,15 @@ def _canonical_preset_chain(raw: object) -> dict:
         raw_slots = raw["slots"]
         if not isinstance(raw_slots, list) or len(raw_slots) > 6:
             raise ValueError("Preset slots must contain between 0 and 6 items")
-        slots = [_preset_slot_ref(item, index)
+        slots = [_preset_slot_ref(item, index, scan_local=scan_local)
                  for index, item in enumerate(raw_slots)]
     else:
         for id_key, path_keys in (
                 ("model_id", ("model_path", "model")),
                 ("ir_model_id", ("ir_path", "ir"))):
-            slot = _legacy_slot(raw, len(slots), id_key, path_keys)
+            slot = _legacy_slot(
+                raw, len(slots), id_key, path_keys,
+                scan_local=scan_local)
             if slot is not None:
                 slots.append(slot)
     return {
@@ -2103,46 +2150,11 @@ def _canonical_preset_chain(raw: object) -> dict:
 
 
 def _shareable_preset_slot(item: object, index: int) -> dict:
-    """Validate one portable Slot that contains no machine-local path."""
-    if not isinstance(item, dict):
-        raise ValueError(f"Shareable Preset Slot {index + 1:02d} must be an object")
-    if "model_id" not in item:
-        raise ValueError(
-            f"Shareable Preset Slot {index + 1:02d} must contain model_id")
-    if any(key in item for key in ("path", "candidate", "model_key", "pack_id")):
-        raise ValueError(
-            f"Shareable Preset Slot {index + 1:02d} cannot contain local paths")
-    bypass = item.get("bypass", False)
-    if not isinstance(bypass, bool):
-        raise ValueError(
-            f"Shareable Preset Slot {index + 1:02d} bypass must be boolean")
-    model_id = _preset_model_id(item.get("model_id"), index)
-    if model_id is None and bypass:
-        raise ValueError(
-            f"Shareable Preset Slot {index + 1:02d} cannot bypass an empty slot")
-    result = {"model_id": model_id, **_preset_slot_gains(item, index)}
-    if bypass:
-        result["bypass"] = True
-    return result
+    return preset_document.parse_portable_slot(item, index)
 
 
 def _shareable_preset_chain(raw: object) -> dict:
-    """Parse the path-free chain used by a shareable Preset document."""
-    if not isinstance(raw, dict):
-        raise ValueError("Shareable Preset chain must be an object")
-    raw_slots = raw.get("slots")
-    if not isinstance(raw_slots, list) or len(raw_slots) > 6:
-        raise ValueError("Shareable Preset slots must contain between 0 and 6 items")
-    return {
-        "slots": [_shareable_preset_slot(item, index)
-                  for index, item in enumerate(raw_slots)],
-        "gain": _preset_number(raw.get("gain", _PRESET_DEFAULTS["gain"]),
-                                "gain", 0, 10),
-        "master": _preset_number(raw.get("master", _PRESET_DEFAULTS["master"]),
-                                  "master", 0, 10),
-        "quality": _preset_number(
-            raw.get("quality", _PRESET_DEFAULTS["quality"]), "quality", 0, 1),
-    }
+    return preset_document.parse_portable_chain(raw)
 
 
 def _shareable_model_ids(chain: dict) -> list[int]:
@@ -2181,6 +2193,16 @@ def _shareable_preset_document(preset: dict) -> dict:
             raise ValueError(
                 f"Preset Slot {index + 1:02d} has no downloadable model reference")
         portable = {"model_id": model_id, **_preset_slot_gains(slot, index)}
+        if model_id is not None:
+            # Missing output gain in old share files means "apply NAM
+            # calibration on import". New exports must therefore spell out
+            # the effective 0 dB value so export/import cannot change tone.
+            portable["output_gain_db"] = _preset_number(
+                slot.get("output_gain_db", _PRESET_SLOT_GAIN_DEFAULT_DB),
+                f"Slot {index + 1:02d} output_gain_db",
+                _PRESET_SLOT_GAIN_MIN_DB,
+                _PRESET_SLOT_GAIN_MAX_DB,
+            )
         if slot.get("bypass"):
             portable["bypass"] = True
         slots.append(portable)
@@ -2227,276 +2249,8 @@ def _parse_shareable_preset_document(path: str | Path) -> tuple[str, str, dict]:
 
 
 def _is_shareable_preset_file(path: Path) -> bool:
-    """Identify an untracked share file without validating or importing it."""
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return False
-    return (isinstance(document, dict)
-            and document.get("kind") == SHAREABLE_PRESET_DOCUMENT_KIND)
-
-
-def _preset_row(row: sqlite3.Row) -> dict | None:
-    d = dict(row)
-    raw_json = d.pop("chain_json")
-    if d.get("note") is None:
-        d["note"] = ""
-    try:
-        d["chain"] = _canonical_preset_chain(json.loads(raw_json))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        # Keep an invalid row visible to the caller; loading/resolution will
-        # report the error without ever touching the live chain.
-        d["chain"] = None
-        d["chain_error"] = str(exc)
-    if (d["chain"] is not None
-            and _preset_has_unsupported_registered_asset(d["chain"])):
-        # A legacy preset can outlive the architecture boundary that was in
-        # place when it was created. Keep the database row for migration and
-        # auditability, but never expose its unsupported asset to the picker,
-        # detail view, or active-preset resolver.
-        return None
-    return d
-
-
-def _preset_file_key(preset_id: int) -> str:
-    return f"{_PRESET_FILE_SETTING_PREFIX}{preset_id}"
-
-
-def _preset_filename(preset_id: int, name: str) -> str:
-    return f"{preset_id}-{tone3000.slugify(name, 64)}.json"
-
-
-def _preset_file_path(preset_id: int, name: str) -> Path:
-    return Path(PRESETS_DIR) / _preset_filename(preset_id, name)
-
-
-def _preset_file_token(path: Path) -> str:
-    stat = path.stat()
-    return f"{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
-
-
-def _preset_document(row: sqlite3.Row) -> dict:
-    raw_chain = json.loads(row["chain_json"])
-    return {
-        "schema_version": 1,
-        "kind": PRESET_DOCUMENT_KIND,
-        "id": row["id"],
-        "name": row["name"],
-        "note": _preset_note_value(row["note"]),
-        "chain": _canonical_preset_chain(raw_chain),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _preset_write_row_file(conn: sqlite3.Connection, row: sqlite3.Row) -> Path:
-    path = _preset_file_path(int(row["id"]), row["name"])
-    Path(PRESETS_DIR).mkdir(parents=True, exist_ok=True)
-    prefix = f"{int(row['id'])}-"
-    for other in Path(PRESETS_DIR).glob(f"{prefix}*.json"):
-        if other != path:
-            other.unlink(missing_ok=True)
-    _write_json_atomic(path, _preset_document(row))
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (_preset_file_key(int(row["id"])),
-         json.dumps({"file": path.name, "token": _preset_file_token(path)})),
-    )
-    return path
-
-
-def _preset_write_by_id(conn: sqlite3.Connection, preset_id: int) -> Path:
-    row = conn.execute(
-        "SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()
-    if row is None:
-        raise ValueError(f"Preset id {preset_id} no longer exists.")
-    return _preset_write_row_file(conn, row)
-
-
-def _preset_tracked_files(conn: sqlite3.Connection) -> dict[int, dict]:
-    rows = conn.execute(
-        "SELECT key, value FROM settings WHERE key LIKE ?",
-        (f"{_PRESET_FILE_SETTING_PREFIX}%",),
-    ).fetchall()
-    tracked: dict[int, dict] = {}
-    for row in rows:
-        try:
-            preset_id = int(row["key"][len(_PRESET_FILE_SETTING_PREFIX):])
-            value = json.loads(row["value"])
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict) and isinstance(value.get("file"), str):
-            tracked[preset_id] = value
-    return tracked
-
-
-def _preset_parse_document(path: Path) -> tuple[str, str, dict, str | None, str | None]:
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid JSON: {exc}") from exc
-    if not isinstance(document, dict):
-        raise ValueError("document must be an object")
-    if document.get("kind") != PRESET_DOCUMENT_KIND:
-        raise ValueError(f"kind must be '{PRESET_DOCUMENT_KIND}'")
-    version = document.get("schema_version")
-    if version != 1:
-        raise ValueError("schema_version must be 1")
-    name = document.get("name")
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("name must be a non-empty string")
-    chain = _canonical_preset_chain(document.get("chain"))
-    _validate_preset_draft_references(chain)
-    note = _preset_note_value(document.get("note"))
-    created_at = document.get("created_at")
-    updated_at = document.get("updated_at")
-    if created_at is not None and not isinstance(created_at, str):
-        raise ValueError("created_at must be a string or null")
-    if updated_at is not None and not isinstance(updated_at, str):
-        raise ValueError("updated_at must be a string or null")
-    return name.strip(), note, chain, created_at, updated_at
-
-
-def _preset_reconcile_token() -> tuple:
-    """Return the local state that can make Preset reconciliation necessary."""
-    def stat_token(path: Path) -> tuple[int, int, int]:
-        try:
-            stat = path.stat()
-        except OSError:
-            return (0, 0, 0)
-        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
-
-    preset_dir = Path(PRESETS_DIR)
-    try:
-        preset_files = tuple(
-            (path.name, *stat_token(path))
-            for path in sorted(preset_dir.glob("*.json"))
-        )
-    except OSError:
-        preset_files = ()
-    return (str(Path(DB_FILE)), stat_token(Path(DB_FILE)),
-            str(preset_dir), preset_files)
-
-
-def _preset_reconcile_files() -> None:
-    """Make editable JSON Presets and the SQLite index agree.
-
-    Tracked file edits win over SQLite. Deleting a tracked file deletes its
-    row. Legacy SQLite-only rows are exported, and untracked GigBuddy JSON
-    documents are imported. Invalid files are preserved and ignored.
-    """
-    global _PRESET_SYNC_ACTIVE, _PRESET_SYNC_TOKEN
-    with _PRESET_SYNC_LOCK:
-        if _PRESET_SYNC_ACTIVE:
-            return
-        if _PRESET_SYNC_TOKEN == _preset_reconcile_token():
-            return
-        _PRESET_SYNC_ACTIVE = True
-        try:
-            Path(PRESETS_DIR).mkdir(parents=True, exist_ok=True)
-            with connect() as conn:
-                tracked = _preset_tracked_files(conn)
-                rows = conn.execute("SELECT * FROM presets ORDER BY id").fetchall()
-                rows_by_id = {int(row["id"]): row for row in rows}
-                claimed: set[Path] = set()
-
-                for preset_id, state in tracked.items():
-                    path = Path(PRESETS_DIR) / state["file"]
-                    claimed.add(path)
-                    row = rows_by_id.get(preset_id)
-                    if row is None:
-                        conn.execute("DELETE FROM settings WHERE key = ?",
-                                     (_preset_file_key(preset_id),))
-                        continue
-                    if not path.is_file():
-                        conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
-                        conn.execute("DELETE FROM settings WHERE key = ?",
-                                     (_preset_file_key(preset_id),))
-                        conn.execute(
-                            "DELETE FROM settings WHERE key='active_preset' AND value=?",
-                            (row["name"],),
-                        )
-                        rows_by_id.pop(preset_id, None)
-                        continue
-                    token = _preset_file_token(path)
-                    if token == state.get("token"):
-                        continue
-                    try:
-                        name, note, chain, created_at, _ = _preset_parse_document(path)
-                        conflict = conn.execute(
-                            "SELECT id FROM presets WHERE name = ? AND id != ?",
-                            (name, preset_id),
-                        ).fetchone()
-                        if conflict:
-                            raise ValueError(f"Preset '{name}' already exists")
-                        now = datetime.now(timezone.utc).isoformat()
-                        conn.execute(
-                            "UPDATE presets SET name=?, note=?, chain_json=?, "
-                            "created_at=COALESCE(?, created_at), updated_at=? WHERE id=?",
-                            (name, note, json.dumps(chain, ensure_ascii=False),
-                             created_at, now, preset_id),
-                        )
-                        if row["name"] != name:
-                            conn.execute(
-                                "UPDATE settings SET value=? "
-                                "WHERE key='active_preset' AND value=?",
-                                (name, row["name"]),
-                            )
-                        refreshed = conn.execute(
-                            "SELECT * FROM presets WHERE id=?", (preset_id,)).fetchone()
-                        new_path = _preset_write_row_file(conn, refreshed)
-                        claimed.discard(path)
-                        claimed.add(new_path)
-                        if new_path != path:
-                            path.unlink(missing_ok=True)
-                    except ValueError as exc:
-                        if _is_shareable_preset_file(path):
-                            continue
-                        warnings.warn(
-                            f"Ignoring invalid Preset file {path}: {exc}",
-                            RuntimeWarning, stacklevel=2)
-
-                rows = conn.execute("SELECT * FROM presets ORDER BY id").fetchall()
-                tracked = _preset_tracked_files(conn)
-                for row in rows:
-                    preset_id = int(row["id"])
-                    if preset_id not in tracked:
-                        path = _preset_write_row_file(conn, row)
-                        claimed.add(path)
-
-                for path in sorted(Path(PRESETS_DIR).glob("*.json")):
-                    if path in claimed:
-                        continue
-                    try:
-                        name, note, chain, created_at, updated_at = (
-                            _preset_parse_document(path))
-                        if conn.execute(
-                                "SELECT 1 FROM presets WHERE name=?", (name,)).fetchone():
-                            raise ValueError(f"Preset '{name}' already exists")
-                        now = datetime.now(timezone.utc).isoformat()
-                        cur = conn.execute(
-                            "INSERT INTO presets "
-                            "(name, note, chain_json, created_at, updated_at) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (name, note, json.dumps(chain, ensure_ascii=False),
-                             created_at or now, updated_at or now),
-                        )
-                        row = conn.execute(
-                            "SELECT * FROM presets WHERE id=?", (cur.lastrowid,)).fetchone()
-                        new_path = _preset_write_row_file(conn, row)
-                        if new_path != path:
-                            path.unlink(missing_ok=True)
-                    except ValueError as exc:
-                        if _is_shareable_preset_file(path):
-                            continue
-                        warnings.warn(
-                            f"Ignoring invalid Preset file {path}: {exc}",
-                            RuntimeWarning, stacklevel=2)
-                conn.commit()
-            _PRESET_SYNC_TOKEN = _preset_reconcile_token()
-        finally:
-            _PRESET_SYNC_ACTIVE = False
+    """Compatibility Adapter for share-file classification."""
+    return preset_catalog_module.is_shareable_preset_file(path)
 
 
 def _live_preset_chain(cfg: dict) -> dict:
@@ -2568,36 +2322,34 @@ def _preset_chain_from_live(cfg: dict) -> dict:
     })
 
 
+def _ensure_preset_mutable(row: sqlite3.Row | dict | None) -> None:
+    """Compatibility Adapter for editable ownership checks."""
+    preset_catalog_module.ensure_preset_mutable(row)
+
+
+def refresh_preset_catalog() -> None:
+    """Synchronize repository and editable Presets into the SQLite index.
+
+    This is the explicit write seam for callers that need a current catalog.
+    The ``preset_get*`` and ``preset_list`` getters intentionally remain pure
+    SQLite reads so their names do not hide file moves or database writes.
+    """
+    _PRESET_CATALOG.synchronize(preset_catalog_module.RefreshCatalog())
+
+
 def preset_save(name: str, note: str | None = None, *, set_active: bool = True) -> dict:
     """Snapshot the current live chain as a canonical ordered Slot Preset."""
-    _preset_reconcile_files()
     name = name.strip()
     if not name:
         raise ValueError("Preset name cannot be empty.")
     chain = _preset_chain_from_live(chain_get())
-    now = datetime.now(timezone.utc).isoformat()
-    with connect() as conn:
-        existing = conn.execute(
-            "SELECT note FROM presets WHERE name = ?", (name,)).fetchone()
-        stored_note = (_preset_note_value(existing["note"])
-                       if note is None and existing else _preset_note_value(note))
-        cur = conn.execute(
-            "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
-            "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
-            (name, stored_note, json.dumps(chain, ensure_ascii=False), now, now))
-        preset_id = int(conn.execute(
-            "SELECT id FROM presets WHERE name=?", (name,)).fetchone()["id"])
-        if set_active:
-            conn.execute(
-                "INSERT INTO settings (key, value) VALUES ('active_preset', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (name,),
-            )
-        _preset_write_by_id(conn, preset_id)
-        conn.commit()
-    return preset_get(name)
+    return _PRESET_CATALOG.upsert_editable(
+        name,
+        chain,
+        note,
+        set_active=set_active,
+        preserve_existing_note=True,
+    )
 
 
 def preset_export(name: str, path: str | Path | None = None) -> Path:
@@ -2689,11 +2441,20 @@ def _confirm_shareable_preset_download(
 
 
 def _local_chain_from_shareable(chain: dict) -> dict:
-    """Resolve a validated shareable chain to the normal local Preset shape."""
+    """Resolve a validated shareable chain to the normal local Preset shape.
+
+    Shareable documents written before NAM calibration was introduced carry
+    no ``output_gain_db``; NAM Slots are filled with the model's recommended
+    output trim at import time so every imported Preset is calibrated.
+    """
     slots = []
     for index, slot in enumerate(chain["slots"]):
         model_id = slot.get("model_id")
-        result = {"model_id": model_id, **_preset_slot_gains(slot, index)}
+        result = {
+            "model_id": model_id,
+            **_preset_slot_gains(
+                slot, index, preserve_explicit_defaults=True),
+        }
         if model_id is None:
             result["path"] = None
         elif slot.get("bypass"):
@@ -2705,6 +2466,10 @@ def _local_chain_from_shareable(chain: dict) -> dict:
                 raise ValueError(
                     f"Preset Slot {index + 1:02d} model {model_id} is not installed")
             result["path"] = _preset_storage_path(path, index)
+            if "output_gain_db" not in slot:
+                calibration = _nam_recommended_output_gain_db(path)
+                if calibration is not None:
+                    result["output_gain_db"] = calibration
         slots.append(result)
     return _canonical_preset_chain({
         "slots": slots,
@@ -2723,26 +2488,16 @@ def preset_import(path: str | Path, *, name: str | None = None,
     preset_name = source_name if name is None else name.strip()
     if not preset_name:
         raise ValueError("Preset name cannot be empty.")
+    # Reject repository-owned names before resolving or downloading remote
+    # models. The check is repeated in the write transaction below because a
+    # second process can still register the catalog while a download runs.
+    _PRESET_CATALOG.assert_editable_name(preset_name)
     model_ids = _shareable_model_ids(shareable_chain)
     _download_shareable_models(
         model_ids, quiet=quiet, confirm_download=confirm_download)
     chain = _local_chain_from_shareable(shareable_chain)
-    now = datetime.now(timezone.utc).isoformat()
-    _preset_reconcile_files()
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
-            "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
-            (preset_name, note, json.dumps(chain, ensure_ascii=False), now, now),
-        )
-        preset_id = int(conn.execute(
-            "SELECT id FROM presets WHERE name = ?", (preset_name,)
-        ).fetchone()["id"])
-        _preset_write_by_id(conn, preset_id)
-        conn.commit()
-    imported = preset_get(preset_name)
+    imported = _PRESET_CATALOG.upsert_editable(
+        preset_name, chain, note, preserve_existing_note=False)
     if imported is None:
         raise ValueError(f"Preset '{preset_name}' could not be imported")
     if load:
@@ -2753,22 +2508,14 @@ def preset_import(path: str | Path, *, name: str | None = None,
 
 def preset_get(name: str) -> dict | None:
     """Return one Preset with its chain parsed to the in-memory Slot shape."""
-    _preset_reconcile_files()
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM presets WHERE name = ?", (name,)).fetchone()
-        return _preset_row(row) if row else None
+    result = _PRESET_CATALOG.read(preset_catalog_module.ByName(name))
+    return result if isinstance(result, dict) else None
 
 
 def preset_get_by_id(preset_id: int) -> dict | None:
     """Return one Preset by its immutable SQLite identity."""
-    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
-        raise ValueError("preset id must be an integer")
-    _preset_reconcile_files()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM presets WHERE id = ?", (preset_id,)
-        ).fetchone()
-        return _preset_row(row) if row else None
+    result = _PRESET_CATALOG.read(preset_catalog_module.ById(preset_id))
+    return result if isinstance(result, dict) else None
 
 
 def _preset_id_for_name(name: str) -> int:
@@ -2788,33 +2535,16 @@ def preset_list() -> list[dict]:
     Structurally invalid rows remain inspectable, while rows referencing a
     known unsupported library model stay hidden from product-facing views.
     """
-    _preset_reconcile_files()
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM presets ORDER BY updated_at DESC").fetchall()
-        return [preset for row in rows
-                if (preset := _preset_row(row)) is not None]
+    result = _PRESET_CATALOG.read(preset_catalog_module.AllPresets())
+    return result if isinstance(result, list) else []
 
 
 def preset_delete(name: str) -> bool:
     """Delete one preset; False if it did not exist."""
-    _preset_reconcile_files()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT id, name FROM presets WHERE name = ?", (name,)).fetchone()
-        cur = conn.execute("DELETE FROM presets WHERE name = ?", (name,))
-        active = conn.execute(
-            "SELECT value FROM settings WHERE key='active_preset'").fetchone()
-        if cur.rowcount and active and active["value"] == name:
-            conn.execute("DELETE FROM settings WHERE key='active_preset'")
-        if row:
-            conn.execute("DELETE FROM settings WHERE key=?",
-                         (_preset_file_key(int(row["id"])),))
-        conn.commit()
-        if row:
-            for path in Path(PRESETS_DIR).glob(f"{int(row['id'])}-*.json"):
-                path.unlink(missing_ok=True)
-        return cur.rowcount > 0
+    deleted = _PRESET_CATALOG.delete_editable_by_name(name)
+    if deleted:
+        refresh_preset_catalog()
+    return deleted
 
 
 def preset_delete_by_id(preset_id: int) -> dict[str, object]:
@@ -2824,32 +2554,10 @@ def preset_delete_by_id(preset_id: int) -> dict[str, object]:
     deleting by that id prevents an external delete/recreate race from
     deleting a different preset that happens to reuse the old name.
     """
-    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
-        raise ValueError("preset id must be an integer")
-    _preset_reconcile_files()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT id, name FROM presets WHERE id = ?", (preset_id,)
-        ).fetchone()
-        if row is None:
-            return {"id": preset_id, "name": None, "deleted": False,
-                    "stale": True}
-        name = row["name"]
-        cur = conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
-        active = conn.execute(
-            "SELECT value FROM settings WHERE key='active_preset'"
-        ).fetchone()
-        if cur.rowcount and active and active["value"] == name:
-            conn.execute("DELETE FROM settings WHERE key='active_preset'")
-        if cur.rowcount:
-            conn.execute("DELETE FROM settings WHERE key=?",
-                         (_preset_file_key(preset_id),))
-        conn.commit()
-        if cur.rowcount:
-            for path in Path(PRESETS_DIR).glob(f"{preset_id}-*.json"):
-                path.unlink(missing_ok=True)
-        return {"id": preset_id, "name": name, "deleted": cur.rowcount > 0,
-                "stale": cur.rowcount == 0}
+    result = _PRESET_CATALOG.delete_editable_by_id(preset_id)
+    if result["deleted"]:
+        refresh_preset_catalog()
+    return result
 
 
 def preset_rename(old_name: str, new_name: str) -> dict:
@@ -2859,33 +2567,7 @@ def preset_rename(old_name: str, new_name: str) -> dict:
 
 def preset_rename_by_id(preset_id: int, new_name: str) -> dict:
     """Rename exactly the captured Preset row and keep active state attached."""
-    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
-        raise ValueError("preset id must be an integer")
-    _preset_reconcile_files()
-    new_name = new_name.strip()
-    if not new_name:
-        raise ValueError("Preset name cannot be empty.")
-    now = datetime.now(timezone.utc).isoformat()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT name FROM presets WHERE id = ?", (preset_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"Preset id {preset_id} no longer exists.")
-        old_name = row["name"]
-        if old_name != new_name and conn.execute(
-                "SELECT 1 FROM presets WHERE name = ?", (new_name,)).fetchone():
-            raise ValueError(f"Preset '{new_name}' already exists.")
-        conn.execute(
-            "UPDATE presets SET name = ?, updated_at = ? WHERE id = ?",
-            (new_name, now, preset_id),
-        )
-        conn.execute(
-            "UPDATE settings SET value = ? WHERE key = 'active_preset' AND value = ?",
-            (new_name, old_name),
-        )
-        _preset_write_by_id(conn, preset_id)
-        conn.commit()
-    return preset_get_by_id(preset_id)
+    return _PRESET_CATALOG.rename_editable(preset_id, new_name)
 
 
 def preset_update_note(name: str, note: str | None) -> dict:
@@ -2895,21 +2577,7 @@ def preset_update_note(name: str, note: str | None) -> dict:
 
 def preset_update_note_by_id(preset_id: int, note: str | None) -> dict:
     """Replace one captured Preset note without changing its chain snapshot."""
-    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
-        raise ValueError("preset id must be an integer")
-    _preset_reconcile_files()
-    now = datetime.now(timezone.utc).isoformat()
-    note = _preset_note_value(note)
-    with connect() as conn:
-        cur = conn.execute(
-            "UPDATE presets SET note = ?, updated_at = ? WHERE id = ?",
-            (note, now, preset_id),
-        )
-        if not cur.rowcount:
-            raise ValueError(f"Preset id {preset_id} no longer exists.")
-        _preset_write_by_id(conn, preset_id)
-        conn.commit()
-    return preset_get_by_id(preset_id)
+    return _PRESET_CATALOG.update_editable_note(preset_id, note)
 
 
 def preset_update_draft(name: str, chain: dict, note: str | None = None,
@@ -2921,7 +2589,8 @@ def preset_update_draft(name: str, chain: dict, note: str | None = None,
         expected_updated_at=expected_updated_at)
 
 
-def _validate_preset_draft_references(chain: dict) -> None:
+def _validate_preset_draft_references(
+        chain: dict, *, scan_local: bool = True) -> None:
     """Reject unsupported or unregistered assets before storing a draft.
 
     A missing file may remain in a draft so the user can repair it later, but
@@ -2958,7 +2627,7 @@ def _validate_preset_draft_references(chain: dict) -> None:
                         f"Preset Slot {index + 1:02d} {field} does not match "
                         f"model_id {model_id}: {path}")
                 continue
-            local = local_model_for_path(path)
+            local = local_model_for_path(path, scan=scan_local)
             if local is not None:
                 model_key = slot.get("model_key")
                 if model_key is not None and model_key != local.get("model_key"):
@@ -2985,35 +2654,14 @@ def preset_update_draft_by_id(
     resolving files is intentionally deferred to ``preset_load`` so an edit
     can retain a visible missing reference for later repair.
     """
-    if isinstance(preset_id, bool) or not isinstance(preset_id, int):
-        raise ValueError("preset id must be an integer")
-    _preset_reconcile_files()
     canonical = _canonical_preset_chain(chain)
     _validate_preset_draft_references(canonical)
-    stored_note = _preset_note_value(note)
-    now = datetime.now(timezone.utc).isoformat()
-    with connect() as conn:
-        params = [stored_note, json.dumps(canonical, ensure_ascii=False), now,
-                  preset_id]
-        where = "id = ?"
-        if expected_updated_at is not _PRESET_UPDATED_UNSET:
-            where += " AND updated_at IS ?"
-            params.append(expected_updated_at)
-        cur = conn.execute(
-            "UPDATE presets SET note = ?, chain_json = ?, updated_at = ? "
-            f"WHERE {where}", params)
-        if not cur.rowcount:
-            if expected_updated_at is not _PRESET_UPDATED_UNSET:
-                exists = conn.execute(
-                    "SELECT 1 FROM presets WHERE id = ?", (preset_id,)
-                ).fetchone()
-                if exists:
-                    raise PresetConflictError(
-                        "preset changed externally; reopen it before saving")
-            raise ValueError(f"Preset id {preset_id} no longer exists.")
-        _preset_write_by_id(conn, preset_id)
-        conn.commit()
-    return preset_get_by_id(preset_id)
+    return _PRESET_CATALOG.update_editable_draft(
+        preset_id,
+        canonical,
+        note,
+        expected_updated_at=expected_updated_at,
+    )
 
 
 def _validate_preset_file(path: str, index: int) -> str:
@@ -3242,6 +2890,23 @@ def preset_load_by_id(preset_id: int) -> dict | None:
     p = preset_get_by_id(preset_id)
     if not p:
         raise ValueError(f"Preset id {preset_id} no longer exists.")
+    if (preset_catalog_module.preset_owned_by_bundle(p)
+            and p.get("availability") != "READY"):
+        # CLI loads are synchronous by design: a selected built-in Preset is
+        # the explicit user action that authorizes retrying its missing models.
+        source_key = p.get("source_key")
+        sync_bundled_presets(
+            quiet=True,
+            download=True,
+            preset_keys=([source_key]
+                         if isinstance(source_key, str) and source_key
+                         else None),
+            preset_names=(None if isinstance(source_key, str) and source_key
+                          else [p["name"]]),
+        )
+        p = preset_get_by_id(preset_id)
+        if not p:
+            raise ValueError(f"Preset id {preset_id} no longer exists.")
     resolved = _resolved_preset_chain(p)
     # Resolve every Slot before constructing or writing the replacement. A
     # missing later Slot must leave the current live file untouched.
@@ -3266,145 +2931,6 @@ def preset_load_by_id(preset_id: int) -> dict | None:
     return chain_get()
 
 
-# Built-in catalog, resolved from exact local model ids at seed time.
-# (name, note, amp_model_id, ir_model_id|None)
-# Built-in catalog, resolved from exact local model ids at seed time.
-# (name, note, model_ids) — model_ids follow the chain signal order:
-# [drive/fuzz pedal, amp, cabinet IR]; a one- or two-slot chain is fine.
-# Every slot pair was verified against TONE3000: model ids, gain settings,
-# and popularity (downloads/favorites, verified authors preferred).
-SEED_CHAINS = [
-    ("fender-super-reverb-ts9",
-     "Fender Super Reverb 1977 (TONE3000 official, 140K downloads) driven by an "
-     "Ibanez TS9 Tube Screamer at Drive 7 / Tone 7 / Level 7 - massive clean "
-     "headroom pushed into a tight SRV-style overdrive.",
-     [(381611, False), (379720, False)]),
-    ("fender-deluxe-reverb-morning-glory",
-     "Fender Deluxe Reverb '65 Reissue (69K downloads) with a JHS Morning Glory "
-     "v3 at Drive 2 / Tone 8 - transparent blackface sparkle pushed into "
-     "edge-of-breakup.",
-     [(419178, False), (383453, False)]),
-    ("fender-twin-reverb-bd2",
-     "Fender '65 Twin Reverb with Celestion G12-65 (17K downloads) and a Boss "
-     "Blues Driver BD-2 at Gain 900 / Tone 900 / Volume 1200 - big clean amp "
-     "with 60s blues drive.",
-     [(379749, False), (381338, False)]),
-    ("fender-tweed-deluxe-5e3",
-     "1960 Fender Tweed Deluxe 5E3 (official) - narrow-panel 1x12 combo, "
-     "cranked vintage compression and overdrive, no pedal needed.",
-     [(383783, False)]),
-    ("fender-deluxe-reverb-klon",
-     "Fender '65 Deluxe Reverb Reissue boosted with a J. Rockett Archer "
-     "(Klon-style) - blackface sparkle into singing sustain at the edge of "
-     "breakup.",
-     [(382101, False)]),
-    ("vox-ac30-ef86-ts808",
-     "Vox AC30/4 1961 Fawn EF86 (Amalgam Audio, verified, 30K downloads) with "
-     "an Ibanez TS808 at Hot / Level 6 / OD 6 / Tone 1 - EF86 chime pushed "
-     "into classic British overdrive.",
-     [(493737, False), (383682, False)]),
-    ("marshall-jcm800-klon",
-     "Marshall JCM800 with a Klon Centaur and a Marshall 1960BV cabinet "
-     "(SM57 x2) - Klon-driven high-gain rock in one capture.",
-     [(381187, False)]),
-    ("marshall-jcm800-ds1",
-     "Marshall JCM800 2203 Modified (2dor, verified, 38K downloads) with a "
-     "Boss DS-1 at Tone 5 / Volume 10 / Gain 7 - the classic 80s "
-     "distortion-into-marshall combination.",
-     [(381655, False), (567079, False)]),
-    ("marshall-plexi-ts9",
-     "Marshall JMP-50 Lead 1969 Plexi (Amalgam Audio, verified, 33K downloads) "
-     "with an Ibanez TS9 at Drive 0 / Tone 6 / Level 6 used as a clean boost - "
-     "golden-era Plexi crunch.",
-     [(381614, False), (418470, False)]),
-    ("marshall-1959bja-greenback",
-     "Marshall 1959BJA high input stage 4 into a Marshall 1960TV Greenback "
-     "4x12 (M201) - Green Day / Billie Joe territory.",
-     [(670781, False), (656897, False)]),
-    ("frusciante-big-muff-major",
-     "John Frusciante (RHCP) chain: Electro-Harmonix Op-Amp Big Muff at "
-     "Volume 6 / Tone 2 / Sustain 5 into a Marshall Major 200 (1982B cabinet) - "
-     "fuzz poured into a 200W Plexi.",
-     [(413497, False), (383442, False)]),
-    ("hendrix-fuzz-face-plexi",
-     "Jimi Hendrix chain: Dunlop Hendrix Fuzz Face (mid cut) into a Marshall "
-     "JMP-50 1969 Plexi - the 1969 Woodstock fuzz-into-plexi sound.",
-     [(420077, False), (418470, False)]),
-    ("page-tonebender-plexi",
-     "Led Zeppelin chain: Boss TB-2w Tone Bender at 01-9V into a Marshall "
-     "JMP-50 1969 Plexi - Page-style fuzz lead.",
-     [(432892, False), (418470, False)]),
-    ("ampeg-svt-cl",
-     "Ampeg SVT-CL 300W all-tube with a 6x10 cabinet (TONE3000 official, "
-     "41K downloads) - harmonically rich classic rock bass.",
-     [(379984, False)]),
-    ("ampeg-svt-cl-preamp",
-     "Ampeg SVT-CL bass preamp capture (Deathblossom Audio, verified) into an "
-     "Ampeg SVT 8x10 cabinet (SM57) - studio-grade preamp front end with the "
-     "classic all-tube bass cabinet tone.",
-     [(382790, False), (80912, False)]),
-    ("ampeg-b15-fliptop",
-     "1960s Ampeg B-15 Fliptop (TONE3000 official) - Motown vintage bass "
-     "combo tone.",
-     [(379842, False)]),
-    ("gk-rb800",
-     "Gallien-Krueger RB800 at G5.0 (Arlington Audio, 7.4K downloads) - "
-     "Flea-style transistor bass punch with the pack's Mid Contour tone-switch "
-     "IR (bypassed by default - shaping, not a cabinet IR; activate for the "
-     "switchable-cab character).",
-     [(419198, False), (72421, True)]),
-    ("hartke-lh1000",
-     "Hartke LH1000 rack bass head into a Gallien-Krueger 4x10 cabinet "
-     "(Studio Amp Captures, 11K downloads) - modern rock bass.",
-     [(413046, False)]),
-    ("darkglass-b7k-ultra",
-     "Darkglass Microtubes B7K Ultra (official Darkglass account) into an "
-     "Aguilar DB751 and DG412ES cabinet - light to medium modern bass drive.",
-     [(413366, False)]),
-    ("darkglass-alpha-omega",
-     "Darkglass Alpha Omega fuzz channel (official Darkglass account) into an "
-     "Aguilar DB751 and DG412ES cabinet (SM7B) - heavy modern metal bass.",
-     [(418277, False)]),
-]
-
-# The catalog stores model IDs so a preset remains tied to one exact capture.
-# Bootstrap still needs the parent tone ID in order to download a missing
-# model. These mappings were resolved from TONE3000's public ``models`` table
-# and are deliberately kept separate from the canonical preset payload.
-STARTER_MODEL_TONES = {
-    381611: 36827,   # Ibanez TS9
-    379720: 19,      # Fender Super Reverb 1977
-    419178: 2805,    # JHS Morning Glory v3
-    383453: 51649,   # Fender Deluxe Reverb '65
-    379749: 12505,   # Boss BD-2
-    381338: 35497,   # Fender '65 Twin + Celestion
-    383783: 54580,   # Fender Tweed Deluxe 5E3
-    382101: 43185,   # Fender DR + Klon
-    493737: 30104,   # Ibanez TS808
-    383682: 53601,   # Vox AC30/4 EF86
-    381187: 33296,   # Marshall JCM800 + Klon
-    381655: 38560,   # Boss DS-1
-    567079: 44209,   # Marshall JCM800 2203 Modified
-    381614: 36827,   # Ibanez TS9 (clean boost)
-    418470: 65578,   # Marshall JMP-50 1969 Plexi
-    670781: 76884,   # Marshall 1959BJA
-    656897: 75087,   # Marshall 1960TV Greenback cab
-    413497: 37818,   # EHX Op-Amp Big Muff
-    383442: 51310,   # Marshall Major 200
-    420077: 1531,    # Dunlop Hendrix Fuzz Face
-    432892: 2316,    # Boss TB-2w Tone Bender
-    379984: 28202,   # Ampeg SVT-CL
-    382790: 45809,   # Ampeg SVT-CL Preamp
-    80912: 1708,     # Ampeg SVT 8x10 cabinet IR (SM57)
-    379842: 26828,   # Ampeg B-15 Fliptop
-    419198: 2694,    # GK RB800
-    72421: 64815,    # GK RB800 Mid Contour cabinet IR
-    413046: 5867,    # Hartke LH1000
-    413366: 27698,   # Darkglass B7K Ultra
-    418277: 27697,   # Darkglass Alpha Omega
-}
-
-
 def preset_group(name: str) -> tuple[str, str]:
     """Derive TUI grouping from the catalog name prefix; no schema fields."""
     parts = name.split("-", 2)
@@ -3422,75 +2948,43 @@ def preset_group(name: str) -> tuple[str, str]:
     return "Custom", "Other"
 
 
-def bootstrap_starter_presets(*, quiet: bool = False,
-                              replace: bool = False) -> dict[str, object]:
-    """Download the exact starter models required by ``SEED_CHAINS``.
+def _installed_model_ids(model_ids: Sequence[int]) -> set[int]:
+    """Return locally verified supported model IDs with one database query."""
+    unique = sorted({int(model_id) for model_id in model_ids})
+    if not unique:
+        return set()
+    marks = ",".join("?" for _ in unique)
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT m.*, t.gear, t.format, t.platform "
+            "FROM models m JOIN tones t ON t.id = m.tone_id "
+            f"WHERE m.id IN ({marks})", unique).fetchall()
+    installed: set[int] = set()
+    for row in rows:
+        model = _row_to_dict(row)
+        tone = {key: model.get(key)
+                for key in ("gear", "format", "platform")}
+        if (_local_file_exists(model.get("local_path"))
+                and tone3000.is_supported_model(model, tone)):
+            installed.add(int(row["id"]))
+    return installed
 
-    ``preset_seed`` intentionally remains local-only and idempotent. This
-    boundary performs the network work needed by a fresh checkout, then seeds
-    only models that are present and valid. A failed download is reported in
-    the result instead of creating a preset that cannot be loaded.
-    """
-    grouped: dict[int, list[int]] = {}
-    unresolved: list[int] = []
-    for _name, _note, model_ids in SEED_CHAINS:
-        for entry in model_ids:
-            # SEED_CHAINS 存 (model_id, is_ir) 元组；is_ir 标记仅用于 preset
-            # 槽位类型，下载按 model id 归组即可。
-            model_id = entry[0] if isinstance(entry, tuple) else entry
-            tone_id = STARTER_MODEL_TONES.get(model_id)
-            if tone_id is None:
-                unresolved.append(model_id)
-                continue
-            grouped.setdefault(tone_id, [])
-            if model_id not in grouped[tone_id]:
-                grouped[tone_id].append(model_id)
 
-    imported: list[int] = []
-    failed: list[dict[str, object]] = []
-    for tone_id, model_ids in grouped.items():
-        missing = [
-            model_id for model_id in model_ids
-            if not _installed_model_path(model_id)
-        ]
-        if not missing:
-            continue
-        try:
-            imported_tone = import_tone(
-                tone_id, quiet=quiet, model_ids=missing)
-        except Exception as exc:
-            failed.append({"tone_id": tone_id, "model_ids": missing,
-                           "error": str(exc)})
-            continue
-        if imported_tone is None:
-            failed.append({"tone_id": tone_id, "model_ids": missing,
-                           "error": "tone not found"})
-            continue
-        unresolved_files = [
-            model_id for model_id in missing
-            if not _installed_model_path(model_id)
-        ]
-        if unresolved_files:
-            failed.append({"tone_id": tone_id, "model_ids": unresolved_files,
-                           "error": "requested model was not downloaded"})
-        else:
-            imported.append(tone_id)
-
-    written = preset_seed(replace=replace, quiet=quiet)
-    result = {
-        "imported_tone_ids": imported,
-        "presets": written,
-        "failed": failed,
-        "unresolved_model_ids": sorted(set(unresolved)),
-    }
-    if not quiet:
-        print(f"Starter assets: {len(imported)} tone(s), "
-              f"{written}/{len(SEED_CHAINS)} preset(s)")
-        if failed:
-            print(f"Starter downloads failed: {len(failed)}")
-        if unresolved:
-            print(f"Unknown starter model IDs: {sorted(set(unresolved))}")
-    return result
+def sync_bundled_presets(
+        *, quiet: bool = False, download: bool = True,
+        preset_names: Sequence[str] | None = None,
+        preset_keys: Sequence[str] | None = None,
+        mark_preparing: bool = False) -> dict[str, object]:
+    """Compatibility adapter for the explicit Preset Catalog interface."""
+    target = preset_catalog_module.BundleTarget.from_sequences(
+        preset_names, preset_keys)
+    if download:
+        command = preset_catalog_module.PrepareCatalog(target, quiet=quiet)
+    elif mark_preparing:
+        command = preset_catalog_module.AnnouncePreparation(target)
+    else:
+        command = preset_catalog_module.IndexCatalog(target)
+    return _PRESET_CATALOG.synchronize(command).as_legacy_dict()
 
 
 def _first_local_model(tone_id: int, ir: bool = False) -> int | None:
@@ -3621,64 +3115,46 @@ def mark_download_state(hits: list[dict]) -> list[dict]:
     return hits
 
 
-def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
-    """Create the built-in recommendation presets from the local library.
+def _nam_recommended_output_gain_db(path: str) -> float | None:
+    """Return the NAM-recommended output trim (dB) for one local model file.
 
-    Chains whose model slots are not all in the library are skipped with a
-    warning (never fails the rest). Returns the number of presets written.
+    Mirrors the realtime engine's ``GetRecommendedOutputDBAdjustment()``:
+    ``-18 - metadata.loudness`` dB, bounded to the protocol's [-24, 24]
+    range and rounded to two decimals. Returns None for IR files or files
+    without loudness metadata, so the Slot keeps the 0 dB default.
     """
-    _preset_reconcile_files()
-    if replace:
-        with connect() as conn:
-            conn.execute("DELETE FROM presets")
-            conn.execute("DELETE FROM settings WHERE key = 'active_preset'")
-            conn.execute(
-                "DELETE FROM settings WHERE key LIKE ?",
-                (f"{_PRESET_FILE_SETTING_PREFIX}%",),
-            )
-            conn.commit()
-        for path in Path(PRESETS_DIR).glob("*.json"):
-            path.unlink(missing_ok=True)
-    made = 0
-    for name, note, model_slots in SEED_CHAINS:
-        slots = []
-        for model_id, bypass in model_slots:
-            if bypass:
-                # 可选/塑形类 IR：默认 bypass（path=None，引擎跳过），
-                # 模型引用保留在 preset 里，激活时按 model_id 解析。
-                slots.append({"model_id": model_id, "path": None,
-                              "bypass": True})
-                continue
-            model_path = _installed_model_path(model_id)
-            if not model_path:
-                if not quiet:
-                    print(f"[preset seed] skipped {name}: model {model_id} is not available locally")
-                break
-            slots.append({"model_id": model_id,
-                          "path": _preset_storage_path(model_path)})
-        else:
-            chain = {
-                "slots": slots,
-                "gain": 1.0, "master": 1.0, "quality": 1.0,
-            }
-            chain = _canonical_preset_chain(chain)
-            now = datetime.now(timezone.utc).isoformat()
-            with connect() as conn:
-                cur = conn.execute(
-                    "INSERT INTO presets (name, note, chain_json, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(name) DO UPDATE SET note=excluded.note, "
-                    "chain_json=excluded.chain_json, updated_at=excluded.updated_at",
-                    (name, note, json.dumps(chain, ensure_ascii=False), now, now))
-                preset_id = int(conn.execute(
-                    "SELECT id FROM presets WHERE name=?", (name,)
-                ).fetchone()["id"])
-                _preset_write_by_id(conn, preset_id)
-                conn.commit()
-            made += 1
-            if not quiet:
-                print(f"[preset seed] {name}: {len(model_slots)} slot(s)")
-    return made
+    if not path or Path(path).suffix.lower() != ".nam":
+        return None
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    metadata = document.get("metadata") if isinstance(document, dict) else None
+    loudness = metadata.get("loudness") if isinstance(metadata, dict) else None
+    if not isinstance(loudness, (int, float)):
+        return None
+    recommendation = -18.0 - float(loudness)
+    recommendation = max(_PRESET_SLOT_GAIN_MIN_DB,
+                         min(_PRESET_SLOT_GAIN_MAX_DB, recommendation))
+    return round(recommendation, 2)
+
+
+def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
+    """Compatibility alias for local-only built-in Catalog registration."""
+    del replace
+    report = sync_bundled_presets(quiet=quiet, download=False)
+    return int(report["total"])
+
+
+def _print_bundled_preset_failures(report: dict[str, object]) -> None:
+    """Name failed built-in Presets in CLI diagnostics."""
+    failed_presets = report.get("failed_presets")
+    if isinstance(failed_presets, (list, tuple)) and failed_presets:
+        print(
+            f"Unavailable built-in Presets ({len(failed_presets)}): "
+            + ", ".join(str(name) for name in failed_presets),
+            file=sys.stderr,
+        )
 
 
 # ---- CLI -----------------------------------------------------------------
@@ -3833,15 +3309,15 @@ def main(argv: list[str] | None = None) -> int:
     pd.add_argument("name")
     pseed = psub.add_parser(
         "seed",
-        help="download starter models and create the built-in preset catalog",
+        help="register the built-in Preset catalog (optionally prepare models)",
     )
     pseed.add_argument("--replace", action="store_true",
-                       help="delete every existing preset before creating the catalog")
+                       help="deprecated compatibility flag; user Presets are preserved")
     pseed.add_argument("--local-only", action="store_true",
-                       help="create presets only from already-downloaded models")
+                       help="register only; do not download missing models")
     psub.add_parser(
         "bootstrap",
-        help="download starter models and create the built-in preset catalog",
+        help="download missing models for all built-in Presets",
     )
 
     args = p.parse_args(argv)
@@ -3912,6 +3388,7 @@ def main(argv: list[str] | None = None) -> int:
             chain_set(cfg)
             print(f"Chain written to {CHAIN_FILE} (engine hot-swaps within ~0.3s).")
     elif args.cmd == "preset":
+        refresh_preset_catalog()
         if args.preset_cmd == "list":
             presets = preset_list()
             if args.json:
@@ -3922,7 +3399,8 @@ def main(argv: list[str] | None = None) -> int:
                     ch = p["chain"] or {}
                     marker = ">" if p["name"] == active else " "
                     dirty = " *" if p["name"] == active and preset_is_dirty(active) else ""
-                    print(f"{marker} {p['name']:<28}{dirty} | slots "
+                    state = p.get("availability") or "USER"
+                    print(f"{marker} {p['name']:<28}{dirty} | {state:<11} | slots "
                           f"{_preset_slot_summary(ch)} | "
                           f"gain {ch.get('gain')} master {ch.get('master')} "
                           f"quality {ch.get('quality', 1.0)}"
@@ -3930,7 +3408,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("No presets yet — `gigbuddy preset save <name>` or `gigbuddy preset seed`.")
         elif args.preset_cmd == "save":
-            p = preset_save(args.name, args.note)
+            try:
+                p = preset_save(args.name, args.note)
+            except (OSError, ValueError) as exc:
+                print(f"Cannot save Preset: {exc}", file=sys.stderr)
+                return 1
             print(f"Preset '{args.name}' saved"
                   + (f" ({p.get('note')})" if p.get("note") else "")
                   + f" — load with: gigbuddy preset load {args.name}")
@@ -4005,29 +3487,37 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Preset '{args.name}' note {'updated' if args.note else 'cleared'}.")
         elif args.preset_cmd == "delete":
-            if preset_delete(args.name):
+            try:
+                deleted = preset_delete(args.name)
+            except (OSError, ValueError) as exc:
+                print(f"Cannot delete Preset: {exc}", file=sys.stderr)
+                return 1
+            if deleted:
                 print(f"Preset '{args.name}' deleted.")
             else:
                 print(f"Preset '{args.name}' not found.")
                 return 1
         elif args.preset_cmd == "seed":
-            if args.local_only:
-                n = preset_seed(replace=args.replace)
-                print(f"Seeded {n}/{len(SEED_CHAINS)} presets.")
-            else:
-                result = bootstrap_starter_presets(replace=args.replace)
-                failed = result["failed"]
-                print(f"Seeded {result['presets']}/{len(SEED_CHAINS)} presets.")
-                if failed:
-                    print("Some starter assets could not be downloaded; "
-                          "run `gigbuddy preset seed` again to retry.",
-                          file=sys.stderr)
-                    return 1
+            if args.replace:
+                print(
+                    "Warning: --replace is deprecated; user Presets are preserved.",
+                    file=sys.stderr,
+                )
+            result = sync_bundled_presets(
+                quiet=False, download=not args.local_only)
+            print(f"Built-in Presets: {result['ready']}/{result['total']} ready.")
+            if result["failed"]:
+                _print_bundled_preset_failures(result)
+                print("Some built-in models could not be downloaded; "
+                      "load a Preset or run `gigbuddy preset bootstrap` "
+                      "to retry.", file=sys.stderr)
+                return 1
         elif args.preset_cmd == "bootstrap":
-            result = bootstrap_starter_presets()
-            failed = result["failed"]
-            if failed:
-                print("Some starter assets could not be downloaded; "
+            result = sync_bundled_presets(download=True)
+            print(f"Built-in Presets: {result['ready']}/{result['total']} ready.")
+            if result["failed"]:
+                _print_bundled_preset_failures(result)
+                print("Some built-in models could not be downloaded; "
                       "run `gigbuddy preset bootstrap` again to retry.",
                       file=sys.stderr)
                 return 1

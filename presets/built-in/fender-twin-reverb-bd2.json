@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "fender-twin-reverb-bd2",
+  "name": "fender-twin-reverb-bd2",
+  "note": "Fender '65 Twin Reverb with Celestion G12-65 (17K downloads) and a Boss Blues Driver BD-2 at Gain 900 / Tone 900 / Volume 1200 - big clean amp with 60s blues drive.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -1.21,
+        "tone_id": 12505,
+        "model_id": 379749
+      },
+      {
+        "output_gain_db": 8.41,
+        "tone_id": 35497,
+        "model_id": 381338
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

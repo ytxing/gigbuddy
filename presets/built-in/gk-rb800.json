@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "gk-rb800",
+  "name": "gk-rb800",
+  "note": "Gallien-Krueger RB800 at G5.0 (Arlington Audio, 7.4K downloads) - Flea-style transistor bass punch with the pack's Mid Contour tone-switch IR (bypassed by default - shaping, not a cabinet IR; activate for the switchable-cab character).",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -5.91,
+        "tone_id": 2694,
+        "model_id": 419198
+      },
+      {
+        "tone_id": 64815,
+        "model_id": 72421,
+        "bypass": true
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

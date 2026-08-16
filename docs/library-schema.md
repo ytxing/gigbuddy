@@ -79,11 +79,13 @@ with a manifest, and sets the affected `local_path` values to NULL.
 ## presets
 
 Named chain snapshots (CLI: `gigbuddy preset …`; external agents can add/query/
-update/delete). Each preset is also stored as an editable JSON document in
-`data/presets/<id>-<name-slug>.json`; SQLite remains the searchable index and
-compatibility layer. Model files are stored as **logic references** (`model_id`) resolved to
-the current `models.local_path` at load time, so library renames/migrations
-never break a preset; non-library paths are kept verbatim in `model_path`.
+update/delete user rows). User Presets are stored as editable JSON documents in
+`data/presets/<id>-<name-slug>.json`. Repository-owned Presets are distributed
+separately under `presets/built-in/*.json` and indexed as read-only rows at
+startup. SQLite remains the searchable index and compatibility layer. Model
+files are stored as **logic references** (`model_id`) resolved to the current
+`models.local_path` at load time, so library renames/migrations never break a
+preset; non-library paths are kept verbatim in `model_path`.
 路径语义（v0.1 portable）：`models.local_path` 与 `model_path`/`ir_path` 存相对项目根路径，
 加载时按项目根解析为绝对。
 
@@ -93,16 +95,31 @@ never break a preset; non-library paths are kept verbatim in `model_path`.
 | name (UNIQUE) | preset name |
 | note | optional description |
 | chain_json | canonical `{slots, gain, master, quality}` snapshot; legacy flat `model`/`ir` rows remain readable |
+| source | `user` for editable local JSON; `bundled` for read-only repository Presets |
+| source_key | stable repository catalog identity for `bundled` rows; NULL for user Presets |
 | created_at, updated_at | ISO timestamps |
 
 The JSON document uses `schema_version: 1`, `kind: "gigbuddy-preset"`, and the
 fields `id`, `name`, `note`, `chain`, `created_at`, and `updated_at`. GigBuddy
-imports new documents from `data/presets/`, exports legacy SQLite-only rows on
-first read, and reconciles a hand-edited tracked document before returning it.
-The file wins when it changed; an invalid file is kept and ignored with a
-warning. Deleting a tracked file deletes its indexed preset. Rename, note,
-draft, delete, and seed operations update both representations atomically as
-far as the local SQLite/file boundary permits.
+synchronizes these files through the explicit `refresh_preset_catalog()` write
+boundary. CLI Preset commands, the TUI catalog poll, Preset import, and model
+uninstall dependency checks call that boundary before they require a current
+catalog. `preset_get()`, `preset_get_by_id()`, and `preset_list()` are pure
+SQLite reads: they never import, move, rewrite, or delete files and never
+register repository rows.
+
+During an explicit refresh, GigBuddy imports new documents from
+`data/presets/`, exports legacy SQLite-only rows, and reconciles hand-edited
+tracked documents. The file wins when it changed; an invalid file is kept and
+ignored with a warning. Deleting a tracked file deletes its indexed preset.
+Rename, note, draft, delete, and legacy seed operations update both user
+representations atomically as far as the local SQLite/file boundary permits.
+Bundled rows never create files under `data/presets/`; deleting or renaming a
+repository document removes its old `bundled` index row after a complete,
+non-empty catalog scan. A missing, temporarily empty, unreadable, or ambiguous
+repository directory does not clear the indexed catalog. User rows with no
+explicit bundled provenance are never auto-claimed by matching names or chain
+contents.
 
 ### Shareable Preset documents
 
@@ -139,6 +156,11 @@ the unique, first-use-ordered download list from them. Local-only Pack assets
 cannot be exported in this format. Older files may contain a redundant
 top-level `model_ids` field; it is ignored for compatibility.
 
+New exports write the effective `output_gain_db` for every non-empty Slot,
+including `0.0`, so an export/import round trip cannot change its level. A
+missing `output_gain_db` is reserved for older share files; when importing one,
+GigBuddy applies the NAM model's recommended output calibration if available.
+
 The share file is imported explicitly; it is not a local preset just because it
 has a `.json` suffix and it should not be placed in `data/presets/`. Importing
 it with `gigbuddy preset import preset-name.json` resolves each missing model ID
@@ -147,12 +169,18 @@ only the requested models, and writes the normal local preset after every model
 is available. Already installed models are reused. Add `--load` to apply the
 new preset to the live Chain, or `--name NAME` to choose a local name.
 
-Built-in chains (`gigbuddy preset seed`) use name prefixes and descriptions for
-the two categories and instrument. The default seed command downloads the exact
-starter model files first, then writes preset rows that reference local model
-IDs. `gigbuddy preset seed --local-only` skips network download and only creates
-presets whose model files are already local. `gigbuddy preset seed --replace`
-deletes all existing presets and replaces them with the built-in catalog.
+Built-in Presets are registered from `presets/built-in/*.json` whenever GigBuddy
+opens. Registration is local and does not wait for downloads: each row is shown
+as `PREPARING`, `READY`, or `UNAVAILABLE`, and failed rows remain visible for a
+later retry. The TUI downloads missing models in the background. Loading an
+unavailable built-in Preset, or running `gigbuddy preset bootstrap`, retries the
+required TONE3000 models without writing the live chain until every Slot can be
+resolved.
+
+`gigbuddy preset seed --local-only` performs registration without network I/O.
+The `--replace` option is retained for command-line compatibility but is
+deprecated and no longer deletes user Presets. The repository documents are the
+only built-in catalog source; there is no separate Python seed definition.
 
 ## settings
 

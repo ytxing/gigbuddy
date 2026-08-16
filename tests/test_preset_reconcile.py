@@ -1,6 +1,7 @@
 """Focused checks for incremental Preset table reconciliation."""
 
 import asyncio
+import json
 
 import library
 from textual.widgets import DataTable
@@ -166,5 +167,92 @@ def test_preset_filter_restores_existing_selection_focus_and_viewport(
                 first_visible_key
             )
             assert other_key not in table.rows
+
+    run(scenario())
+
+
+def test_tui_poll_reconciles_an_external_preset_file_edit(
+        monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    (data / "tones").mkdir(parents=True)
+    (data / "dry_inputs").mkdir(parents=True)
+    chain_file = data / "live_chain.json"
+    monkeypatch.setattr(library, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "DB_FILE", data / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", chain_file)
+    monkeypatch.setattr(library, "TONES_DIR", data / "tones")
+    monkeypatch.setattr(library, "PRESETS_DIR", data / "presets")
+    monkeypatch.setattr("tui.app.live.ROOT", tmp_path)
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", chain_file)
+    monkeypatch.setattr("tui.app.live.TONES_DIR", data / "tones")
+    library.chain_set({"slots": []})
+    saved = library.preset_save("external-edit", note="before", set_active=False)
+    preset_path = next(library.PRESETS_DIR.glob(f"{saved['id']}-*.json"))
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            table = app.query_one("#preset-table", DataTable)
+            key = _key_for_name(table, "external-edit")
+            document = json.loads(preset_path.read_text(encoding="utf-8"))
+            document["note"] = "after"
+            preset_path.write_text(json.dumps(document), encoding="utf-8")
+
+            await pilot.pause(0.8)
+
+            assert library.preset_get("external-edit")["note"] == "after"
+            assert table.get_cell(key, "note") == "after"
+
+    run(scenario())
+
+
+def test_tui_poll_registers_a_bundled_preset_added_after_mount(
+        monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    (data / "tones").mkdir(parents=True)
+    (data / "dry_inputs").mkdir(parents=True)
+    bundled = tmp_path / "presets" / "built-in"
+    bundled.mkdir(parents=True)
+    chain_file = data / "live_chain.json"
+    monkeypatch.setattr(library, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "DB_FILE", data / "gigbuddy.db")
+    monkeypatch.setattr(library, "CHAIN_FILE", chain_file)
+    monkeypatch.setattr(library, "TONES_DIR", data / "tones")
+    monkeypatch.setattr(library, "PRESETS_DIR", data / "presets")
+    monkeypatch.setattr(library, "BUNDLED_PRESETS_DIR", bundled)
+    monkeypatch.setattr("tui.app.live.ROOT", tmp_path)
+    monkeypatch.setattr("tui.app.live.CHAIN_FILE", chain_file)
+    monkeypatch.setattr("tui.app.live.TONES_DIR", data / "tones")
+    library.chain_set({"slots": []})
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            table = app.query_one("#preset-table", DataTable)
+            (bundled / "late.json").write_text(json.dumps({
+                "schema_version": 1,
+                "kind": "gigbuddy-bundled-preset",
+                "catalog_key": "late",
+                "name": "late bundled",
+                "note": "arrived after mount",
+                "chain": {
+                    "slots": [{
+                        "tone_id": 1,
+                        "model_id": 101,
+                        "output_gain_db": 0.0,
+                    }],
+                    "gain": 1.0,
+                    "master": 1.0,
+                    "quality": 1.0,
+                },
+            }), encoding="utf-8")
+
+            await pilot.pause(0.8)
+
+            key = _key_for_name(table, "late bundled")
+            assert table.get_cell(key, "note") == "arrived after mount"
+            assert library.preset_get("late bundled")["source"] == "bundled"
 
     run(scenario())

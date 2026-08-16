@@ -27,12 +27,12 @@ So I built GigBuddy: a searchable library for tone packs, NAM files, and IRs. I
 can try them with the same dry recording or my own instrument, keep track of
 which file I am hearing, and build the chain once I find a sound that works.
 
-*v1.2.3 · 2026-08-14* · [release notes](docs/releases/v1.2.3.md) · [Tone Pack and shareable Preset guide](docs/tone-file-management.md)
+*v1.2.4 · 2026-08-16* · [release notes](docs/releases/v1.2.4.md) · [built-in Preset guide](docs/built-in-presets.md) · [Tone Pack and shareable Preset guide](docs/tone-file-management.md)
 
 **One line from the terminal — downloads, installs, and initializes everything:**
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/install.sh | bash
 ```
 
 ![GigBuddy install](docs/screenshots/gigbuddy.gif)
@@ -88,12 +88,13 @@ See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs
 
 ## What's new
 
-The full change list is in the [v1.2.0 release note](docs/releases/v1.2.0.md).
-The short version: TONE3000 search now follows the official default ranking and
-A2 filter, and LOCAL now manages both downloaded remote Packs and user-owned
-local Packs. The [tone file management guide](docs/tone-file-management.md)
-covers the customer workflow, paths, manifests, shareable Presets, and file
-limits.
+The full change list is in the [v1.2.4 release note](docs/releases/v1.2.4.md).
+The short version: the 20 calibrated starter rigs now ship as repository JSON,
+appear immediately on a fresh install, and prepare missing TONE3000 models in
+the background. The [built-in Preset guide](docs/built-in-presets.md) covers
+availability states, login, CLI retries, editing rules, and recovery behavior.
+LOCAL and shareable-file workflows remain documented in the
+[tone file management guide](docs/tone-file-management.md).
 
 GigBuddy turns the original tone-chain console into a complete tone workbench:
 
@@ -126,6 +127,12 @@ GigBuddy turns the original tone-chain console into a complete tone workbench:
   curated guitar and bass chains — brand + model + cabinet naming (Fender,
   Vox, Marshall, Ampeg, Gallien-Krueger, Hartke, Darkglass), chosen from
   high-download and verified-author captures.
+- **Ready without a bootstrap download:** those built-in Presets are shipped as
+  versioned JSON in the repository. GigBuddy lists them immediately, prepares
+  missing models in the background, shows `PREPARING`, `READY`, or
+  `UNAVAILABLE`, and retries only the selected Preset when you load it. Built-in
+  rows are read-only; use **Save As** to make an editable copy. See the
+  [built-in Preset guide](docs/built-in-presets.md) for the full workflow.
 - **Pedals and fuzz built into presets:** classic drive pedals (Ibanez TS9 /
   TS808, JHS Morning Glory, Boss BD-2 / DS-1 / TB-2w) and fuzz chains
   (Big Muff → Marshall Major, Fuzz Face → Plexi, ToneBender → Plexi) ride in
@@ -158,26 +165,38 @@ into `~/.local/bin`. Run `gigbuddy` with no arguments to open the TUI; add a
 subcommand (`tone`, `chain`, `preset`) for the CLI. Run interactively and you can choose another location —
 `"."` for the current directory or any path (useful when you want the bundled
 agent skill available inside your own project folder); set `GIGBUDDY_HOME` to
-skip the prompt. To remove a user-level install, run the matching uninstall
-script:
+skip the prompt. Mutable data is kept outside that checkout, by default in
+`~/.local/share/gigbuddy-data`; the checkout's `data` entry is a compatibility
+link to it. Set `GIGBUDDY_DATA_HOME` before installation to choose another data
+directory. This separation lets an update replace the code checkout without
+moving downloaded models or user Presets.
+
+Verify that the installed CLI and release tag agree:
+
+```sh
+gigbuddy --version
+# gigbuddy 1.2.4
+```
+
+To remove a user-level install, run the matching uninstall script:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/uninstall.sh | bash
 ```
 
 The standalone uninstaller removes the local install, generated runtime files,
-and the persisted TONE3000 session. Use `--keep-data` when you want to remove
-the runtime while keeping downloaded tones and local data; the login session is
-still removed:
+the external data directory, and the persisted TONE3000 session. Use
+`--keep-data` when you want to remove the runtime while keeping downloaded tones
+and local data; the login session is still removed:
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 From a fresh checkout:
 
 ```
-# Creates the Python environment, local library, starter presets,
+# Creates the Python environment, local library, built-in Presets,
 # official dry inputs, and the realtime engine. If no TONE3000 session is
 # found, the installer asks whether to log in and opens the system browser.
 ./install.sh
@@ -189,18 +208,22 @@ From a fresh checkout:
 .venv/bin/python -m tui
 ```
 
-The default install prepares the exact models used by the built-in preset
-catalog and all 34 official TONE3000 dry-input WAV files. It is safe to rerun:
-existing database rows and non-empty files are reused. `--starter-dry` keeps the
-first download to ten common guitar samples.
+The default install registers the built-in Preset catalog and prepares all 34
+official TONE3000 dry-input WAV files. It does not block installation on the
+models required by the 20 starter Presets: when the TUI opens, it lists the
+catalog immediately and prepares missing models in a background worker. Loading
+one unavailable Preset retries only that Preset's models. Existing database
+rows and non-empty files are reused. `--starter-dry` keeps the first dry-input
+download to ten common guitar samples.
 
 The user-level installer performs the same login check before its bootstrap.
-Press `Y` or Enter to sign in, or `n` to continue without starter models; the
+Press `Y` or Enter to sign in, or `n` to continue without remote model access; the
 installer prints the OAuth URL even when it opens the browser automatically.
 When no interactive terminal is available, the installer stops instead of
 silently skipping the check; pass `bash -s -- --skip-presets` explicitly when
-installing without starter models. After logging in later, run `gigbuddy preset
-bootstrap` to add the starter presets and models.
+installing without the initial Preset registration. After logging in later,
+open the TUI or load a built-in Preset; use `gigbuddy preset bootstrap` only
+when you want to retry every built-in model download from the CLI.
 
 To inspect the interface without an audio backend, launch with:
 
@@ -236,9 +259,18 @@ fresh, run the one-line uninstall:
    to save a new named rig with a note.
 
 Presets are editable JSON files in `data/presets/`, so rigs can be backed up or
-reviewed outside GigBuddy. SQLite remains the local index. A hand-edited JSON
-file is reconciled when GigBuddy reads the preset; invalid JSON is preserved and
-reported instead of replacing the last indexed snapshot.
+reviewed outside GigBuddy. SQLite remains the local index. GigBuddy reconciles
+hand-edited files at explicit catalog refresh points, including the TUI catalog
+poll and before CLI Preset commands; ordinary Preset lookups remain read-only.
+Invalid JSON is preserved and reported instead of replacing the last indexed
+snapshot.
+
+Built-in Presets are the exception: their source files live in
+`presets/built-in/` and are updated with the checkout. They are listed from the
+repository on every launch, never copied into `data/presets/`, and cannot be
+renamed, edited, or deleted. Save a built-in rig under a new name before
+customizing it. The [built-in Preset guide](docs/built-in-presets.md) documents
+download states, login failures, CLI retries, and the file format.
 
 For sharing with another GigBuddy user, export a separate portable file. It uses
 TONE3000 model IDs rather than paths, so the recipient can download the same
@@ -349,6 +381,7 @@ gigbuddy tone login
 gigbuddy tone logout
 gigbuddy preset list
 gigbuddy preset load <name>
+gigbuddy preset bootstrap
 gigbuddy preset export <name> preset-name.json
 gigbuddy preset import preset-name.json --load
 gigbuddy chain get
@@ -391,8 +424,8 @@ and [API Terms](https://www.tone3000.com/api/terms):
   requests per minute; `Retry-After` is respected when the service returns
   HTTP 429;
 - remote pages are bounded, and model files are downloaded only as part of an
-  explicit import, Slot selection, or user-invoked starter bootstrap rather
-  than as a background catalog mirror;
+  explicit import, Slot selection, or preparation of the 20 built-in Presets
+  started after launch; GigBuddy never mirrors the whole catalog;
 - creator names, tone metadata, and the source platform remain visible in the
   local library; creator-selected licenses still apply to every downloaded
   file;
@@ -431,8 +464,10 @@ integration.
 
 ## Dependencies
 
-Pinned versions (v1.2.3). Update `requirements.txt` and the NeuralAudio commit
-in `install.sh` together when bumping.
+The application version is defined in `pyproject.toml`. The standalone
+installer's pre-checkout tag in `scripts/install.sh` must match it. Update
+`requirements.txt` and the NeuralAudio commit in the shared installer together
+when bumping dependencies.
 
 **Python runtime** (`requirements.txt`):
 

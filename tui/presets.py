@@ -70,6 +70,13 @@ def _preset_slot_summary(chain: dict | None) -> str:
     return " > ".join(preset_slot_label(slot) for slot in slots)
 
 
+def _preset_availability(preset: dict) -> str:
+    """Return the compact state shown for repository and user Presets."""
+    if preset.get("source") == "bundled":
+        return str(preset.get("availability") or "UNAVAILABLE")
+    return "USER"
+
+
 PRESET_SORT_CHOICES = [("Updated", "updated"), ("Name", "name")]
 _PRESET_SEARCH_FIELDS = ("name", "note", "file", "id")
 ACTIVE_MARK = "[bold $success]▶[/]"
@@ -289,6 +296,7 @@ class PresetPanel(Vertical):
         )
         table = PresetTable(id="preset-table", cursor_type="row")
         table.add_column("St", key="pick", width=5)
+        table.add_column("State", key="state", width=12)
         table.add_column("Preset", key="name")
         table.add_column("Slots", key="slots")
         table.add_column("NOTE", key="note")
@@ -304,38 +312,55 @@ class PresetPanel(Vertical):
         self._sort = "updated"
         self._filter_anchor = None
         self._starter_bootstrap_started = False
+        self._bundled_load_workers: set[int] = set()
         self._bootstrap_starter_if_empty()
         self.refresh_presets()
         self.call_after_refresh(lambda: self._publish_highlight(force=True))
 
     def _bootstrap_starter_if_empty(self) -> None:
-        with library.connect() as conn:
-            has_preset = conn.execute(
-                "SELECT 1 FROM presets LIMIT 1").fetchone() is not None
-        if has_preset or self._starter_bootstrap_started:
+        """Register repository Presets immediately and prepare them in a worker."""
+        if self._starter_bootstrap_started:
             return
         self._starter_bootstrap_started = True
-        self.app.notify("Preparing starter presets")
-        self.run_worker(self._bootstrap_starter_presets(),
-                        name="starter-presets", exclusive=True)
-
-    async def _bootstrap_starter_presets(self) -> None:
         try:
-            result = await asyncio.to_thread(
-                library.bootstrap_starter_presets, quiet=True)
+            result = library.sync_bundled_presets(
+                quiet=True, download=False, mark_preparing=True)
         except Exception as exc:
-            self.app.notify(f"Starter presets unavailable: {exc}",
+            self.app.notify(f"Built-in presets unavailable: {exc}",
                             severity="warning")
             return
         self._fingerprint = None
         self.refresh_presets(force=True)
-        count = int(result.get("presets") or 0)
-        failed = result.get("failed") or []
-        if failed:
-            self.app.notify(f"Starter presets incomplete: {count} ready",
+        if result.get("failed"):
+            self.app.notify(
+                f"{result['failed']} built-in Preset document(s) failed to load",
+                severity="warning")
+        if result.get("preparing"):
+            self.app.notify(
+                f"Preparing {result['preparing']} built-in preset(s) in background")
+            self.run_worker(self._sync_bundled_presets(),
+                            name="bundled-presets", exclusive=True)
+
+    async def _sync_bundled_presets(self) -> None:
+        try:
+            result = await asyncio.to_thread(
+                library.sync_bundled_presets,
+                quiet=True, download=True)
+        except Exception as exc:
+            self.app.notify(f"Built-in preset preparation failed: {exc}",
                             severity="warning")
-        elif count:
-            self.app.notify(f"Starter presets ready: {count}")
+            self._fingerprint = None
+            self.refresh_presets(force=True)
+            return
+        self._fingerprint = None
+        self.refresh_presets(force=True)
+        failed = result.get("failed_presets") or []
+        if failed:
+            self.app.notify(
+                f"{len(failed)} built-in preset(s) unavailable; load to retry",
+                severity="warning")
+        elif result.get("ready"):
+            self.app.notify(f"Built-in presets ready: {result['ready']}")
 
     def focus_search(self) -> None:
         self._search_editing = True
@@ -380,9 +405,18 @@ class PresetPanel(Vertical):
                         incremental: bool = False) -> None:
         """Reload from the DB (called on tick; skips repaint unless changed)."""
         db_token = (library.database_change_token()
-                    + library.chain_change_token())
+                    + library.chain_change_token()
+                    + library.bundled_preset_change_token())
         if not force and self._fingerprint is not None and db_token == self._db_token:
             return
+        # External JSON changes must reach the explicit write seam before the
+        # SQLite fingerprint can decide whether a repaint is needed. Recompute
+        # the token afterwards because reconciliation may rename a user file or
+        # update the database.
+        library.refresh_preset_catalog()
+        db_token = (library.database_change_token()
+                    + library.chain_change_token()
+                    + library.bundled_preset_change_token())
         with library.connect() as conn:
             fp = tuple(conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(id), 0), "
@@ -465,12 +499,13 @@ class PresetPanel(Vertical):
                 table.add_row(
                     status_cell(key in self._selected,
                                 ACTIVE_MARK if is_active else ""),
+                    _preset_availability(p),
                     f"{p['name']}{' *' if dirty else ''}",
                     _preset_slot_summary(ch),
                     p.get("note") or "",
                     key=key)
             if not table.rows:
-                table.add_row("", "(no matching presets)", "", "",
+                table.add_row("", "", "(no matching presets)", "", "",
                               key="__status__")
         if table.rows and focused_key in visible_keys:
             focused_row = next(
@@ -630,7 +665,7 @@ class PresetPanel(Vertical):
     def _reconcile_rows_incremental(self, table: DataTable,
                                     presets: list[dict], active: str | None) -> None:
         """Reconcile preset rows by stable key without clearing the table."""
-        desired: dict[str, tuple[str, str, str, str]] = {}
+        desired: dict[str, tuple[str, str, str, str, str]] = {}
         desired_order: list[str] = []
         for preset in presets:
             key = self._row_key(preset)
@@ -639,6 +674,7 @@ class PresetPanel(Vertical):
             desired[key] = (
                 status_cell(key in self._selected,
                             ACTIVE_MARK if is_active else ""),
+                _preset_availability(preset),
                 f"{preset['name']}{' *' if dirty else ''}",
                 _preset_slot_summary(preset.get("chain")),
                 preset.get("note") or "",
@@ -653,7 +689,7 @@ class PresetPanel(Vertical):
                 except Exception:
                     pass
 
-        columns = ("pick", "name", "slots", "note")
+        columns = ("pick", "state", "name", "slots", "note")
         for key in desired_order:
             values = desired[key]
             if key in table.rows:
@@ -664,7 +700,7 @@ class PresetPanel(Vertical):
 
         if not desired_order:
             if "__status__" not in table.rows:
-                table.add_row("", "(no matching presets)", "", "",
+                table.add_row("", "", "(no matching presets)", "", "",
                               key="__status__")
             return
 
@@ -713,12 +749,70 @@ class PresetPanel(Vertical):
         preset = preset or self._selected_preset()
         if not preset:
             return
+        preset_id = _valid_preset_id(preset.get("id"))
+        if (preset.get("source") == "bundled"
+                and preset.get("availability") != "READY"):
+            if preset_id is None:
+                self.app.notify(
+                    f"Built-in Preset '{preset['name']}' cannot be retried",
+                    severity="error")
+                return
+            if preset_id in self._bundled_load_workers:
+                self.app.notify(
+                    f"Preparing built-in Preset '{preset['name']}'",
+                    severity="warning")
+                return
+            source_key = preset.get("source_key")
+            if not isinstance(source_key, str) or not source_key:
+                self.app.notify(
+                    f"Built-in Preset '{preset['name']}' cannot be retried",
+                    severity="error")
+                return
+            self._bundled_load_workers.add(preset_id)
+            self.app.notify(
+                f"Preparing '{preset['name']}' in background")
+            self.run_worker(
+                self._retry_bundled_load(
+                    preset_id, str(preset["name"]), source_key),
+                name=f"bundled-load-{preset_id}", exclusive=False)
+            return
         active = library.preset_current()
         if active and library.preset_is_dirty(active):
             self.app.push_screen(PresetLoadConfirm(preset))
             return
         self.post_message(self.Activated(
-            str(preset["name"]), _valid_preset_id(preset.get("id"))))
+            str(preset["name"]), preset_id))
+
+    async def _retry_bundled_load(
+            self, preset_id: int, name: str, source_key: str) -> None:
+        try:
+            result = await asyncio.to_thread(
+                library.sync_bundled_presets,
+                quiet=True, download=True, preset_keys=[source_key])
+        except Exception as exc:
+            self.app.notify(
+                f"Built-in Preset '{name}' retry failed: {exc}",
+                severity="error")
+            self._bundled_load_workers.discard(preset_id)
+            self._fingerprint = None
+            self.refresh_presets(force=True)
+            return
+        self._bundled_load_workers.discard(preset_id)
+        self._fingerprint = None
+        self.refresh_presets(force=True)
+        if result.get("failed_presets"):
+            self.app.notify(
+                f"Built-in Preset '{name}' is unavailable; load to retry",
+                severity="error")
+            return
+        updated = library.preset_get_by_id(preset_id)
+        if (updated is None or updated.get("source") != "bundled"
+                or updated.get("source_key") != source_key):
+            self.app.notify(
+                f"Built-in Preset '{name}' disappeared; load cancelled",
+                severity="error")
+            return
+        self._request_load(updated)
 
     def action_save_as(self) -> None:
         self.app.push_screen(PresetNameModal())
@@ -726,11 +820,19 @@ class PresetPanel(Vertical):
     def action_rename(self) -> None:
         preset = self._selected_preset()
         if preset:
+            if preset.get("source") == "bundled":
+                self.app.notify("Built-in Presets are read-only; use Save As",
+                                severity="warning")
+                return
             self.app.push_screen(PresetRenameModal(preset))
 
     def action_edit(self) -> None:
         preset = self._selected_preset()
         if preset:
+            if preset.get("source") == "bundled":
+                self.app.notify("Built-in Presets are read-only; use Save As",
+                                severity="warning")
+                return
             self.app.push_screen(PresetEditModal(preset))
 
     def action_delete(self) -> None:
@@ -739,12 +841,27 @@ class PresetPanel(Vertical):
             table = self.query_one("#preset-table", DataTable)
             if table.ordered_rows and 0 <= table.cursor_row < len(table.ordered_rows):
                 keys = [str(table.ordered_rows[table.cursor_row].key.value)]
-        targets = [
-            {"id": self._preset_ids_by_key.get(key),
-             "name": self._preset_name_for_key(key)}
-            for key in keys
-            if self._preset_name_for_key(key) is not None
-        ]
+        targets = []
+        for key in keys:
+            name = self._preset_name_for_key(key)
+            if name is None:
+                continue
+            preset_id = self._preset_ids_by_key.get(key)
+            preset = (library.preset_get_by_id(preset_id)
+                      if preset_id is not None else library.preset_get(name))
+            targets.append({
+                "id": preset_id,
+                "name": name,
+                "source": preset.get("source") if preset else None,
+            })
+        bundled = [target["name"] for target in targets
+                   if target.get("source") == "bundled"]
+        if bundled:
+            self.app.notify(
+                "Built-in Presets are read-only: " + ", ".join(bundled),
+                severity="warning")
+            targets = [target for target in targets
+                       if target.get("source") != "bundled"]
         if targets:
             self.app.push_screen(PresetDeleteModal(targets))
 
@@ -1093,7 +1210,14 @@ class PresetNameModal(GigBuddyModal):
                 box, f"'{name}' exists · enter again to overwrite",
                 [token for token, _action in self._border_hint_actions()])
             return
-        p = library.preset_save(name)
+        try:
+            p = library.preset_save(name)
+        except (OSError, TypeError, ValueError) as exc:
+            box = self.query_one(ModalBox)
+            set_border_hint_layout(
+                box, str(exc),
+                [token for token, _action in self._border_hint_actions()])
+            return
         self.post_message(self.Saved(p["name"], p.get("id")))
         self.dismiss()
 

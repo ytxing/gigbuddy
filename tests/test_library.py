@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/ -q
 import json
 import sqlite3
 import sys
+import tomllib
 import urllib.error
 from pathlib import Path
 
@@ -595,6 +596,30 @@ def test_local_uninstall_blocks_active_chain_and_preserves_metadata(tmp_path):
     assert sorted(p.name for p in trash.iterdir() if p.name != "manifest.json") == [
         "1001-SR AKG 414.nam", "1002-DR Oxford Big.wav",
     ]
+
+
+def test_uninstall_plan_refreshes_untracked_preset_dependencies(tmp_path):
+    (tmp_path / "tones").mkdir()
+    amp, _ir = _put_models(tmp_path / "tones")
+    library.PRESETS_DIR.mkdir(parents=True)
+    (library.PRESETS_DIR / "external.json").write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-preset",
+        "name": "external dependency",
+        "chain": {
+            "slots": [{
+                "model_id": amp["id"],
+                "path": amp["local_path"],
+            }],
+            "gain": 1.0,
+            "master": 1.0,
+            "quality": 1.0,
+        },
+    }), encoding="utf-8")
+
+    plan = library.local_uninstall_plan([amp["tone_id"]])
+
+    assert plan["preset_names"] == ["external dependency"]
 
 
 def test_local_uninstall_refuses_unmanaged_paths(tmp_path):
@@ -1202,11 +1227,15 @@ def test_cli_roundtrip(capsys, monkeypatch):
 
 
 def test_cli_reports_the_frozen_release_version(capsys):
+    metadata = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"))
     with pytest.raises(SystemExit) as exc_info:
         library.main(["--version"])
 
     assert exc_info.value.code == 0
-    assert capsys.readouterr().out.strip() == "gigbuddy 1.2.1"
+    assert capsys.readouterr().out.strip() == \
+        f"gigbuddy {metadata['project']['version']}"
 
 
 def test_cli_search_json(capsys, monkeypatch):
@@ -1290,7 +1319,8 @@ def test_shareable_preset_export_uses_slot_model_ids_without_local_paths(tmp_pat
     assert document["provider"] == "tone3000"
     assert "model_ids" not in document
     assert document["chain"]["slots"] == [
-        {"model_id": 1001}, {"model_id": 1002},
+        {"model_id": 1001, "output_gain_db": 0.0},
+        {"model_id": 1002, "output_gain_db": 0.0},
     ]
     assert "path" not in document["chain"]["slots"][0]
 
@@ -1543,30 +1573,11 @@ def test_preset_save_writes_editable_json_and_external_edit_reconciles(tmp_path)
         encoding="utf-8",
     )
 
+    library.refresh_preset_catalog()
     reconciled = library.preset_get_by_id(saved["id"])
     assert reconciled["note"] == "edited by hand"
     assert reconciled["chain"]["gain"] == 0.25
     assert reconciled["updated_at"] != saved["updated_at"]
-
-
-def test_preset_reconcile_skips_unchanged_files(monkeypatch, tmp_path):
-    amp, _ir = _put_models(tmp_path)
-    library.chain_set({"model": amp["local_path"]})
-    saved = library.preset_save("stable")
-    library.preset_get_by_id(saved["id"])
-
-    calls = 0
-    original = library._preset_tracked_files
-
-    def counted(conn):
-        nonlocal calls
-        calls += 1
-        return original(conn)
-
-    monkeypatch.setattr(library, "_preset_tracked_files", counted)
-
-    assert library.preset_get_by_id(saved["id"])["name"] == "stable"
-    assert calls == 0
 
 
 def test_preset_mutations_keep_json_filename_and_content_in_sync(tmp_path):
@@ -1602,6 +1613,7 @@ def test_preset_reconcile_imports_new_json_and_tracks_external_delete(tmp_path):
         "chain": {"slots": [], "gain": 0.5, "master": 1.0, "quality": 1.0},
     }), encoding="utf-8")
 
+    library.refresh_preset_catalog()
     imported = library.preset_get("My Rig")
     assert imported is not None
     assert imported["chain"]["gain"] == 0.5
@@ -1610,6 +1622,7 @@ def test_preset_reconcile_imports_new_json_and_tracks_external_delete(tmp_path):
     assert not source.exists()
 
     tracked_path.unlink()
+    library.refresh_preset_catalog()
     assert library.preset_get("My Rig") is None
 
 
@@ -1623,6 +1636,7 @@ def test_legacy_sqlite_preset_is_exported_without_rewriting_chain(tmp_path):
         )
         conn.commit()
 
+    library.refresh_preset_catalog()
     preset = library.preset_get("legacy")
     preset_path = library.PRESETS_DIR / f"{preset['id']}-legacy.json"
     assert preset_path.is_file()
@@ -1641,55 +1655,95 @@ def test_preset_group_is_derived_from_name_only():
     assert library.preset_group("my-tone") == ("Custom", "Other")
 
 
-def test_preset_seed_uses_library_models(tmp_path, monkeypatch):
-    _put_models(tmp_path)
-    monkeypatch.setattr(
-        library, "SEED_CHAINS",
-        [("test-chain", "note", [(1001, False), (1002, False)])])
-    assert library.preset_seed() == 1
-    p = library.preset_get("test-chain")
-    assert p["chain"]["slots"] == [
-        {"model_id": 1001, "path": "data/tones/SR AKG 414.nam"},
-        {"model_id": 1002, "path": "data/tones/DR Oxford Big.wav"},
+def test_shareable_import_fills_missing_nam_calibration(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    (library.TONES_DIR / "SR AKG 414.nam").write_text(
+        json.dumps({"version": "0.7.0",
+                    "metadata": {"loudness": -23.0}}),
+        encoding="utf-8")
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "legacy-calibrated",
+        "chain": {"slots": [{"model_id": 1001}]},
+    }), encoding="utf-8")
+
+    imported = library.preset_import(source, quiet=True)
+
+    assert imported["chain"]["slots"] == [
+        {"model_id": 1001, "output_gain_db": 5.0,
+         "path": "data/tones/SR AKG 414.nam"},
     ]
-    assert p["chain"]["gain"] == 1.0
-    assert p["chain"]["master"] == 1.0
-    assert p["chain"]["quality"] == 1.0
 
 
-def test_preset_seed_skips_missing_tones(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(
-        library, "SEED_CHAINS",
-        [("ghost", "note", [(999999, False)])])
-    assert library.preset_seed() == 0
-    assert "skipped" in capsys.readouterr().out
-    assert library.preset_get("ghost") is None
-
-
-def test_preset_seed_skips_stale_database_paths(tmp_path, monkeypatch, capsys):
+def test_shareable_import_respects_explicit_calibration(tmp_path):
     amp, _ir = _put_models(tmp_path)
-    (library.TONES_DIR / "SR AKG 414.nam").unlink()
-    monkeypatch.setattr(
-        library, "SEED_CHAINS",
-        [("stale", "note", [(amp["id"], False)])])
+    (library.TONES_DIR / "SR AKG 414.nam").write_text(
+        json.dumps({"version": "0.7.0",
+                    "metadata": {"loudness": -23.0}}),
+        encoding="utf-8")
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "explicit-calibrated",
+        "chain": {"slots": [{"model_id": 1001, "output_gain_db": -2.0}]},
+    }), encoding="utf-8")
 
-    assert library.preset_seed() == 0
-    assert library.preset_get("stale") is None
-    assert "not available locally" in capsys.readouterr().out
+    imported = library.preset_import(source, quiet=True)
+
+    assert imported["chain"]["slots"] == [
+        {"model_id": 1001, "output_gain_db": -2.0,
+         "path": "data/tones/SR AKG 414.nam"},
+    ]
 
 
-def test_preset_seed_replace_deletes_existing_presets(tmp_path, monkeypatch):
+def test_shareable_import_respects_explicit_zero_calibration(tmp_path):
     amp, _ir = _put_models(tmp_path)
-    library.chain_set({"model": amp["local_path"]})
-    library.preset_save("old")
-    monkeypatch.setattr(
-        library, "SEED_CHAINS",
-        [("new", "note", [(1001, False)])])
+    (library.TONES_DIR / "SR AKG 414.nam").write_text(
+        json.dumps({"version": "0.7.0",
+                    "metadata": {"loudness": -23.0}}),
+        encoding="utf-8")
+    source = tmp_path / "shared.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "gigbuddy-shareable-preset",
+        "provider": "tone3000",
+        "name": "explicit-zero",
+        "chain": {"slots": [{"model_id": 1001, "output_gain_db": 0.0}]},
+    }), encoding="utf-8")
 
-    assert library.preset_seed(replace=True) == 1
-    assert library.preset_get("old") is None
-    assert library.preset_current() is None
-    assert [p["name"] for p in library.preset_list()] == ["new"]
+    imported = library.preset_import(source, quiet=True)
+
+    slot = imported["chain"]["slots"][0]
+    assert slot.get("output_gain_db", 0.0) == 0.0
+    assert slot.get("output_gain_db") != 5.0
+
+
+def test_shareable_export_import_roundtrip_preserves_zero_output_gain(tmp_path):
+    amp, _ir = _put_models(tmp_path)
+    (library.TONES_DIR / "SR AKG 414.nam").write_text(
+        json.dumps({"version": "0.7.0",
+                    "metadata": {"loudness": -23.0}}),
+        encoding="utf-8")
+    library.chain_set({
+        "slots": [{"path": amp["local_path"], "output_gain_db": 0.0}],
+    })
+    library.preset_save("zero-roundtrip")
+    destination = library.preset_export(
+        "zero-roundtrip", tmp_path / "zero-roundtrip.json")
+    document = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert document["chain"]["slots"][0]["output_gain_db"] == 0.0
+
+    imported = library.preset_import(
+        destination, name="zero-roundtrip-copy", quiet=True)
+    slot = imported["chain"]["slots"][0]
+    assert slot.get("output_gain_db", 0.0) == 0.0
+    assert slot.get("output_gain_db") != 5.0
 
 
 def test_cli_preset_roundtrip(tmp_path, capsys):

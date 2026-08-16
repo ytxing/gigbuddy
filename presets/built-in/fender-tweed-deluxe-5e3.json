@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "fender-tweed-deluxe-5e3",
+  "name": "fender-tweed-deluxe-5e3",
+  "note": "1960 Fender Tweed Deluxe 5E3 (official) - narrow-panel 1x12 combo, cranked vintage compression and overdrive, no pedal needed.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 4.16,
+        "tone_id": 54580,
+        "model_id": 383783
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

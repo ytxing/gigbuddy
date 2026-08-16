@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "vox-ac30-ef86-ts808",
+  "name": "vox-ac30-ef86-ts808",
+  "note": "Vox AC30/4 1961 Fawn EF86 (Amalgam Audio, verified, 30K downloads) with an Ibanez TS808 at Hot / Level 6 / OD 6 / Tone 1 - EF86 chime pushed into classic British overdrive.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 1.37,
+        "tone_id": 30104,
+        "model_id": 493737
+      },
+      {
+        "output_gain_db": 7.81,
+        "tone_id": 53601,
+        "model_id": 383682
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

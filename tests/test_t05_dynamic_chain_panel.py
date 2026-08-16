@@ -174,14 +174,23 @@ def test_slot_move_arrow_posts_reorder_message_not_model_switch():
 
 def _patch_managed_runtime(monkeypatch, tmp_path):
     """Give managed UI tests a private file/runtime boundary."""
-    chain_file = tmp_path / "live_chain.json"
-    level_file = tmp_path / "level.json"
-    control_file = tmp_path / "live_control.json"
-    control_reply_file = tmp_path / "live_control.reply.json"
+    runtime_root = tmp_path / "runtime"
+    data_dir = runtime_root / "data"
+    chain_file = data_dir / "live_chain.json"
+    level_file = data_dir / "level.json"
+    control_file = data_dir / "live_control.json"
+    control_reply_file = data_dir / "live_control.reply.json"
+    tones_dir = data_dir / "tones"
+    tones_dir.mkdir(parents=True)
+    for index in range(3):
+        (tones_dir / f"model-{index}.nam").write_bytes(
+            f"model-{index}\n".encode())
     for name, value in (
-            ("CHAIN_FILE", chain_file), ("LEVEL_FILE", level_file),
+            ("ROOT", runtime_root), ("CHAIN_FILE", chain_file),
+            ("LEVEL_FILE", level_file),
             ("CONTROL_FILE", control_file),
-            ("CONTROL_REPLY_FILE", control_reply_file)):
+            ("CONTROL_REPLY_FILE", control_reply_file),
+            ("TONES_DIR", tones_dir)):
         monkeypatch.setattr(live, name, value)
     live._chain_cache.clear()
     model_paths = sorted(live.TONES_DIR.rglob("*.nam"))[:2]
@@ -267,6 +276,14 @@ def test_managed_move_does_not_block_ui_and_publishes_after_worker(
             await pilot.pause(0.2)
 
     asyncio.run(scenario())
+
+
+def test_preset_highlight_is_ignored_before_screen_mount():
+    from tui.app import GigBuddyApp
+    from tui.presets import PresetPanel
+
+    app = GigBuddyApp(spawn_engine=False)
+    app.on_preset_panel_highlighted(PresetPanel.Highlighted(None))
 
 
 def test_managed_bypass_keeps_target_when_file_poll_wins_race(
@@ -544,8 +561,15 @@ def test_managed_detail_pack_bypass_keeps_target_when_file_poll_wins_race(
                     break
                 await pilot.pause(0.05)
             assert detail._pack_rows
-            detail._pack_table.focus()
-            await pilot.press("enter")
+            assert detail._pack_slot_index == 0
+            active_path = panel.state.slot(0).path
+            active_key = detail._pack_path_to_key[active_path]
+            active_row = next(
+                index for index, row in enumerate(
+                    detail._pack_table.ordered_rows)
+                if row.key.value == active_key)
+            await pilot.double_click(
+                detail._pack_table, offset=(8, active_row + 1))
 
             for _ in range(40):
                 if written.is_set():

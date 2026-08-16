@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "marshall-jcm800-klon",
+  "name": "marshall-jcm800-klon",
+  "note": "Marshall JCM800 with a Klon Centaur and a Marshall 1960BV cabinet (SM57 x2) - Klon-driven high-gain rock in one capture.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 0.21,
+        "tone_id": 33296,
+        "model_id": 381187
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

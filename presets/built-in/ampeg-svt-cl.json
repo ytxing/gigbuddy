@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "ampeg-svt-cl",
+  "name": "ampeg-svt-cl",
+  "note": "Ampeg SVT-CL 300W all-tube with a 6x10 cabinet (TONE3000 official, 41K downloads) - harmonically rich classic rock bass.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 1.43,
+        "tone_id": 28202,
+        "model_id": 379984
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

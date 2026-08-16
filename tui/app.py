@@ -28,7 +28,7 @@ from urllib.parse import unquote
 
 from rich.cells import cell_len
 from rich.markup import escape
-from textual.app import App, ComposeResult, SystemCommand
+from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -3797,7 +3797,12 @@ class GigBuddyApp(App):
         # PresetPanel publishes its initial row while the screen is mounting.
         # It must not replace the library detail unless the user is actually
         # navigating the preset list; detail always follows the focused pane.
-        focused = self.focused
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            # A queued highlight can arrive while Textual tears down the
+            # screen that published it; there is no detail pane to update.
+            return
         if focused is None or not any(
                 isinstance(ancestor, PresetPanel)
                 for ancestor in focused.ancestors_with_self):

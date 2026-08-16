@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "darkglass-b7k-ultra",
+  "name": "darkglass-b7k-ultra",
+  "note": "Darkglass Microtubes B7K Ultra (official Darkglass account) into an Aguilar DB751 and DG412ES cabinet - light to medium modern bass drive.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 23.78,
+        "tone_id": 27698,
+        "model_id": 413366
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

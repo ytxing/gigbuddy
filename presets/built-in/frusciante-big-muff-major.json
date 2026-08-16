@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "frusciante-big-muff-major",
+  "name": "frusciante-big-muff-major",
+  "note": "John Frusciante (RHCP) chain: Electro-Harmonix Op-Amp Big Muff at Volume 6 / Tone 2 / Sustain 5 into a Marshall Major 200 (1982B cabinet) - fuzz poured into a 200W Plexi.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 5.08,
+        "tone_id": 37818,
+        "model_id": 413497
+      },
+      {
+        "output_gain_db": 2.62,
+        "tone_id": 51310,
+        "model_id": 383442
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

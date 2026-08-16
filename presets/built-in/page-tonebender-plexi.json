@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "page-tonebender-plexi",
+  "name": "page-tonebender-plexi",
+  "note": "Led Zeppelin chain: Boss TB-2w Tone Bender at 01-9V into a Marshall JMP-50 1969 Plexi - Page-style fuzz lead.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -7.76,
+        "tone_id": 2316,
+        "model_id": 432892
+      },
+      {
+        "output_gain_db": 1.41,
+        "tone_id": 65578,
+        "model_id": 418470
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

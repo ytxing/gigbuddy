@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "fender-super-reverb-ts9",
+  "name": "fender-super-reverb-ts9",
+  "note": "Fender Super Reverb 1977 (TONE3000 official, 140K downloads) driven by an Ibanez TS9 Tube Screamer at Drive 7 / Tone 7 / Level 7 - massive clean headroom pushed into a tight SRV-style overdrive.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 1.49,
+        "tone_id": 36827,
+        "model_id": 381611
+      },
+      {
+        "output_gain_db": 4.52,
+        "tone_id": 19,
+        "model_id": 379720
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

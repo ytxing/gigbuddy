@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "hendrix-fuzz-face-plexi",
+  "name": "hendrix-fuzz-face-plexi",
+  "note": "Jimi Hendrix chain: Dunlop Hendrix Fuzz Face (mid cut) into a Marshall JMP-50 1969 Plexi - the 1969 Woodstock fuzz-into-plexi sound.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 16.86,
+        "tone_id": 1531,
+        "model_id": 420077
+      },
+      {
+        "output_gain_db": 1.41,
+        "tone_id": 65578,
+        "model_id": 418470
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

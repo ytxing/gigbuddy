@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
 
 import tone3000  # noqa: E402
 import library  # noqa: E402
+import preset_catalog  # noqa: E402
 from tui.app import GigBuddyApp  # noqa: E402
 from tui.presets import PresetPanel  # noqa: E402
 
@@ -26,6 +27,17 @@ def isolated_tone3000_credentials(monkeypatch, tmp_path):
 def isolated_preset_documents(monkeypatch, tmp_path):
     """Never let a test export or import the developer's real Preset files."""
     monkeypatch.setattr(library, "PRESETS_DIR", tmp_path / "data" / "presets")
+
+
+@pytest.fixture(autouse=True)
+def isolated_bundled_preset_documents(monkeypatch, tmp_path):
+    """Keep repository starter documents out of isolated unit/UI tests."""
+    monkeypatch.setattr(
+        library, "BUNDLED_PRESETS_DIR", tmp_path / "presets" / "built-in")
+    monkeypatch.setattr(
+        library, "_PRESET_CATALOG",
+        preset_catalog.PresetCatalog(lambda: library),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -52,5 +64,13 @@ def no_audio_device_probe(monkeypatch):
 @pytest.fixture(autouse=True)
 def no_remote_starter_preset_bootstrap(monkeypatch):
     """Tests seed the preset database explicitly; never download starters."""
+    original = PresetPanel._bootstrap_starter_if_empty
+
+    def skip_unless_test_bundle_exists(self):
+        bundled = Path(library.BUNDLED_PRESETS_DIR)
+        if bundled.is_dir() and any(bundled.glob("*.json")):
+            return original(self)
+        return None
+
     monkeypatch.setattr(PresetPanel, "_bootstrap_starter_if_empty",
-                        lambda _self: None)
+                        skip_unless_test_bundle_exists)

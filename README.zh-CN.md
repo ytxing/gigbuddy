@@ -24,12 +24,12 @@ tone pack，里面又是一长串 NAM 文件，每个文件都是不同 setting 
 我可以用同一段干音或自己的乐器试听，知道当前听的到底是哪一个文件，找到
 合适的声音后直接搭建整条音色链。
 
-*v1.2.3 · 2026-08-14* · [发布说明](docs/releases/v1.2.3.md) · [Tone Pack 与分享 preset 完整使用指南](docs/tone-file-management.zh-CN.md)
+*v1.2.4 · 2026-08-16* · [发布说明](docs/releases/v1.2.4.md) · [内置 Preset 使用说明](docs/built-in-presets.zh-CN.md) · [Tone Pack 与分享 preset 完整使用指南](docs/tone-file-management.zh-CN.md)
 
 在终端粘贴一行命令，即可完成下载、安装与初始化：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/install.sh | bash
 ```
 
 ![GigBuddy 安装](docs/screenshots/gigbuddy.gif)
@@ -87,10 +87,11 @@ british-green、surf-cream 之间循环。
 
 ## 主要特性
 
-完整变更见 [v1.2.0 release note](docs/releases/v1.2.0.md)。
-简单说：TONE3000 搜索现在跟随官方默认排序和 A2 过滤，LOCAL 也可以统一管理
-远程下载的 Pack 与用户自己的本地 Pack。面向客户的[音色文件管理指南](docs/tone-file-management.zh-CN.md)
-说明目录、导入、manifest、分享 preset 和文件限制。
+完整变更见 [v1.2.4 release note](docs/releases/v1.2.4.md)。简单说，20 套已校准
+starter 音色现在以 JSON 随仓库分发；全新安装后立即显示，缺少的 TONE3000
+模型在后台准备。[内置 Preset 使用说明](docs/built-in-presets.zh-CN.md)完整说明
+状态、登录、CLI 重试、编辑规则与故障恢复。LOCAL 与分享文件流程继续见
+[音色文件管理指南](docs/tone-file-management.zh-CN.md)。
 
 **音色链全面升级。** 原来固定的 AMP/CAB 两段，现在是最多六个 Slot 的
 有序链，每个 Slot 可放任意受支持的 NAM 模型或 `.wav` IR，信号路径完全
@@ -119,7 +120,11 @@ Marshall、Ampeg、Gallien-Krueger、Hartke、Darkglass），全部来自高下�
 认证作者的捕获。经典过载单块（Ibanez TS9 / TS808、JHS Morning Glory、
 Boss BD-2 / DS-1 / TB-2w）和法兹链（Big Muff → Marshall Major、Fuzz
 Face → Plexi、ToneBender → Plexi）也带着经典旋钮设置载入 preset 槽；
-可选音色塑形 IR 默认预载但保持关闭，想用随时开。
+可选音色塑形 IR 默认预载但保持关闭，想用随时开。内置 preset 以版本化 JSON
+随仓库分发，启动后立即显示；缺少的模型在后台准备，并显示
+`PREPARING`、`READY` 或 `UNAVAILABLE`。内置 preset 只读，想修改时用
+`Save As` 保存为自己的 preset。完整流程见
+[内置 Preset 使用说明](docs/built-in-presets.zh-CN.md)。
 
 **练习与试听很方便。** INPUT 行可以播放、暂停、停止、循环干音吉他贝斯
 录音，键盘（`space`/`s`/`l`）和行上的 STOP / LOOP / PLAY 按钮都支持。
@@ -138,18 +143,29 @@ AUDIO 面板把电平、静音、设备、缓冲、采样率、延迟控制在�
 打开 TUI，带子命令（`tone`、`chain`、`preset`）则走 CLI。交互式安装时
 可以选择安装位置：`.` 表示当前目录，也可输入任意路径——想让自己的项目
 文件夹内直接可用捆绑的 agent skill 时很方便；设置 `GIGBUDDY_HOME`
-可跳过询问。卸载同样一行完成：
+可跳过询问。可变数据默认独立保存在 `~/.local/share/gigbuddy-data`，安装目录中
+的 `data` 是指向它的兼容链接；安装前设置 `GIGBUDDY_DATA_HOME` 可以指定其他
+数据目录。这样升级代码 checkout 时不会搬动已下载模型和用户 preset。
+
+安装后可直接确认 CLI 与发布版本一致：
+
+```sh
+gigbuddy --version
+# gigbuddy 1.2.4
+```
+
+卸载同样一行完成：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/uninstall.sh | bash
 ```
 
-独立卸载脚本会删除本地安装、生成的运行时文件和持久化的 TONE3000 会话。
+独立卸载脚本会删除本地安装、外部数据目录和持久化的 TONE3000 会话。
 如果只想删除运行时、保留下载的音色和本地数据，可使用 `--keep-data`
 参数；登录会话仍会被删除：
 
 ```
-curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/uninstall.sh | bash -s -- --keep-data
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/uninstall.sh | bash -s -- --keep-data
 ```
 
 从源码检出开始：
@@ -166,14 +182,21 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/unins
 .venv/bin/python -m tui
 ```
 
-默认安装会准备内置 preset 目录所需的全部模型，以及 34 个官方 TONE3000
-干音 WAV。重复运行安全：已有数据库记录与非空文件会直接复用。
-`--starter-dry` 只下载前十个常用吉他样本。
+默认安装会注册内置 preset 目录，并准备 34 个官方 TONE3000 干音 WAV；
+不会等待 20 套 starter preset 所需模型下载。打开 TUI 后会立即显示 preset，
+并在后台准备缺少的模型；加载某个不可用 preset 时只重试它需要的模型。重复运行安全：
+已有数据库记录与非空文件会直接复用。`--starter-dry` 只下载前十个常用吉他样本。
 
 用户目录安装器也会在 bootstrap 前做同样的登录检查。按 `Y` 或回车会登录，
-按 `n` 可以先完成不含 starter 模型的基础安装；安装器即使自动打开浏览器，
-也会把 OAuth 地址打印出来。之后登录可运行 `gigbuddy preset bootstrap`，
-补齐 starter preset 和模型。
+按 `n` 可以先完成不含远程模型准备的基础安装；安装器即使自动打开浏览器，
+也会把 OAuth 地址打印出来。之后运行 `gigbuddy tone login`，再打开 TUI 或加载
+某个内置 preset 即可重试；需要一次准备全部内置模型时，再运行
+`gigbuddy preset bootstrap`。没有交互终端时，安装器会明确停止，不会静默跳过
+登录检查；自动化安装若确定要跳过首次 preset 登记，必须显式运行：
+
+```sh
+curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/install.sh | bash -s -- --skip-presets
+```
 
 不接音频后端、仅查看界面：
 
@@ -206,8 +229,9 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.3/scripts/unins
 5. 在 **PRESETS** 里保存：`s` 更新当前 preset，`n` 另存新名并附备注。
 
 preset 同时保存为 `data/presets/<id>-<name>.json`，可以直接备份和编辑；
-SQLite 继续作为本地索引。GigBuddy 读取 preset 时会同步已修改的 JSON，
-JSON 损坏时保留文件并提示，不会覆盖 SQLite 里最后一份可用快照。
+SQLite 继续作为本地索引。GigBuddy 会在 TUI 目录轮询、CLI preset 命令等显式
+刷新点同步手工修改的 JSON；普通 preset 查询保持只读。JSON 损坏时保留文件
+并提示，不会覆盖 SQLite 里最后一份可用快照。
 
 如果要把音色链发给其他 GigBuddy 用户，请导出单独的分享文件。分享文件只保存
 TONE3000 `model_id` 和链参数，不保存你电脑上的路径；接收方导入时，GigBuddy
@@ -309,6 +333,7 @@ gigbuddy tone login
 gigbuddy tone logout
 gigbuddy preset list
 gigbuddy preset load <name>
+gigbuddy preset bootstrap
 gigbuddy preset export <name> preset-name.json
 gigbuddy preset import preset-name.json --load
 gigbuddy chain get
@@ -343,8 +368,8 @@ PKCE 流程登录自己的 TONE3000 账号；应用不需要服务器 Secret Key
 - 请求使用 Bearer Token，登录过期时刷新会话；请求之间至少间隔 0.6 秒，
   对应官方默认的每分钟 100 次限制，服务返回 HTTP 429 时遵守
   `Retry-After`；
-- 远程列表使用有界分页；模型文件只在用户明确导入、从 Slot 选择或执行
-  用户主动请求的 starter bootstrap 时下载，不在后台镜像整个目录；
+- 远程列表使用有界分页；模型文件只在用户明确导入、从 Slot 选择，或为仓库
+  随附的 20 套内置 preset 做启动后的后台准备时下载，不会后台镜像整个目录；
 - 本地库保留创作者名称、音色元数据和来源平台，下载文件仍受创作者选择的
   许可约束；
 - 桌面客户端不会替用户代理、汇聚或向其他用户发布某个 TONE3000 账号的
@@ -378,8 +403,9 @@ TONE3000 的 API 政策与 endpoint 范围可能变化。OAuth 流程、免费�
 
 ## 依赖
 
-版本固定（v1.2.3）。升级时需同步更新 `requirements.txt` 与 `install.sh`
-中的 NeuralAudio commit。
+应用版本以 `pyproject.toml` 为准；`scripts/install.sh` 在 checkout 前使用的 tag
+定位值必须与它一致。升级依赖时需同步更新 `requirements.txt` 与公共安装脚本中
+的 NeuralAudio commit。
 
 **Python 运行时**（`requirements.txt`）：
 

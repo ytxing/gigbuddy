@@ -1,9 +1,11 @@
 """Narrow T06 coverage for canonical Slot-aware DetailPane behavior."""
 
 import asyncio
+import json
 import time
 from pathlib import Path
 
+from tui import live
 from tui.app import GigBuddyApp
 from tui.install_screen import PackInstallScreen
 from tui.library_panel import RemoteToneSelected, ToneSelected
@@ -117,6 +119,85 @@ def test_slot_focus_opens_slot_pack_and_tracks_three_states(monkeypatch, tmp_pat
     run(scenario())
 
 
+def test_slot_pack_double_click_bypass_keeps_target_through_poll(
+        monkeypatch, tmp_path):
+    root = tmp_path / "runtime"
+    tone_dir = root / "data" / "tones" / "10-slot-tone"
+    tone_dir.mkdir(parents=True)
+    first, _second, models, tone = _slot_models(tone_dir)
+    chain_file = root / "data" / "live_chain.json"
+    chain_file.write_text(json.dumps(_chain([first])), encoding="utf-8")
+    monkeypatch.setattr(live, "ROOT", root)
+    monkeypatch.setattr(live, "CHAIN_FILE", chain_file)
+    monkeypatch.setattr("tui.app.library.ROOT", root)
+    monkeypatch.setattr("tui.app.library.CHAIN_FILE", chain_file)
+    monkeypatch.setattr("tui.app.library.local_models_by_tone",
+                        lambda _path: [dict(model) for model in models])
+    monkeypatch.setattr("tui.app.library.get_tone", lambda _tone_id: tone)
+    monkeypatch.setattr("tui.panels.library.local_models_by_tone",
+                        lambda _path: [dict(model) for model in models])
+    monkeypatch.setattr("tui.panels.library.get_tone", lambda _tone_id: tone)
+    writes = []
+    write_chain = live.write_chain
+
+    def record_write(chain, **_kwargs):
+        persisted = write_chain(chain, **_kwargs)
+        writes.append(persisted)
+        return persisted
+
+    monkeypatch.setattr(live, "write_chain", record_write)
+    assert live.read_chain()["slots"][0]["path"] == first
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.15)
+            panel = app.query_one(ChainPanel)
+            detail = app.query_one(DetailPane)
+            assert panel.state.slot_count == 1
+            await _wait_for_dynamic_slots(pilot, panel, 1)
+            panel.slot_widgets[0].focus()
+            await pilot.pause()
+
+            assert panel.state.target_index == 0
+            assert panel.state.slot(0).status is SlotStatus.ACTIVE
+
+            # Browse this tone through DetailPane rather than entering Pack
+            # from the Slot itself; the selected Chain target must carry over.
+            detail.show(tone)
+            await pilot.pause()
+            detail._view_tabs.focus()
+            await pilot.press("]")
+            await pilot.pause()
+            assert detail._pack_origin == "description"
+            assert detail._pack_slot_index == 0
+
+            await pilot.double_click(detail._pack_table, offset=(8, 1))
+            await pilot.pause()
+            assert len(writes) == 1
+            assert writes[0]["slots"][0] == {
+                "path": None, "candidate": first,
+            }
+            assert live.read_chain()["slots"][0] == {
+                "path": None, "candidate": first,
+            }
+            assert panel.state.slot(0).status is SlotStatus.BYPASS
+            assert panel.state.slot(0).candidate == first
+
+            # Let multiple 0.2s refresh ticks observe the written chain. The
+            # logical target and DetailPane context must survive reconciliation.
+            await pilot.pause(0.65)
+            assert live.read_chain()["slots"][0] == {
+                "path": None, "candidate": first,
+            }
+            assert panel.state.target_index == 0
+            assert panel.state.slot(0).status is SlotStatus.BYPASS
+            assert panel.state.slot(0).candidate == first
+            assert detail._pack_slot_index == 0
+
+    run(scenario())
+
+
 def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
         monkeypatch, tmp_path):
     first = str(tmp_path / "first.nam")
@@ -168,6 +249,7 @@ def test_slot_pack_lists_remote_missing_models_and_installs_cursor_row(
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.15)
             panel = app.query_one(ChainPanel)
+            await _wait_for_dynamic_slots(pilot, panel, 1)
             panel.slot_widgets[0].focus()
             detail = app.query_one(DetailPane)
             for _ in range(20):
@@ -395,6 +477,7 @@ def test_library_pack_uses_existing_target_without_changing_source(
             await pilot.pause(0.15)
             panel = app.query_one(ChainPanel)
             detail = app.query_one(DetailPane)
+            await _wait_for_dynamic_slots(pilot, panel, 1)
             panel.slot_widgets[0].focus()
             await pilot.pause()
 

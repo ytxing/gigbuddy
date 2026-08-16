@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "fender-deluxe-reverb-klon",
+  "name": "fender-deluxe-reverb-klon",
+  "note": "Fender '65 Deluxe Reverb Reissue boosted with a J. Rockett Archer (Klon-style) - blackface sparkle into singing sustain at the edge of breakup.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": 4.03,
+        "tone_id": 43185,
+        "model_id": 382101
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}

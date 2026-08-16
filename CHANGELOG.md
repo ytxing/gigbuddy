@@ -1,5 +1,81 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.2.4] - 2026-08-16
+
+Full release note: [GigBuddy v1.2.4](docs/releases/v1.2.4.md).
+
+### Added
+
+- Seeded and imported Presets now carry each NAM Slot's recommended output
+  calibration (`output_gain_db = -18 - metadata.loudness` dB, matching the
+  realtime engine), so fresh installs are calibrated out of the box.
+- The 20 built-in Presets are now distributed as repository JSON. GigBuddy
+  registers them without an initialization download, prepares missing models
+  in the background, reports per-Preset availability, and keeps built-in rows
+  read-only. See the [built-in Preset guide](docs/built-in-presets.md).
+
+### Fixed
+
+- Interrupted Preset writes now recover from the committed SQLite row on the
+  next explicit catalog refresh, while uncertain JSON versions are preserved in
+  quarantine.
+- Duplicate untracked user Presets converge into quarantine instead of warning
+  forever, and built-in Presets remain visible when stale model metadata is
+  unsupported.
+- Bundled registration and editable Preset reconciliation now share one file
+  lock and one catalog snapshot, preventing a late repository refresh from
+  racing a user save or quarantining against different source generations.
+- Editable Preset file checks now include device and ctime identity, so an
+  equal-size edit that restores the previous mtime is still detected before
+  publication; legacy tracking tokens migrate on the next catalog refresh.
+- Failed upgrades preserve preexisting runtime and data directories even when
+  `git fetch` fails, and existing custom data links are reused automatically.
+- Every post-clone installer failure now enters the same one-shot rollback path;
+  an existing non-GigBuddy directory is rejected before rollback is armed and
+  is never mistaken for a partial clone.
+- Non-interactive installs can proceed only with explicit `--skip-presets`, and
+  command installation replaces only physically internal links or the exact
+  generated wrapper; external links and user scripts that merely mention the
+  install path are preserved.
+- Failed CLI preparation lists each unavailable built-in Preset, and the
+  uninstaller now provides `-h` / `--help` usage.
+- Failed built-in model preparation now leaves rows retryable as `UNAVAILABLE`,
+  and delayed Preset highlights are ignored while the TUI screen is closing.
+- Late preparation workers are scoped to the exact chain semantics and Tone
+  sources they started with, so a same-model Preset replacement cannot inherit
+  stale `PREPARING` or `UNAVAILABLE` state, including after a plain catalog
+  refresh.
+- Failed engine upgrades restore the previous Eigen tree and report incomplete
+  recovery instead of silently accepting it.
+- The uninstaller resolves relative command links and generated-wrapper parent
+  aliases before deciding ownership, while preserving external, malformed, and
+  custom commands.
+
+## [1.2.3] - 2026-08-14
+
+Full release note: [GigBuddy v1.2.3](docs/releases/v1.2.3.md).
+
+### Fixed
+
+- The one-line installer now prints the complete output, command, and exit
+  status when a command fails.
+
+## [1.2.2] - 2026-08-14
+
+Full release note: [GigBuddy v1.2.2](docs/releases/v1.2.2.md).
+
+### Added
+
+- Added three calibrated shareable Preset examples and a maintenance script
+  for applying NAM loudness calibration.
+
+### Fixed
+
+- Decimal-valued TONE3000 model labels such as `G5.0` and `0.25in` are no
+  longer mistaken for filenames.
+
 ## [1.2.1] - 2026-08-14
 
 Full release note: [GigBuddy v1.2.1](docs/releases/v1.2.1.md).

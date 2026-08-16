@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "kind": "gigbuddy-bundled-preset",
+  "catalog_key": "marshall-1959bja-greenback",
+  "name": "marshall-1959bja-greenback",
+  "note": "Marshall 1959BJA high input stage 4 into a Marshall 1960TV Greenback 4x12 (M201) - Green Day / Billie Joe territory.",
+  "chain": {
+    "slots": [
+      {
+        "output_gain_db": -2.56,
+        "tone_id": 76884,
+        "model_id": 670781
+      },
+      {
+        "tone_id": 75087,
+        "model_id": 656897
+      }
+    ],
+    "gain": 1.0,
+    "master": 1.0,
+    "quality": 1.0
+  }
+}
