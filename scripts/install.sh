@@ -1069,6 +1069,22 @@ is_gigbuddy_checkout() {
   return 1
 }
 
+resolve_install_ref() {
+  local requested="$1"
+  local candidate
+  for candidate in \
+      "$requested" \
+      "refs/tags/$requested" \
+      "refs/remotes/origin/$requested"; do
+    if git -C "$INSTALL_ROOT" rev-parse --verify --quiet \
+        "$candidate^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 step "Checking prerequisites"
 command -v git >/dev/null 2>&1 || die "git is required"
 
@@ -1128,9 +1144,15 @@ else
     fi
     step "Updating GigBuddy to $REPO_REF"
     # Old shallow tag clones can retain a fetch refspec for a tag no longer
-    # published by the remote. An explicit wildcard refspec avoids inheriting it.
-    run_quiet git -C "$INSTALL_ROOT" fetch --quiet --force origin "+refs/tags/*:refs/tags/*"
-    run_quiet git -C "$INSTALL_ROOT" checkout --quiet --detach "$REPO_REF"
+    # published by the remote. Explicit refspecs refresh both tags and branch
+    # refs without inheriting that stale configuration.
+    run_quiet git -C "$INSTALL_ROOT" fetch --quiet --force origin \
+      "+refs/tags/*:refs/tags/*" \
+      "+refs/heads/*:refs/remotes/origin/*"
+    if ! checkout_ref="$(resolve_install_ref "$REPO_REF")"; then
+      die "could not resolve GigBuddy ref: $REPO_REF"
+    fi
+    run_quiet git -C "$INSTALL_ROOT" checkout --quiet --detach "$checkout_ref"
   else
     step "Downloading GigBuddy $REPO_REF"
     mkdir -p "$(dirname "$INSTALL_ROOT")"

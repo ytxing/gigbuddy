@@ -380,7 +380,8 @@ def test_user_installer_fetches_tags_despite_a_legacy_tag_refspec(tmp_path):
 
     script = (Path(__file__).resolve().parents[1] / "scripts" / "install.sh").read_text(
         encoding="utf-8")
-    assert 'fetch --quiet --force origin "+refs/tags/*:refs/tags/*"' in script
+    assert '"+refs/tags/*:refs/tags/*"' in script
+    assert '"+refs/heads/*:refs/remotes/origin/*"' in script
     assert "fetch --quiet --tags --force origin" not in script
 
 
@@ -719,7 +720,7 @@ def test_existing_install_failure_restores_migrated_legacy_tones(tmp_path):
     fake_git = Path(env["PATH"].split(os.pathsep)[0]) / "git"
     fake_git.write_text(
         "#!/usr/bin/env bash\n"
-        "if [[ \" $* \" == *\" rev-parse HEAD \"* ]]; then\n"
+        "if [[ \" $* \" == *\" rev-parse \"* ]]; then\n"
         "  printf 'old-head\\n'\n"
         "  exit 0\n"
         "fi\n"
@@ -1177,6 +1178,8 @@ def test_existing_install_failure_restores_checkout_and_database(
     git("-C", source, "push", "origin", "HEAD:refs/heads/main")
     git("clone", remote, install_root)
     git("-C", install_root, "checkout", "--detach", old_head)
+    git("-C", install_root, "branch", "-D", "main")
+    git("-C", install_root, "update-ref", "-d", "refs/remotes/origin/main")
 
     data_dir = install_root / "data"
     data_dir.mkdir()
@@ -1247,7 +1250,7 @@ def test_existing_install_failure_restores_checkout_and_database(
         "GIGBUDDY_BIN_DIR": str(tmp_path / "global-bin"),
         "GIGBUDDY_DATA_HOME": str(external_data),
         "GIGBUDDY_HOME": str(install_root),
-        "GIGBUDDY_REF": "v-next",
+        "GIGBUDDY_REF": "main",
         "GIGBUDDY_UV": str(fake_uv),
         "GIGBUDDY_VERBOSE": "1",
         "HOME": str(tmp_path / "home"),
