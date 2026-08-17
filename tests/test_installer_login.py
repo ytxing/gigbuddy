@@ -632,6 +632,114 @@ def test_user_installer_allows_automation_with_explicit_skip_presets(tmp_path):
     assert not command.is_symlink()
 
 
+def test_user_installer_migrates_legacy_tones_directory(tmp_path):
+    env, fixture, install_root, _, _ = _prepare_minimal_user_install(tmp_path)
+    legacy_tones = fixture / "tones"
+    legacy_tones.mkdir()
+    (legacy_tones / "legacy.nam").write_text("legacy", encoding="utf-8")
+    data_root = Path(f"{install_root}-data")
+
+    result = _run_minimal_user_install(
+        env, "--skip-presets", "--skip-dry-inputs", "--no-engine")
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert not (install_root / "tones").exists()
+    assert (data_root / "tones" / "legacy.nam").read_text(
+        encoding="utf-8") == "legacy"
+
+
+def test_user_installer_refuses_nonempty_legacy_tones_target_without_overwrite(
+        tmp_path):
+    env, fixture, install_root, _, _ = _prepare_minimal_user_install(tmp_path)
+    legacy_tones = fixture / "tones"
+    legacy_tones.mkdir()
+    (legacy_tones / "legacy.nam").write_text("legacy", encoding="utf-8")
+    data_root = Path(f"{install_root}-data")
+    target_tones = data_root / "tones"
+    target_tones.mkdir(parents=True)
+    (target_tones / "existing.nam").write_text("existing", encoding="utf-8")
+
+    result = _run_minimal_user_install(
+        env, "--skip-presets", "--skip-dry-inputs", "--no-engine")
+
+    assert result.returncode != 0
+    assert "refusing to merge" in result.stderr
+    assert (target_tones / "existing.nam").read_text(
+        encoding="utf-8") == "existing"
+    assert not install_root.exists()
+
+
+def test_user_installer_does_not_follow_legacy_tones_symlink(tmp_path):
+    env, fixture, install_root, _, _ = _prepare_minimal_user_install(tmp_path)
+    symlink_target = fixture / "user-tones"
+    symlink_target.mkdir()
+    (symlink_target / "user.nam").write_text("user", encoding="utf-8")
+    (fixture / "tones").symlink_to(symlink_target, target_is_directory=True)
+    data_root = Path(f"{install_root}-data")
+
+    result = _run_minimal_user_install(
+        env, "--skip-presets", "--skip-dry-inputs", "--no-engine")
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    legacy_link = install_root / "tones"
+    assert legacy_link.is_symlink()
+    assert legacy_link.resolve().joinpath("user.nam").read_text(
+        encoding="utf-8") == "user"
+    assert not (data_root / "tones").exists()
+
+
+def test_existing_install_failure_restores_migrated_legacy_tones(tmp_path):
+    env, fixture, install_root, _, _ = _prepare_minimal_user_install(tmp_path)
+    install_root.mkdir()
+    (install_root / ".git").mkdir()
+    (install_root / ".gigbuddy-install").write_text(
+        "GigBuddy\n", encoding="utf-8")
+    (install_root / "pyproject.toml").write_text(
+        '[project]\nname = "gigbuddy"\nversion = "1.2.4"\n',
+        encoding="utf-8",
+    )
+    (install_root / "requirements.txt").write_text("", encoding="utf-8")
+    (install_root / "scripts").mkdir()
+    (install_root / "scripts" / "bootstrap.py").write_text(
+        "from pathlib import Path\n"
+        "root = Path(__file__).resolve().parents[1]\n"
+        "(root / 'bootstrap-args').write_text('started', encoding='utf-8')\n"
+        "raise SystemExit('bootstrap failed after legacy migration')\n",
+        encoding="utf-8",
+    )
+    shutil.copytree(fixture / ".venv", install_root / ".venv", symlinks=True)
+    (install_root / "bin").mkdir()
+    command = install_root / "bin" / "gigbuddy"
+    command.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    command.chmod(0o755)
+    (install_root / "tones").mkdir()
+    (install_root / "tones" / "legacy.nam").write_text(
+        "legacy", encoding="utf-8")
+
+    fake_git = Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \" $* \" == *\" rev-parse HEAD \"* ]]; then\n"
+        "  printf 'old-head\\n'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \" $* \" == *\" fetch \"* || \" $* \" == *\" checkout \"* ]]; then exit 0; fi\n"
+        "exit 64\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    data_root = Path(f"{install_root}-data")
+
+    result = _run_minimal_user_install(
+        env, "--skip-presets", "--skip-dry-inputs", "--no-engine")
+
+    assert result.returncode != 0
+    assert "bootstrap failed after legacy migration" in result.stderr
+    assert (install_root / "tones" / "legacy.nam").read_text(
+        encoding="utf-8") == "legacy"
+    assert not (data_root / "tones").exists()
+
+
 def test_user_installer_requires_tty_without_explicit_skip_presets(tmp_path):
     env, _, install_root, _, fake_bin = _prepare_minimal_user_install(tmp_path)
     login_capture = tmp_path / "login-capture"
@@ -899,7 +1007,8 @@ def test_new_install_links_checkout_to_external_data_home_before_bootstrap(
         data_root.resolve())
 
 
-def test_source_install_accepts_existing_relative_data_link(tmp_path):
+def test_source_install_accepts_existing_relative_data_link_and_migrates_tones(
+        tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "checkout"
     data_root = tmp_path / "gigbuddy-data"
@@ -907,6 +1016,9 @@ def test_source_install_accepts_existing_relative_data_link(tmp_path):
     (checkout / "scripts").mkdir()
     (checkout / ".venv" / "bin").mkdir(parents=True)
     data_root.mkdir()
+    legacy_tones = checkout / "tones"
+    legacy_tones.mkdir()
+    (legacy_tones / "legacy.nam").write_text("legacy", encoding="utf-8")
     (checkout / ".venv" / "bin" / "python").symlink_to(sys.executable)
     (checkout / "requirements.txt").write_text("", encoding="utf-8")
     (checkout / "pyproject.toml").write_text(
@@ -948,6 +1060,9 @@ def test_source_install_accepts_existing_relative_data_link(tmp_path):
     assert (checkout / "data").is_symlink()
     assert os.readlink(checkout / "data") == relative_target
     assert (checkout / "data").resolve() == data_root.resolve()
+    assert not legacy_tones.exists()
+    assert (data_root / "tones" / "legacy.nam").read_text(
+        encoding="utf-8") == "legacy"
 
 
 def test_existing_install_reuses_custom_data_link_without_redeclaring_home(

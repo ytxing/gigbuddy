@@ -41,6 +41,7 @@ import preset_catalog as preset_catalog_module
 import tone3000
 
 ROOT = Path(__file__).resolve().parent.parent
+DATA_ROOT = chain_protocol.managed_data_root(ROOT)
 
 
 def _project_version() -> str:
@@ -74,13 +75,20 @@ def model_is_ir(model: dict | None, tone: dict | None = None) -> bool:
 
 
 def _to_rel_path(path: str) -> str:
-    """存储用（REQ-035 portable）：项目根内的路径 → 相对根（data/...）；
-    根外路径（自定义外部文件）保持绝对。"""
+    """存储用（REQ-035 portable）：受管数据 → 逻辑 ``data/...`` 路径。
+
+    用户安装版的 ``ROOT/data`` 是外部数据目录的兼容链接，因此物理路径
+    可能位于 checkout 根外，但仍属于 GigBuddy 的受管数据。真正的自定义
+    外部文件继续保持绝对路径。
+    """
     p = Path(_to_abs_path(path)).resolve(strict=False)
     try:
-        return p.relative_to(ROOT.resolve(strict=False)).as_posix()
+        return chain_protocol.logical_data_path(p, root=ROOT)
     except ValueError:
-        return str(p)
+        try:
+            return p.relative_to(ROOT.resolve(strict=False)).as_posix()
+        except ValueError:
+            return str(p)
 
 
 def _path_forms(path: str) -> tuple[str, ...]:
@@ -133,10 +141,10 @@ def _local_file_exists(path: str | None) -> bool:
         return Path(_to_abs_path(str(path))).is_file()
     except (OSError, TypeError, ValueError):
         return False
-DB_FILE = ROOT / "data" / "gigbuddy.db"
-CHAIN_FILE = ROOT / "data" / "live_chain.json"  # same path as tui/live.py (engine protocol)
-TONES_DIR = ROOT / "data" / "tones"             # same as tui/live.py
-PRESETS_DIR = ROOT / "data" / "presets"
+DB_FILE = DATA_ROOT / "gigbuddy.db"
+CHAIN_FILE = DATA_ROOT / "live_chain.json"  # same path as tui/live.py (engine protocol)
+TONES_DIR = DATA_ROOT / "tones"             # same as tui/live.py
+PRESETS_DIR = DATA_ROOT / "presets"
 BUNDLED_PRESETS_DIR = ROOT / "presets" / "built-in"
 PACK_MANIFEST_NAME = "gigbuddy.json"
 _PACK_ASSET_FORMATS = {".nam": "nam", ".wav": "ir"}
@@ -2668,7 +2676,7 @@ def _validate_preset_file(path: str, index: int) -> str:
     candidate = Path(_to_abs_path(path))
     try:
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to((ROOT / "data" / "tones").resolve(strict=False))
+        resolved.relative_to(TONES_DIR.resolve(strict=False))
     except (OSError, ValueError) as exc:
         raise ValueError(
             f"Slot {index + 1:02d} file missing or outside data/tones: {path}") from exc

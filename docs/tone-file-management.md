@@ -42,7 +42,14 @@ the installed link as its source of truth and refuses a conflicting
 `GIGBUDDY_DATA_HOME`. Use `--keep-data` to remove the code checkout while
 retaining this directory.
 
-A Pack in `~/.local/share/gigbuddy/tones/` or beside the checkout's `src/`
+A previous install may have left a real directory at
+`~/.local/share/gigbuddy/tones/`. The installer migrates that directory to the
+managed `~/.local/share/gigbuddy-data/tones/` location (or the configured data
+location) and removes the old directory. It never merges into a non-empty
+target: a conflicting target makes installation fail with both locations left
+untouched. Unknown legacy symlinks are left in place and are not followed.
+
+After migration, a Pack in the old path or beside the checkout's `src/`
 directory is not scanned. GigBuddy only scans the managed `data/tones/` root.
 
 ## Remote import from TONE3000
@@ -127,11 +134,11 @@ cp "/path/to/my-v30-cab.wav" data/tones/my-pack/
 For the default user install:
 
 ```sh
-mkdir -p ~/.local/share/gigbuddy/data/tones/my-pack
+mkdir -p ~/.local/share/gigbuddy-data/tones/my-pack
 cp "/path/to/my-clean-capture.nam" \
-  ~/.local/share/gigbuddy/data/tones/my-pack/
+  ~/.local/share/gigbuddy-data/tones/my-pack/
 cp "/path/to/my-v30-cab.wav" \
-  ~/.local/share/gigbuddy/data/tones/my-pack/
+  ~/.local/share/gigbuddy-data/tones/my-pack/
 ```
 
 You can copy the whole Pack directory instead of individual files. Keep the

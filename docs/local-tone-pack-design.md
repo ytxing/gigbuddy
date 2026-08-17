@@ -6,7 +6,8 @@
 本文说明 GigBuddy 当前如何保存远程下载的音色、如何加载用户自己的本地
 Tone Pack，以及文件格式、目录结构和元数据方面的限制。这里的 `data/`
 路径是 GigBuddy 数据根目录的相对写法：源码 checkout 中位于仓库下，安装版
-默认位于 `~/.local/share/gigbuddy/` 下。
+默认位于 `~/.local/share/gigbuddy-data/` 下。安装版 checkout 的
+`<GigBuddy home>/data` 只是指向该数据根目录的兼容链接。
 
 ## 1. 结论
 
@@ -34,7 +35,7 @@ data/tones/<tone-id>-<title-slug>/
 安装后的实际根目录是：
 
 ```text
-~/.local/share/gigbuddy/data/tones/
+~/.local/share/gigbuddy-data/tones/
 ```
 
 `data/gigbuddy.db` 保存远程 Tone/Model 的 TONE3000 索引和下载状态，也保存
@@ -106,7 +107,9 @@ data/tones/my-pack/
 LOCAL 页面和文件变化后扫描它，并自动把含有受支持文件的目录列入 LOCAL。
 当前没有把项目外文件夹通过 `tone import-local` 导入的命令；项目外的文件
 需要用户自行复制到受管理的 `data/tones/<local-pack>/` 目录。GigBuddy 不会
-修改、重命名或删除原始文件。
+修改、重命名或删除原始文件。安装器会把旧版安装遗留的真实
+`<GigBuddy home>/tones/` 迁移到受管理根目录；目标已有内容时拒绝合并，遗留
+符号链接不会被跟随。
 
 本地 Pack 不要求 TONE3000 Tone ID、Model ID、作者、标签、下载量或来源 URL。缺失字段使用以下回退：
 

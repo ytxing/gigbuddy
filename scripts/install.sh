@@ -60,6 +60,11 @@ DATABASE_ROLLBACK_PREPARED=0
 DATA_ROOT_CREATED=0
 DATA_ROOT_MIGRATED=0
 DATA_LINK_CREATED=0
+LEGACY_TONES_MIGRATED=0
+LEGACY_TONES_SOURCE=""
+LEGACY_TONES_TARGET=""
+LEGACY_TONES_TARGET_WAS_EMPTY=0
+LEGACY_TONES_TARGET_PARENT_CREATED=0
 EIGEN_BACKUP_DIR=""
 EIGEN_ROLLBACK_TARGET=""
 EIGEN_ORIGINAL_PRESENT=0
@@ -145,6 +150,43 @@ die() {
   exit 1
 }
 
+restore_legacy_tones() {
+  local source="${LEGACY_TONES_SOURCE:-}"
+  local target="${LEGACY_TONES_TARGET:-}"
+  local target_parent
+  [[ "${LEGACY_TONES_MIGRATED:-0}" == "1" ]] || return 0
+  if [[ -z "$source" || -z "$target" ]]; then
+    printf 'Legacy tones rollback metadata is incomplete.\n' >&2
+    return 1
+  fi
+  if [[ -e "$source" || -L "$source" ]]; then
+    printf 'Cannot restore legacy tones; source path is occupied: %s\n' \
+      "$source" >&2
+    return 1
+  fi
+  if [[ ! -d "$target" || -L "$target" ]]; then
+    printf 'Cannot restore legacy tones; migrated target is unavailable: %s\n' \
+      "$target" >&2
+    return 1
+  fi
+  if ! mv -- "$target" "$source"; then
+    printf 'Could not restore legacy tones to %s\n' "$source" >&2
+    return 1
+  fi
+  if [[ "${LEGACY_TONES_TARGET_WAS_EMPTY:-0}" == "1" ]] \
+      && ! mkdir "$target"; then
+    printf 'Could not restore the previous empty tones target: %s\n' \
+      "$target" >&2
+    return 1
+  fi
+  if [[ "${LEGACY_TONES_TARGET_PARENT_CREATED:-0}" == "1" ]]; then
+    target_parent="$(dirname -- "$target")"
+    rmdir "$target_parent" 2>/dev/null || true
+  fi
+  LEGACY_TONES_MIGRATED=0
+  return 0
+}
+
 rollback_install() {
   # 安装失败时撤销本次安装做的改动，恢复到安装前状态：
   # - 本次新建的安装目录 → 整个删除
@@ -156,6 +198,9 @@ rollback_install() {
   [[ -f "$ROLLBACK_FILE" ]] || return 0
   . "$ROLLBACK_FILE"
   if ! restore_eigen_backup; then
+    rollback_failed=1
+  fi
+  if ! restore_legacy_tones; then
     rollback_failed=1
   fi
   if [[ "$SOURCE_CHECKOUT" == 1 ]]; then
@@ -615,6 +660,73 @@ configure_external_data_root() {
   printf 'DATA_LINK_CREATED=1\n' >> "$ROLLBACK_FILE"
 }
 
+migrate_legacy_tones() {
+  local source="$INSTALL_ROOT/tones"
+  local target target_parent target_was_empty=0 target_parent_created=0
+
+  # A legacy symlink may point to user-owned data. Do not follow or remove it.
+  if [[ -L "$source" ]]; then
+    printf 'Legacy tones symlink left in place; migrate it manually: %s\n' \
+      "$source" >&2
+    return 0
+  fi
+  [[ -e "$source" ]] || return 0
+  [[ -d "$source" ]] || \
+    die "legacy tones path exists but is not a directory: $source"
+
+  if [[ "$SOURCE_CHECKOUT" == 1 ]]; then
+    target="$INSTALL_ROOT/data/tones"
+  else
+    [[ -n "$DATA_ROOT" ]] || die "cannot determine the managed data path"
+    target="$DATA_ROOT/tones"
+  fi
+  target_parent="$(dirname -- "$target")"
+
+  if [[ -L "$target" ]]; then
+    die "managed tones target is a symlink; refusing to replace it: $target"
+  fi
+  if [[ -e "$target" && ! -d "$target" ]]; then
+    die "managed tones target is not a directory: $target"
+  fi
+  if [[ -d "$target" ]]; then
+    if [[ -n "$(command ls -A "$target" 2>/dev/null)" ]]; then
+      die "refusing to merge legacy tones into a non-empty target: $target"
+    fi
+    rmdir "$target" || die "could not prepare the empty tones target: $target"
+    target_was_empty=1
+  fi
+  if [[ ! -d "$target_parent" ]]; then
+    mkdir -p "$target_parent" || \
+      die "could not create the managed tones parent: $target_parent"
+    target_parent_created=1
+  fi
+  [[ ! -e "$target" && ! -L "$target" ]] || \
+    die "managed tones target appeared during migration: $target"
+  mv -- "$source" "$target" || {
+    if [[ "$target_was_empty" == 1 && ! -e "$target" ]]; then
+      mkdir "$target" || true
+    fi
+    die "could not migrate legacy tones to $target"
+  }
+
+  LEGACY_TONES_MIGRATED=1
+  LEGACY_TONES_SOURCE="$source"
+  LEGACY_TONES_TARGET="$target"
+  LEGACY_TONES_TARGET_WAS_EMPTY="$target_was_empty"
+  LEGACY_TONES_TARGET_PARENT_CREATED="$target_parent_created"
+  if ! {
+    printf 'LEGACY_TONES_MIGRATED=1\n'
+    printf 'LEGACY_TONES_SOURCE=%q\n' "$source"
+    printf 'LEGACY_TONES_TARGET=%q\n' "$target"
+    printf 'LEGACY_TONES_TARGET_WAS_EMPTY=%s\n' "$target_was_empty"
+    printf 'LEGACY_TONES_TARGET_PARENT_CREATED=%s\n' "$target_parent_created"
+  } >> "$ROLLBACK_FILE"; then
+    restore_legacy_tones || true
+    die "could not record legacy tones migration state"
+  fi
+  printf 'Migrated legacy tones to %s\n' "$target"
+}
+
 run_quiet() {
   local status
   if [[ "${GIGBUDDY_VERBOSE:-0}" == "1" ]]; then
@@ -1029,6 +1141,7 @@ else
 fi
 
 configure_external_data_root
+migrate_legacy_tones
 if [[ "$SOURCE_CHECKOUT" != 1 \
       && "$DATABASE_ROLLBACK_PREPARED" != 1 ]]; then
   if ! prepare_database_rollback; then

@@ -35,6 +35,8 @@ import urllib.request
 import webbrowser
 from pathlib import Path, PurePosixPath
 
+import chain_protocol
+
 
 @dataclass
 class SearchPage:
@@ -261,7 +263,8 @@ _request_lock = threading.Lock()
 _token_lock = threading.RLock()
 
 ROOT = Path(__file__).resolve().parent.parent
-VERIFIED_FILE = ROOT / "data" / "verified_users.json"
+DATA_ROOT = chain_protocol.managed_data_root(ROOT)
+VERIFIED_FILE = DATA_ROOT / "verified_users.json"
 _verified_cache: set[str] | None = None
 _verified_write_lock = threading.Lock()
 

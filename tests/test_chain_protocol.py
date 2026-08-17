@@ -167,6 +167,86 @@ def test_database_backed_chain_allows_unregistered_but_rejects_unsupported_model
             {"slots": [{"path": "data/tones/legacy.nam"}]}, root=root)
 
 
+def test_external_data_link_preserves_logical_chain_paths_and_model_validation(
+        tmp_path):
+    root = tmp_path / "gigbuddy"
+    data = tmp_path / "gigbuddy-data"
+    tones = data / "tones"
+    dry_inputs = data / "dry_inputs"
+    tones.mkdir(parents=True)
+    dry_inputs.mkdir(parents=True)
+    root.mkdir()
+    (root / "data").symlink_to(data, target_is_directory=True)
+    model = tones / "amp.nam"
+    dry_input = dry_inputs / "dry.wav"
+    model.write_text("nam")
+    dry_input.write_bytes(b"wav")
+
+    with sqlite3.connect(data / "gigbuddy.db") as conn:
+        conn.executescript("""
+            CREATE TABLE tones (
+                id INTEGER PRIMARY KEY, gear TEXT, format TEXT, platform TEXT
+            );
+            CREATE TABLE models (
+                id INTEGER PRIMARY KEY, tone_id INTEGER, local_path TEXT,
+                architecture TEXT, architecture_version TEXT, name TEXT,
+                model_url TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO tones VALUES (1, 'amp-cab', 'nam', 'nam')")
+        conn.execute(
+            "INSERT INTO models "
+            "(id, tone_id, local_path, architecture, name) "
+            "VALUES (101, 1, 'data/tones/amp.nam', 'SlimmableContainer', 'amp.nam')"
+        )
+        conn.commit()
+
+    candidate = {
+        "slots": [
+            {"path": "data/tones/amp.nam"},
+            {"path": None, "candidate": "data/tones/amp.nam"},
+        ],
+        "input": {"source": "file", "file": "data/dry_inputs/dry.wav"},
+    }
+    normalized = chain_protocol.normalize_chain(candidate, root=root)
+    assert normalized["slots"] == [
+        {"path": str(model.resolve())},
+        {"path": None, "candidate": str(model.resolve())},
+    ]
+    assert normalized["input"]["file"] == str(dry_input.resolve())
+
+    chain_file = root / "data" / "live_chain.json"
+    chain_protocol.write_chain_file(chain_file, candidate, root=root)
+    assert json.loads(chain_file.read_text()) == {
+        "gain": 1.0,
+        "master": 1.0,
+        "quality": 1.0,
+        "mute": False,
+        "revision": 1,
+        "slots": [
+            {"path": "data/tones/amp.nam"},
+            {"path": None, "candidate": "data/tones/amp.nam"},
+        ],
+        "input": {
+            "source": "file", "file": "data/dry_inputs/dry.wav",
+            "state": "stopped", "loop": False,
+        },
+    }
+    round_trip = chain_protocol.read_chain_file(chain_file, root=root)
+    assert round_trip["slots"] == normalized["slots"]
+    assert round_trip["input"] == normalized["input"]
+
+    with sqlite3.connect(data / "gigbuddy.db") as conn:
+        conn.execute(
+            "UPDATE models SET architecture = 'WaveNet' WHERE id = 101")
+        conn.commit()
+    with pytest.raises(chain_protocol.ChainProtocolError,
+                       match="supported A2/IR"):
+        chain_protocol.normalize_chain(
+            {"slots": [{"path": "data/tones/amp.nam"}]}, root=root)
+
+
 def test_bypass_candidate_is_scoped_and_serialized_as_a_relative_tone_path(tmp_path):
     root = _root(tmp_path)
     got = chain_protocol.normalize_chain(

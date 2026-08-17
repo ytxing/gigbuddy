@@ -41,6 +41,41 @@ PLAY_STATES = {"playing", "paused", "stopped"}
 SUPPORTED_EXTENSIONS = {".nam", ".wav"}
 
 
+class ChainProtocolError(ValueError):
+    """Raised when a candidate chain cannot be represented canonically."""
+
+
+class ChainFileConflict(ChainProtocolError):
+    """Raised when a compare-and-swap write sees a different chain file."""
+
+
+def managed_data_root(root: Path = PROJECT_ROOT) -> Path:
+    """Return the physical root of GigBuddy's managed mutable data.
+
+    Installed checkouts keep a compatibility ``data`` link at the logical
+    project path. Runtime file I/O must use the resolved target so every
+    caller sees the same physical data directory.
+    """
+    return (Path(root) / "data").resolve(strict=False)
+
+
+def _data_root(root: Path) -> Path:
+    """Backward-compatible private alias for the managed data root."""
+    return managed_data_root(root)
+
+
+def logical_data_path(path: Path | str, *, root: Path = PROJECT_ROOT) -> str:
+    """Return a managed data path in its portable ``data/...`` form.
+
+    ``root/data`` may be a compatibility symlink to an external mutable data
+    directory. Physical paths are used for containment and file I/O, while
+    Chain and library records retain the logical path under ``data/``.
+    """
+    resolved = Path(path).resolve(strict=False)
+    relative = resolved.relative_to(_data_root(Path(root)))
+    return Path("data", relative).as_posix()
+
+
 def _known_library_model_is_supported(path: Path, root: Path) -> bool | None:
     """Classify a path when the local library has an exact model record.
 
@@ -48,12 +83,12 @@ def _known_library_model_is_supported(path: Path, root: Path) -> bool | None:
     asset. A valid local file without a model row remains loadable and returns
     ``None``, just like a standalone protocol caller without a database.
     """
-    database = root / "data" / "gigbuddy.db"
+    database = _data_root(root) / "gigbuddy.db"
     if not database.is_file():
         return None
     try:
         resolved = path.resolve(strict=False)
-        relative = resolved.relative_to(root.resolve(strict=False)).as_posix()
+        relative = logical_data_path(resolved, root=root)
         with sqlite3.connect(database) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -77,14 +112,6 @@ def _known_library_model_is_supported(path: Path, root: Path) -> bool | None:
         )
         for row in rows
     )
-
-
-class ChainProtocolError(ValueError):
-    """Raised when a candidate chain cannot be represented canonically."""
-
-
-class ChainFileConflict(ChainProtocolError):
-    """Raised when a compare-and-swap write sees a different chain file."""
 
 
 _UNSET = object()
@@ -171,7 +198,7 @@ def _allowed_file(path: Any, *, root: Path, directory: str,
         raise ChainProtocolError(
             f"unsupported model architecture; GigBuddy accepts only supported "
             f"A2/IR models: {path}")
-    return resolved, str(resolved.relative_to(root))
+    return resolved, logical_data_path(resolved, root=root)
 
 
 def _normalize_input(value: Any, *, root: Path) -> dict[str, Any]:
@@ -321,7 +348,7 @@ def _serializable_chain(chain: dict[str, Any], *, root: Path) -> dict[str, Any]:
         path = slot["path"]
         entry: dict[str, Any] = {
             "path": None if path is None else
-            str(Path(path).resolve().relative_to(root)),
+            logical_data_path(path, root=root),
         }
         input_gain_db = slot.get("input_gain_db", SLOT_GAIN_DEFAULT_DB)
         output_gain_db = slot.get("output_gain_db", SLOT_GAIN_DEFAULT_DB)
@@ -335,7 +362,7 @@ def _serializable_chain(chain: dict[str, Any], *, root: Path) -> dict[str, Any]:
             # show BYPASS (with the model name) instead of an empty slot.
             candidate_path = Path(candidate)
             entry["candidate"] = (
-                str(candidate_path.resolve().relative_to(root))
+                logical_data_path(candidate_path, root=root)
                 if candidate_path.is_absolute() else str(candidate_path))
         result["slots"].append(entry)
     # Unknown input fields are readable compatibility data, but canonical
@@ -346,7 +373,7 @@ def _serializable_chain(chain: dict[str, Any], *, root: Path) -> dict[str, Any]:
     }
     result["input"] = input_value
     if input_value["source"] == "file" and input_value["file"]:
-        input_value["file"] = str(Path(input_value["file"]).resolve().relative_to(root))
+        input_value["file"] = logical_data_path(input_value["file"], root=root)
     return result
 
 

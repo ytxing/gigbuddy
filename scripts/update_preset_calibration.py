@@ -25,9 +25,14 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PRESETS_DIR = PROJECT_ROOT / "data" / "presets"
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+import chain_protocol  # noqa: E402
+
+DATA_ROOT = chain_protocol.managed_data_root(PROJECT_ROOT)
+PRESETS_DIR = DATA_ROOT / "presets"
 SHAREABLE_DIR = PROJECT_ROOT / "shareable-presets"
-DB_FILE = PROJECT_ROOT / "data" / "gigbuddy.db"
+DB_FILE = DATA_ROOT / "gigbuddy.db"
 
 SLOT_GAIN_MIN_DB = -24.0
 SLOT_GAIN_MAX_DB = 24.0

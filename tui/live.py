@@ -22,12 +22,13 @@ if str(SRC) not in sys.path:
 import chain_protocol  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-CHAIN_FILE = ROOT / "data" / "live_chain.json"
-LEVEL_FILE = ROOT / "data" / "level.json"
-CONTROL_FILE = ROOT / "data" / "live_control.json"
-CONTROL_REPLY_FILE = ROOT / "data" / "live_control.reply.json"
-TONES_DIR = ROOT / "data" / "tones"
-DRY_INPUTS_DIR = ROOT / "data" / "dry_inputs"
+DATA_ROOT = chain_protocol.managed_data_root(ROOT)
+CHAIN_FILE = DATA_ROOT / "live_chain.json"
+LEVEL_FILE = DATA_ROOT / "level.json"
+CONTROL_FILE = DATA_ROOT / "live_control.json"
+CONTROL_REPLY_FILE = DATA_ROOT / "live_control.reply.json"
+TONES_DIR = DATA_ROOT / "tones"
+DRY_INPUTS_DIR = DATA_ROOT / "dry_inputs"
 
 # 干声输入源（live_chain.json 的 input 键）的播放状态常量（与引擎协议一致）
 PLAY_STOPPED, PLAY_PLAYING, PLAY_PAUSED = "stopped", "playing", "paused"

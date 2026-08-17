@@ -37,8 +37,13 @@ checkout，而无需搬动用户数据。该目录还包含本地索引 `gigbudd
 `GIGBUDDY_DATA_HOME` 与链接不一致，会拒绝删除。使用 `--keep-data` 可以只移除
 代码 checkout 并保留该数据目录。
 
-Pack 放在 `~/.local/share/gigbuddy/tones/` 或源码目录的 `src/` 旁边都不会
-被扫描。GigBuddy 只扫描受管理的 `data/tones/` 根目录。
+旧版本可能在 `~/.local/share/gigbuddy/tones/` 留下一份真实目录。安装器会把它
+迁移到受管理的 `~/.local/share/gigbuddy-data/tones/`（或你配置的数据目录），
+并删除旧目录。目标目录只要已有内容，安装器就会失败并保留两边，不会合并或覆盖。
+未知的遗留符号链接会原样保留，安装器不会跟随它。
+
+迁移后，放在旧路径或源码目录 `src/` 旁边的 Pack 都不会被扫描。GigBuddy 只
+扫描受管理的 `data/tones/` 根目录。
 
 ## 从 TONE3000 远程导入
 
@@ -117,11 +122,11 @@ cp "/path/to/my-v30-cab.wav" data/tones/my-pack/
 默认用户安装：
 
 ```sh
-mkdir -p ~/.local/share/gigbuddy/data/tones/my-pack
+mkdir -p ~/.local/share/gigbuddy-data/tones/my-pack
 cp "/path/to/my-clean-capture.nam" \
-  ~/.local/share/gigbuddy/data/tones/my-pack/
+  ~/.local/share/gigbuddy-data/tones/my-pack/
 cp "/path/to/my-v30-cab.wav" \
-  ~/.local/share/gigbuddy/data/tones/my-pack/
+  ~/.local/share/gigbuddy-data/tones/my-pack/
 ```
 
 也可以直接复制整个 Pack 文件夹。Pack 文件夹本身必须直接位于

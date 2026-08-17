@@ -20,7 +20,7 @@ import tone3000  # noqa: E402
 
 
 def _download_dry_inputs(kind: str) -> bool:
-    destination = ROOT / "data" / "dry_inputs"
+    destination = library.DATA_ROOT / "dry_inputs"
     names = (None if kind == "all"
              else list(tone3000.DRY_INPUT_STARTER_KEYS))
     missing = tone3000.fetch_dry_inputs_missing(destination, names=names)
@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     library.TONES_DIR.mkdir(parents=True, exist_ok=True)
-    (ROOT / "data" / "dry_inputs").mkdir(parents=True, exist_ok=True)
+    (library.DATA_ROOT / "dry_inputs").mkdir(parents=True, exist_ok=True)
     library.connect().close()
     if not library.CHAIN_FILE.exists():
         library.chain_set({"slots": []})

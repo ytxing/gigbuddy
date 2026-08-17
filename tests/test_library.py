@@ -802,6 +802,30 @@ def test_chain_get_set_atomic():
     assert not library.CHAIN_FILE.with_suffix(".json.tmp").exists()  # no leftover tmp
 
 
+def test_external_data_link_uses_logical_paths_for_library_lookup():
+    embedded_data = library.ROOT / "data"
+    external_data = library.ROOT.parent / "gigbuddy-data"
+    embedded_data.rename(external_data)
+    embedded_data.symlink_to(external_data, target_is_directory=True)
+    model = library.TONES_DIR / "external-amp.nam"
+    model.write_bytes(b"amp")
+
+    assert library._to_rel_path(str(model)) == "data/tones/external-amp.nam"
+    assert library._path_forms(str(model)) == (
+        "data/tones/external-amp.nam", str(model.resolve()))
+
+    with library.connect() as conn:
+        library.upsert_tone(conn, {"id": 190, "title": "External", "gear": "amp"})
+        library.upsert_model(conn, {
+            "id": 1901, "tone_id": 190, "model_url": "external",
+            "name": model.name, "architecture": "SlimmableContainer",
+            "local_path": "data/tones/external-amp.nam",
+        })
+
+    rows = library._model_rows_for_path(str(model))
+    assert [row["id"] for row in rows] == [1901]
+
+
 def test_chain_set_rejects_known_unsupported_model():
     model = library.ROOT / "data" / "tones" / "legacy.nam"
     model.write_bytes(b"legacy")
