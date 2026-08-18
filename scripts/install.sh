@@ -30,7 +30,7 @@ usage() {
   cat <<'EOF'
 Options:
   --no-engine         skip NeuralAudio/PortAudio download and C++ build
-  --skip-presets      skip install-time Preset registration and login check
+  --skip-presets      skip install-time Preset registration/model preparation and login check
   --skip-dry-inputs   skip official dry-input downloads
   --starter-dry       download only the ten common starter dry inputs
   -h, --help          show this help
@@ -489,6 +489,7 @@ print_static_banner() {
 INSTALL_LOG="$(mktemp -t gigbuddy-install.XXXXXX)"
 COMMAND_LOG="$(mktemp -t gigbuddy-command.XXXXXX)"
 STATUS_FILE="$(mktemp -t gigbuddy-status.XXXXXX)"
+BOOTSTRAP_WARNING_OUTPUT=""
 
 cleanup() {
   stop_banner
@@ -1174,6 +1175,10 @@ fi
 bootstrap_args=()
 if [[ "$SKIP_PRESETS" == 1 ]]; then
   bootstrap_args+=(--skip-presets)
+else
+  # Model preparation belongs to installation now. Individual remote failures
+  # remain visible as UNAVAILABLE rows and can be retried after launch.
+  bootstrap_args+=(--allow-preset-failures)
 fi
 if [[ "$SKIP_DRY_INPUTS" == 1 ]]; then
   bootstrap_args+=(--skip-dry-inputs)
@@ -1249,13 +1254,20 @@ if [[ "$SKIP_PRESETS" == 1 && "$SKIP_DRY_INPUTS" == 1 ]]; then
 elif [[ "$SKIP_PRESETS" == 1 ]]; then
   step "Downloading dry inputs (this can take a while; please be patient)"
 elif [[ "$SKIP_DRY_INPUTS" == 1 ]]; then
-  step "Registering built-in presets"
+  step "Registering built-in presets and preparing their models"
 else
-  step "Registering built-in presets and downloading dry inputs (this can take a while; please be patient)"
+  step "Preparing built-in presets/models and downloading dry inputs (this can take a while; please be patient)"
 fi
 run_quiet env PYTHONPATH="$INSTALL_ROOT/src" \
   "$INSTALL_ROOT/.venv/bin/python" "$INSTALL_ROOT/scripts/bootstrap.py" \
   "${bootstrap_args[@]}"
+if [[ -s "$COMMAND_LOG" ]]; then
+  case "$(<"$COMMAND_LOG")" in
+    *"Unavailable built-in Presets"*|*"Invalid built-in Presets"*)
+      BOOTSTRAP_WARNING_OUTPUT="$(<"$COMMAND_LOG")"
+      ;;
+  esac
+fi
 
 # 引擎依赖与编译由这个共享实现唯一维护。
 if [[ "$NO_ENGINE" == 0 && -d "$INSTALL_ROOT/cpp" ]]; then
@@ -1331,6 +1343,10 @@ fi
 discard_rollback_state
 ROLLBACK_ARMED=0
 stop_banner
+if [[ -n "$BOOTSTRAP_WARNING_OUTPUT" ]]; then
+  printf '\nPreset preparation report:\n%s\n' \
+    "$BOOTSTRAP_WARNING_OUTPUT" >&2
+fi
 if [[ "$SOURCE_CHECKOUT" == 1 ]]; then
   printf '\nGigBuddy is installed. Try:\n'
   printf '  %s/.venv/bin/python -m tui --no-engine\n' "$INSTALL_ROOT"

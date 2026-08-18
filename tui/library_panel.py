@@ -653,18 +653,29 @@ class LibraryPanel(Vertical):
         self._creator_cache: dict | None = None
         # 排行榜排序键（REQ-029）：tones / downloads / favorites / models。
         self._creator_sort = "tones"
+        self._initial_remote_prefetch_started = False
         # 点击 tab 后焦点落在 tab 条上，Textual 默认 left/right 会切换
         # LOCAL/TONE3000/TOP CREATORS —— 禁掉这个键位，左右只能在表格/
         # 搜索框里操作，防止误操作跳到别的视图。
         self._disable_tab_arrow_keys()
         self._sync_search_bars()
         self.refresh_rows()
-        # REQ-010: 启动即预取默认 TONE3000（trending）与 TOP CREATORS。
+        # REQ-010: 首屏稳定后再预取默认 TONE3000（trending）与 TOP
+        # CREATORS。LibraryPanel 的 on_mount 早于 GigBuddyApp.on_mount；
+        # 如果这里立即启动远程 worker，它可能在 App 建立 LOCAL 初始焦点
+        # 之前执行，网络/数据库回调也会与冷启动布局交错。
+        self.call_after_refresh(self._start_initial_remote_prefetch)
+
+    def _start_initial_remote_prefetch(self) -> None:
+        """Start remote warm-up only after the first LOCAL frame is mounted."""
+        if (self._initial_remote_prefetch_started
+                or not getattr(self, "is_mounted", False)):
+            return
+        self._initial_remote_prefetch_started = True
         # silent 只填缓存与隐藏表格、不碰状态栏/副标题，用户首次进入对应
         # tab 时缓存命中立即显示；之后按需 load more / 手动 r refresh /
         # 搜索新词才发起新请求。
-        # 不用 exclusive：Textual 的 exclusive 取消同 group（default）的
-        # 全部 worker，两个预取会互相取消。用户进入 tab 时 check_active_tab
+        # 不用 exclusive：两个预取必须共存；用户进入 tab 时 check_active_tab
         # 的 reload worker 自带 exclusive，会取消仍在跑的预取。
         self.run_worker(partial(self._reload_tone_table, silent=True),
                         name="search")

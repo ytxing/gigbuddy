@@ -169,13 +169,13 @@ only the requested models, and writes the normal local preset after every model
 is available. Already installed models are reused. Add `--load` to apply the
 new preset to the live Chain, or `--name NAME` to choose a local name.
 
-Built-in Presets are registered from `presets/built-in/*.json` whenever GigBuddy
-opens. Registration is local and does not wait for downloads: each row is shown
-as `PREPARING`, `READY`, or `UNAVAILABLE`, and failed rows remain visible for a
-later retry. The TUI downloads missing models in the background. Loading an
-unavailable built-in Preset, or running `gigbuddy preset bootstrap`, retries the
-required TONE3000 models without writing the live chain until every Slot can be
-resolved.
+Built-in Presets are registered from `presets/built-in/*.json` during installation
+and whenever GigBuddy opens. The installer prepares their missing models before
+the first TUI frame; registration itself remains local and never writes the live
+chain. Each row is shown as `PREPARING`, `READY`, or `UNAVAILABLE`, and failed
+rows remain visible for a later retry. Loading an unavailable built-in Preset, or
+running `gigbuddy preset bootstrap`, retries the required TONE3000 models without
+writing the live chain until every Slot can be resolved.
 
 `gigbuddy preset seed --local-only` performs registration without network I/O.
 The `--replace` option is retained for command-line compatibility but is

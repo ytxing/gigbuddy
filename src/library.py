@@ -3154,13 +3154,32 @@ def preset_seed(*, replace: bool = False, quiet: bool = False) -> int:
     return int(report["total"])
 
 
-def _print_bundled_preset_failures(report: dict[str, object]) -> None:
-    """Name failed built-in Presets in CLI diagnostics."""
+def _bundled_unavailable_presets(report: dict[str, object]) -> list[str]:
     failed_presets = report.get("failed_presets")
-    if isinstance(failed_presets, (list, tuple)) and failed_presets:
+    invalid_presets = report.get("invalid_presets")
+    invalid = set(invalid_presets) if isinstance(
+        invalid_presets, (list, tuple)) else set()
+    if not isinstance(failed_presets, (list, tuple)):
+        return []
+    return [str(name) for name in failed_presets if name not in invalid]
+
+
+def _print_bundled_preset_failures(report: dict[str, object]) -> None:
+    """Name invalid and unavailable built-in Presets in CLI diagnostics."""
+    invalid_presets = report.get("invalid_presets")
+    invalid = set(invalid_presets) if isinstance(
+        invalid_presets, (list, tuple)) else set()
+    if invalid:
         print(
-            f"Unavailable built-in Presets ({len(failed_presets)}): "
-            + ", ".join(str(name) for name in failed_presets),
+            "Invalid built-in Presets: "
+            + ", ".join(sorted(str(name) for name in invalid)),
+            file=sys.stderr,
+        )
+    unavailable = _bundled_unavailable_presets(report)
+    if unavailable:
+        print(
+            f"Unavailable built-in Presets ({len(unavailable)}): "
+            + ", ".join(unavailable),
             file=sys.stderr,
         )
 
@@ -3516,18 +3535,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Built-in Presets: {result['ready']}/{result['total']} ready.")
             if result["failed"]:
                 _print_bundled_preset_failures(result)
-                print("Some built-in models could not be downloaded; "
-                      "load a Preset or run `gigbuddy preset bootstrap` "
-                      "to retry.", file=sys.stderr)
+                if _bundled_unavailable_presets(result):
+                    print("Some built-in models could not be downloaded; "
+                          "load a Preset or run `gigbuddy preset bootstrap` "
+                          "to retry.", file=sys.stderr)
                 return 1
         elif args.preset_cmd == "bootstrap":
             result = sync_bundled_presets(download=True)
             print(f"Built-in Presets: {result['ready']}/{result['total']} ready.")
             if result["failed"]:
                 _print_bundled_preset_failures(result)
-                print("Some built-in models could not be downloaded; "
-                      "run `gigbuddy preset bootstrap` again to retry.",
-                      file=sys.stderr)
+                if _bundled_unavailable_presets(result):
+                    print("Some built-in models could not be downloaded; "
+                          "run `gigbuddy preset bootstrap` again to retry.",
+                          file=sys.stderr)
                 return 1
     return 0
 

@@ -97,6 +97,7 @@ def test_bundled_sync_keeps_unavailable_preset_visible_and_reports_failure(
     assert report == {
         "total": 1, "ready": 0, "preparing": 0, "failed": 1,
         "failed_presets": ["starter"],
+        "invalid_presets": [],
     }
     preset = library.preset_get("starter")
     assert preset["chain"]["slots"] == [
@@ -123,6 +124,7 @@ def test_bundled_registration_does_not_download_or_create_user_files(
     assert report == {
         "total": 1, "ready": 0, "preparing": 1, "failed": 0,
         "failed_presets": [],
+        "invalid_presets": [],
     }
     assert calls == []
     preset = library.preset_get("starter")
@@ -1437,6 +1439,7 @@ def test_bundled_sync_downloads_from_document_tone_identity(
     assert report == {
         "total": 1, "ready": 1, "preparing": 0, "failed": 0,
         "failed_presets": [],
+        "invalid_presets": [],
     }
     assert calls == [(7, (101,), True)]
 

@@ -2446,7 +2446,26 @@ class ChainPanel(Vertical):
                 float(chain.get("gain", live.CHAIN_PARAMETER_DEFAULTS["gain"])),
                 float(chain.get("master", live.CHAIN_PARAMETER_DEFAULTS["master"])),
                 float(chain.get("quality", live.CHAIN_PARAMETER_DEFAULTS["quality"])))
+        self._refresh_input_node()
         self._refresh_hint()
+
+    def _refresh_input_node(self, chain: dict | None = None) -> None:
+        """Rehydrate INPUT after a chain panel recompose or file refresh."""
+        input_node = getattr(self, "input_node", None)
+        if input_node is None:
+            return
+        current = self.state.to_chain() if chain is None else chain
+        inp = live.chain_input(current)
+        if inp.get("source") == "file" and inp.get("file"):
+            input_node.set_file(inp["file"])
+            input_node.set_playback(
+                inp.get("state", live.PLAY_STOPPED),
+                0.0,
+                bool(inp.get("loop")),
+            )
+        else:
+            input_node.set_instrument(
+                getattr(self.app, "_dev_in", "") or "default device")
 
     def reconcile_after_mutation(self, event) -> None:
         """Refresh chain data without moving focus or changing the target."""
@@ -2719,24 +2738,10 @@ class ChainPanel(Vertical):
                 self._schedule_dynamic_recompose(
                     self.state.target_index,
                     focus_state=recompose_focus_state)
-            inp = live.chain_input(chain)
-            if inp.get("source") == "file" and inp.get("file"):
-                self.input_node.set_file(inp["file"])
-                state = inp.get("state", live.PLAY_STOPPED)
-                self.input_node.set_playback(state, 0.0, bool(inp.get("loop")))
-            else:
-                self.input_node.set_instrument(
-                    getattr(self.app, "_dev_in", "") or "default device")
+            self._refresh_input_node(chain)
             self._refresh_dynamic_slots()
             return
-        inp = live.chain_input(chain)
-        if inp.get("source") == "file" and inp.get("file"):
-            self.input_node.set_file(inp["file"])
-            state = inp.get("state", live.PLAY_STOPPED)
-            self.input_node.set_playback(state, 0.0, bool(inp.get("loop")))
-        else:
-            self.input_node.set_instrument(
-                getattr(self.app, "_dev_in", "") or "default device")
+        self._refresh_input_node(chain)
         self._set_node(self.amp, chain.get("model"), empty="NONE")
         self._set_node(self.ir, chain.get("ir"), empty="NONE")
         gain = float(chain.get("gain", live.CHAIN_PARAMETER_DEFAULTS["gain"]))

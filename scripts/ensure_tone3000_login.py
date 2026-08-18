@@ -62,8 +62,8 @@ def ensure_login(*, input_stream: TextIO | None = None,
         print(
             "No interactive terminal is available for TONE3000 login. "
             "Run this installer from a terminal, or pass --skip-presets "
-            "explicitly to skip install-time Preset registration and the "
-            "login check.",
+            "explicitly to skip install-time Preset registration, model "
+            "preparation, and the login check.",
             file=error,
         )
         return NO_INTERACTIVE_TERMINAL

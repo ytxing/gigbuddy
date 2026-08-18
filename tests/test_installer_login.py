@@ -323,9 +323,28 @@ def test_shared_installer_source_mode_leaves_git_and_global_commands_untouched(
     assert not git_capture.exists()
     assert not global_bin.exists()
     assert "Continue with the installation?" not in result.stdout
-    assert bootstrap_capture.read_text(encoding="utf-8").splitlines()[-1:] == [
-        "--skip-dry-inputs",
+    assert bootstrap_capture.read_text(encoding="utf-8").splitlines()[-2:] == [
+        "--allow-preset-failures", "--skip-dry-inputs",
     ]
+
+
+def test_successful_install_surfaces_partial_preset_report(tmp_path):
+    env, fixture, install_root, _bin_dir, _fake_bin = (
+        _prepare_minimal_user_install(tmp_path))
+    (fixture / "scripts" / "bootstrap.py").write_text(
+        "print('Built-in Presets: 19/20 ready.')\n"
+        "print('Unavailable built-in Presets (1): starter', file=__import__('sys').stderr)\n",
+        encoding="utf-8",
+    )
+    env["GIGBUDDY_VERBOSE"] = "0"
+
+    result = _run_minimal_user_install(
+        env, "--skip-presets", "--skip-dry-inputs", "--no-engine")
+
+    assert result.returncode == 0, result.stderr
+    assert "Preset preparation report:" in result.stderr
+    assert "Unavailable built-in Presets (1): starter" in result.stderr
+    assert install_root.exists()
 
 
 def test_shared_installer_does_not_interpolate_paths_into_bash_c():

@@ -2,9 +2,10 @@
 """Prepare a fresh GigBuddy checkout for the v0.2 TUI.
 
 This script owns orchestration only. The library registers the repository's
-built-in Preset catalog; the TUI or an explicit ``gigbuddy preset bootstrap``
-command prepares any missing remote models. ``tone3000`` handles the official
-dry-input downloads.
+built-in Preset catalog and prepares its remote models before the TUI starts.
+``tone3000`` handles the official dry-input downloads. A partial model failure
+is recoverable when the installer passes ``--allow-preset-failures``: the
+catalog remains usable and the affected rows can be retried later.
 """
 from __future__ import annotations
 
@@ -41,7 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--skip-presets", action="store_true",
-        help="do not register the built-in Preset catalog",
+        help="do not register or prepare the built-in Preset catalog",
+    )
+    parser.add_argument(
+        "--allow-preset-failures", action="store_true",
+        help="finish with unavailable Presets when remote preparation is partial",
     )
     parser.add_argument(
         "--skip-dry-inputs", action="store_true",
@@ -61,13 +66,43 @@ def main(argv: list[str] | None = None) -> int:
 
     ok = True
     if not args.skip_presets:
-        result = library.sync_bundled_presets(download=False)
-        if result["failed"]:
+        result = library.sync_bundled_presets(quiet=False, download=True)
+        print(
+            f"Built-in Presets: {result['ready']}/{result['total']} ready."
+        )
+        failed_presets = [
+            str(name) for name in result.get("failed_presets", [])
+        ]
+        invalid_presets = {
+            str(name) for name in result.get("invalid_presets", [])
+        }
+        failed_count = int(result.get("failed", 0))
+        if invalid_presets:
             print(
-                f"Built-in Presets: {result['failed']} invalid document(s)",
+                "Invalid built-in Presets: "
+                + ", ".join(sorted(invalid_presets)),
                 file=sys.stderr,
             )
             ok = False
+        unavailable = [
+            name for name in failed_presets if name not in invalid_presets
+        ]
+        if unavailable:
+            print(
+                f"Unavailable built-in Presets ({len(unavailable)}): "
+                + ", ".join(unavailable),
+                file=sys.stderr,
+            )
+        if failed_count and not invalid_presets:
+            if args.allow_preset_failures:
+                if unavailable:
+                    print(
+                        "Continuing installation; unavailable Presets remain "
+                        "retryable from GigBuddy.",
+                        file=sys.stderr,
+                    )
+            else:
+                ok = False
 
     if not args.skip_dry_inputs:
         try:

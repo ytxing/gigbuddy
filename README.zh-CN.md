@@ -88,8 +88,8 @@ british-green、surf-cream 之间循环。
 ## 主要特性
 
 完整变更见 [v1.2.4 release note](docs/releases/v1.2.4.md)。简单说，20 套已校准
-starter 音色现在以 JSON 随仓库分发；全新安装后立即显示，缺少的 TONE3000
-模型在后台准备。[内置 Preset 使用说明](docs/built-in-presets.zh-CN.md)完整说明
+starter 音色现在以 JSON 随仓库分发；正常安装会在 TUI 打开前准备所需的
+TONE3000 模型。[内置 Preset 使用说明](docs/built-in-presets.zh-CN.md)完整说明
 状态、登录、CLI 重试、编辑规则与故障恢复。LOCAL 与分享文件流程继续见
 [音色文件管理指南](docs/tone-file-management.zh-CN.md)。
 
@@ -121,8 +121,9 @@ Marshall、Ampeg、Gallien-Krueger、Hartke、Darkglass），全部来自高下�
 Boss BD-2 / DS-1 / TB-2w）和法兹链（Big Muff → Marshall Major、Fuzz
 Face → Plexi、ToneBender → Plexi）也带着经典旋钮设置载入 preset 槽；
 可选音色塑形 IR 默认预载但保持关闭，想用随时开。内置 preset 以版本化 JSON
-随仓库分发，启动后立即显示；缺少的模型在后台准备，并显示
-`PREPARING`、`READY` 或 `UNAVAILABLE`。内置 preset 只读，想修改时用
+随仓库分发，正常安装会在 TUI 打开前准备所需模型；如果跳过准备或远程下载
+暂时失败，启动后仍会显示 `UNAVAILABLE`，加载该 preset 时只重试它需要的模型。
+内置 preset 只读，想修改时用
 `Save As` 保存为自己的 preset。完整流程见
 [内置 Preset 使用说明](docs/built-in-presets.zh-CN.md)。
 
@@ -182,15 +183,16 @@ curl -sSL https://raw.githubusercontent.com/ytxing/gigbuddy/v1.2.4/scripts/unins
 .venv/bin/python -m tui
 ```
 
-默认安装会注册内置 preset 目录，并准备 34 个官方 TONE3000 干音 WAV；
-不会等待 20 套 starter preset 所需模型下载。打开 TUI 后会立即显示 preset，
-并在后台准备缺少的模型；加载某个不可用 preset 时只重试它需要的模型。重复运行安全：
-已有数据库记录与非空文件会直接复用。`--starter-dry` 只下载前十个常用吉他样本。
+默认安装会注册内置 preset 目录，准备 20 套 starter preset 所需模型，并下载
+34 个官方 TONE3000 干音 WAV。已有数据库记录与非空文件会直接复用。个别远程
+模型暂时失败不会丢弃整个安装；对应行会保持 `UNAVAILABLE`，之后可以运行
+`gigbuddy preset bootstrap`，或在 TUI 里加载该 preset 重试。若要明确跳过内置
+preset 与模型准备，使用 `--skip-presets`；`--starter-dry` 只下载前十个常用吉他样本。
 
 用户目录安装器也会在 bootstrap 前做同样的登录检查。按 `Y` 或回车会登录，
 按 `n` 可以先完成不含远程模型准备的基础安装；安装器即使自动打开浏览器，
 也会把 OAuth 地址打印出来。之后运行 `gigbuddy tone login`，再打开 TUI 或加载
-某个内置 preset 即可重试；需要一次准备全部内置模型时，再运行
+某个内置 preset 即可重试；需要一次准备全部内置模型时，运行
 `gigbuddy preset bootstrap`。没有交互终端时，安装器会明确停止，不会静默跳过
 登录检查；自动化安装若确定要跳过首次 preset 登记，必须显式运行：
 
@@ -368,8 +370,9 @@ PKCE 流程登录自己的 TONE3000 账号；应用不需要服务器 Secret Key
 - 请求使用 Bearer Token，登录过期时刷新会话；请求之间至少间隔 0.6 秒，
   对应官方默认的每分钟 100 次限制，服务返回 HTTP 429 时遵守
   `Retry-After`；
-- 远程列表使用有界分页；模型文件只在用户明确导入、从 Slot 选择，或为仓库
-  随附的 20 套内置 preset 做启动后的后台准备时下载，不会后台镜像整个目录；
+- 远程列表使用有界分页；模型文件只在用户明确导入、从 Slot 选择，或在安装时
+  准备仓库随附的 20 套内置 preset 时下载；安装后只对失败的 preset 定向重试，
+  不会后台镜像整个目录；
 - 本地库保留创作者名称、音色元数据和来源平台，下载文件仍受创作者选择的
   许可约束；
 - 桌面客户端不会替用户代理、汇聚或向其他用户发布某个 TONE3000 账号的

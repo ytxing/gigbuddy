@@ -10,12 +10,14 @@ semantics). Undo/redo restores that domain from a snapshot stack:
 - empty stacks do nothing (a notify only).
 """
 import asyncio
+from copy import deepcopy
 from types import SimpleNamespace
 
 import library
 import library as lib
 from tui import live
 from tui.app import GigBuddyApp
+from tui.chain_state import CommitReceipt, PreparedCommit
 
 
 def run(coro):
@@ -221,6 +223,86 @@ def test_undo_keeps_input_source(monkeypatch, tmp_path):
             assert cfg["input"]["file"].endswith("dry.wav")
             # 链配置域已恢复 A，input 未动
             assert cfg["slots"][0]["path"].endswith("amp-a.nam")
+    run(scenario())
+
+
+def test_managed_preset_switch_keeps_playing_dry_input(
+        monkeypatch, tmp_path):
+    """Switching a Preset must not reset a playing dry-file input."""
+    _make_env(monkeypatch, tmp_path)
+    _seed_presets(tmp_path)
+    tones = tmp_path / "data" / "tones"
+    dry = tmp_path / "data" / "dry_inputs" / "dry.wav"
+    live.write_chain({
+        "slots": [{"path": str(tones / "amp-a.nam")}],
+        "gain": 1.0,
+        "master": 0.8,
+        "quality": 1.0,
+        "revision": 4,
+        "input": {
+            "source": "file",
+            "file": str(dry),
+            "state": live.PLAY_PLAYING,
+            "loop": True,
+        },
+    }, revision=4)
+
+    class FakeManagedAdapter:
+        def __init__(self, _app, *, expected_chain=None):
+            self._base_fingerprint = live.chain_file_fingerprint()
+            self._base_revision = expected_chain.get("revision", 0)
+
+        def snapshot_runtime(self):
+            return ({}, None)
+
+        def prepare(self, candidate):
+            prepared = deepcopy(candidate)
+            revision = self._base_revision + 1
+            prepared["revision"] = revision
+            return PreparedCommit(prepared, {}, revision)
+
+        def write_file(self, candidate):
+            persisted = live.write_chain(
+                candidate,
+                expected_fingerprint=self._base_fingerprint,
+                expected_revision=self._base_revision,
+                revision=candidate["revision"],
+            )
+            return CommitReceipt(
+                live.chain_file_fingerprint(), persisted["revision"])
+
+        def apply_runtime(self, _prepared):
+            return None
+
+        def restore_file(self, _chain):
+            return None
+
+        def restore_runtime(self, _snapshot):
+            return None
+
+    monkeypatch.setattr("tui.app._ManagedChainAdapter", FakeManagedAdapter)
+
+    async def scenario():
+        app = GigBuddyApp(spawn_engine=False)
+        app._managed_engine_active = lambda: True
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            app._apply_preset("preset-b")
+            await pilot.pause(0.3)
+
+            cfg = live.read_chain()
+            assert cfg["input"] == {
+                "source": "file",
+                "file": str(dry),
+                "state": live.PLAY_PLAYING,
+                "loop": True,
+            }
+            panel = app.query_one("ChainPanel")
+            assert panel.state.to_chain()["input"] == cfg["input"]
+            assert panel.input_node.is_file is True
+            assert panel.input_node.play_state == live.PLAY_PLAYING
+            assert panel.input_node.play_loop is True
+
     run(scenario())
 
 

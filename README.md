@@ -90,9 +90,10 @@ See the [panel-by-panel guide](https://github.com/ytxing/gigbuddy/blob/main/docs
 
 The full change list is in the [v1.2.4 release note](docs/releases/v1.2.4.md).
 The short version: the 20 calibrated starter rigs now ship as repository JSON,
-appear immediately on a fresh install, and prepare missing TONE3000 models in
-the background. The [built-in Preset guide](docs/built-in-presets.md) covers
-availability states, login, CLI retries, editing rules, and recovery behavior.
+appear immediately on a fresh install, and have their required TONE3000 models
+prepared before the TUI opens. The [built-in Preset guide](docs/built-in-presets.md)
+covers availability states, login, CLI retries, editing rules, and recovery
+behavior.
 LOCAL and shareable-file workflows remain documented in the
 [tone file management guide](docs/tone-file-management.md).
 
@@ -127,11 +128,12 @@ GigBuddy turns the original tone-chain console into a complete tone workbench:
   curated guitar and bass chains — brand + model + cabinet naming (Fender,
   Vox, Marshall, Ampeg, Gallien-Krueger, Hartke, Darkglass), chosen from
   high-download and verified-author captures.
-- **Ready without a bootstrap download:** those built-in Presets are shipped as
-  versioned JSON in the repository. GigBuddy lists them immediately, prepares
-  missing models in the background, shows `PREPARING`, `READY`, or
-  `UNAVAILABLE`, and retries only the selected Preset when you load it. Built-in
-  rows are read-only; use **Save As** to make an editable copy. See the
+- **Presets ready before first launch:** those built-in Presets are shipped as
+  versioned JSON in the repository, and the normal installer prepares every
+  required model before opening the TUI. If you skip Preset preparation or a
+  remote download is temporarily unavailable, GigBuddy still lists the rows as
+  `UNAVAILABLE` and retries the affected Preset on load. Built-in rows are
+  read-only; use **Save As** to make an editable copy. See the
   [built-in Preset guide](docs/built-in-presets.md) for the full workflow.
 - **Pedals and fuzz built into presets:** classic drive pedals (Ibanez TS9 /
   TS808, JHS Morning Glory, Boss BD-2 / DS-1 / TB-2w) and fuzz chains
@@ -208,22 +210,23 @@ From a fresh checkout:
 .venv/bin/python -m tui
 ```
 
-The default install registers the built-in Preset catalog and prepares all 34
-official TONE3000 dry-input WAV files. It does not block installation on the
-models required by the 20 starter Presets: when the TUI opens, it lists the
-catalog immediately and prepares missing models in a background worker. Loading
-one unavailable Preset retries only that Preset's models. Existing database
-rows and non-empty files are reused. `--starter-dry` keeps the first dry-input
-download to ten common guitar samples.
+The default install registers the built-in Preset catalog, prepares the models
+required by all 20 starter Presets, and downloads all 34 official TONE3000
+dry-input WAV files. Existing database rows and non-empty files are reused. A
+transient failure for one or more remote models does not discard the install:
+the affected rows remain `UNAVAILABLE` and can be retried with
+`gigbuddy preset bootstrap` or by loading that Preset in the TUI. Use
+`--skip-presets` to intentionally omit the catalog and its model preparation;
+`--starter-dry` keeps the first dry-input download to ten common guitar samples.
 
 The user-level installer performs the same login check before its bootstrap.
 Press `Y` or Enter to sign in, or `n` to continue without remote model access; the
 installer prints the OAuth URL even when it opens the browser automatically.
 When no interactive terminal is available, the installer stops instead of
 silently skipping the check; pass `bash -s -- --skip-presets` explicitly when
-installing without the initial Preset registration. After logging in later,
-open the TUI or load a built-in Preset; use `gigbuddy preset bootstrap` only
-when you want to retry every built-in model download from the CLI.
+installing without the initial Preset registration and model preparation. After
+logging in later, open the TUI or run `gigbuddy preset bootstrap` to retry every
+missing built-in model from the CLI.
 
 To inspect the interface without an audio backend, launch with:
 
@@ -425,7 +428,8 @@ and [API Terms](https://www.tone3000.com/api/terms):
   HTTP 429;
 - remote pages are bounded, and model files are downloaded only as part of an
   explicit import, Slot selection, or preparation of the 20 built-in Presets
-  started after launch; GigBuddy never mirrors the whole catalog;
+  during installation (with a targeted retry after launch when needed);
+  GigBuddy never mirrors the whole catalog;
 - creator names, tone metadata, and the source platform remain visible in the
   local library; creator-selected licenses still apply to every downloaded
   file;

@@ -44,6 +44,7 @@ class PreparationReport:
     preparing: int = 0
     failed: int = 0
     failed_presets: tuple[str, ...] = ()
+    invalid_presets: tuple[str, ...] = ()
 
 
 class ModelPreparation:
@@ -285,6 +286,7 @@ class ModelPreparation:
                     self._state_generations.pop(state_key, None)
 
             preparing: list[str] = []
+            invalid_names = sorted(set(invalid_names))
             failed_names = list(invalid_names)
             ready = 0
             for entry in current_selected:
@@ -330,6 +332,7 @@ class ModelPreparation:
                 preparing=len(set(preparing)),
                 failed=len(failed_names),
                 failed_presets=tuple(failed_names),
+                invalid_presets=tuple(invalid_names),
             )
 
     def _download_models(

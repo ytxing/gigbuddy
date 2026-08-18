@@ -125,6 +125,7 @@ class SyncReport:
     preparing: int = 0
     failed: int = 0
     failed_presets: tuple[str, ...] = ()
+    invalid_presets: tuple[str, ...] = ()
 
     def as_legacy_dict(self) -> dict[str, object]:
         return {
@@ -133,6 +134,7 @@ class SyncReport:
             "preparing": self.preparing,
             "failed": self.failed,
             "failed_presets": list(self.failed_presets),
+            "invalid_presets": list(self.invalid_presets),
         }
 
 
@@ -520,6 +522,7 @@ class PresetCatalog:
             preparing=prepared.preparing,
             failed=prepared.failed,
             failed_presets=prepared.failed_presets,
+            invalid_presets=prepared.invalid_presets,
         )
 
     def _decorate(self, preset: dict | None) -> dict | None:

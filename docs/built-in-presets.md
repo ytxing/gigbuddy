@@ -41,21 +41,29 @@ from the NAM loudness metadata and is kept when the model is downloaded.
 
 ## Startup Behavior
 
-On launch, GigBuddy performs a fast local registration pass:
+During a normal installation, `scripts/bootstrap.py` performs the remote model
+preparation before the TUI opens. On launch, GigBuddy then performs a fast local
+registration pass:
 
 1. It reads the repository documents and registers their names and chain data
    in the local SQLite index.
-2. It immediately displays the built-in rows in **PRESETS**. No model download
-   or live-chain write occurs during this pass.
-3. A background worker groups missing model IDs by their parent TONE3000 Tone
-   and downloads them without blocking the TUI.
-4. The row state changes as the local files become usable.
+2. The installer groups missing model IDs by their parent TONE3000 Tone and
+   downloads them through the normal verified import path.
+3. It immediately displays the built-in rows in **PRESETS**. Registration never
+   writes the live chain.
+4. If installation was run with `--skip-presets`, or a remote download failed,
+   the TUI keeps the affected row `UNAVAILABLE` and retries only that Preset
+   when it is loaded.
+
+Malformed or internally inconsistent bundled JSON is different from a remote
+failure: the installer reports it as an error and does not claim the catalog is
+ready.
 
 The state column means:
 
 | State | Meaning |
 |---|---|
-| `PREPARING` | The background worker is downloading one or more required models. |
+| `PREPARING` | A targeted retry is downloading one or more required models. |
 | `READY` | Every model required by the Preset is available locally. |
 | `UNAVAILABLE` | A download failed, login is missing, or a required model could not be resolved. |
 | `USER` | The row is an editable Preset created by the user. |
@@ -68,10 +76,10 @@ row applies the chain through the normal managed-chain path.
 ## Login and Installation
 
 The install scripts still perform the TONE3000 login check and can open the
-system browser. The installer only registers the bundled catalog; it does not
-wait for the model downloads required by all 20 starter Presets. If the user
-declines login, the catalog still appears, while remote-backed rows remain
-`UNAVAILABLE` until the user signs in with:
+system browser. The normal installer registers the bundled catalog and waits for
+the model preparation required by all 20 starter Presets before reporting the
+install ready. If the user declines login, the catalog still appears, while
+remote-backed rows remain `UNAVAILABLE` until the user signs in with:
 
 ```sh
 gigbuddy tone login
